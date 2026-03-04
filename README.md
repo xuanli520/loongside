@@ -65,7 +65,7 @@ The repository is intentionally test-first for architecture safety:
 Current status:
 
 - `kernel` tests: 39 passing unit tests
-- `daemon` tests: 37 passing unit tests
+- `daemon` tests: 39 passing unit tests
 - `daemon` smoke: command-level demo + spec runner execution verified
 
 Roadmap:
