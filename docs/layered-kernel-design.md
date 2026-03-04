@@ -46,6 +46,8 @@ Rules:
   temporary overlays to avoid hardcoded policy drift.
 - Plugin security scan must support a hard gate (`block_on_high`) and structured evidence output
   so risky community plugins never silently enter the runtime catalog.
+- External security scan profiles should support optional checksum pinning
+  (`security_scan.profile_sha256`) so profile tampering fails closed.
 - Security scan evaluation must be emitted as a typed audit event (`SecurityScanEvaluated`) so
   governance systems can consume findings without parsing ad-hoc report text.
 - WASM plugin path should be treated as the preferred untrusted-extension lane, with static checks

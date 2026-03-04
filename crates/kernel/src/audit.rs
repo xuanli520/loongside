@@ -61,6 +61,7 @@ pub enum AuditEventKind {
         blocked: bool,
         block_reason: Option<String>,
         categories: Vec<String>,
+        finding_ids: Vec<String>,
     },
     AuthorizationDenied {
         pack_id: String,

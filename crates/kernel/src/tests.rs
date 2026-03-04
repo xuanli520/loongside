@@ -716,6 +716,10 @@ fn record_audit_event_supports_security_scan_summary() {
                     "process_command_not_allowlisted".to_owned(),
                     "wasm_import_prefix_blocked".to_owned(),
                 ],
+                finding_ids: vec![
+                    "sf-1111111111111111".to_owned(),
+                    "sf-2222222222222222".to_owned(),
+                ],
             },
         )
         .expect("custom audit event should record");

@@ -372,6 +372,8 @@ struct SecurityScanSpec {
     #[serde(default)]
     profile_path: Option<String>,
     #[serde(default)]
+    profile_sha256: Option<String>,
+    #[serde(default)]
     high_risk_metadata_keywords: Vec<String>,
     #[serde(default)]
     wasm: WasmSecurityScanSpec,
@@ -383,6 +385,7 @@ impl Default for SecurityScanSpec {
             enabled: false,
             block_on_high: true,
             profile_path: None,
+            profile_sha256: None,
             high_risk_metadata_keywords: Vec::new(),
             wasm: WasmSecurityScanSpec::default(),
         }
@@ -439,6 +442,7 @@ enum SecurityFindingSeverity {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SecurityFinding {
+    correlation_id: String,
     severity: SecurityFindingSeverity,
     category: String,
     plugin_id: String,
@@ -1580,7 +1584,16 @@ async fn execute_spec(spec: RunnerSpec, include_audit: bool) -> SpecRunReport {
     let mut plugin_bootstrap_reports = Vec::new();
     let mut plugin_bootstrap_queue = Vec::new();
     let mut plugin_absorb_reports = Vec::new();
-    let security_scan_policy = security_scan_policy(&spec);
+    let security_scan_policy = match security_scan_policy(&spec) {
+        Ok(policy) => policy,
+        Err(error) => {
+            blocked_reason = Some(match blocked_reason {
+                Some(existing) => format!("{existing}; {error}"),
+                None => error,
+            });
+            None
+        }
+    };
     let security_process_allowlist = security_scan_process_allowlist(&spec);
     let mut security_scan_report = security_scan_policy
         .as_ref()
@@ -1922,18 +1935,21 @@ struct SecurityScanDelta {
     block_reason: Option<String>,
 }
 
-fn security_scan_policy(spec: &RunnerSpec) -> Option<SecurityScanSpec> {
-    let mut policy = spec
+fn security_scan_policy(spec: &RunnerSpec) -> Result<Option<SecurityScanSpec>, String> {
+    let Some(mut policy) = spec
         .bridge_support
         .as_ref()
         .filter(|bridge| bridge.enabled)
-        .and_then(|bridge| bridge.security_scan.clone())?;
+        .and_then(|bridge| bridge.security_scan.clone())
+    else {
+        return Ok(None);
+    };
 
     if !policy.enabled {
-        return None;
+        return Ok(None);
     }
 
-    let profile = resolve_security_scan_profile(&policy);
+    let profile = resolve_security_scan_profile(&policy)?;
 
     if policy.high_risk_metadata_keywords.is_empty() {
         policy.high_risk_metadata_keywords = profile.high_risk_metadata_keywords;
@@ -1955,20 +1971,47 @@ fn security_scan_policy(spec: &RunnerSpec) -> Option<SecurityScanSpec> {
         policy.wasm.required_sha256_by_plugin = profile.wasm.required_sha256_by_plugin;
     }
 
-    Some(policy)
+    Ok(Some(policy))
 }
 
-fn resolve_security_scan_profile(policy: &SecurityScanSpec) -> SecurityScanProfile {
-    policy
-        .profile_path
-        .as_deref()
-        .and_then(load_security_scan_profile_from_path)
-        .unwrap_or_else(bundled_security_scan_profile)
+fn resolve_security_scan_profile(policy: &SecurityScanSpec) -> Result<SecurityScanProfile, String> {
+    if policy.profile_sha256.is_some() && policy.profile_path.is_none() {
+        return Err(
+            "security scan profile_sha256 requires security_scan.profile_path to be set".to_owned(),
+        );
+    }
+
+    if let Some(path) = policy.profile_path.as_deref() {
+        let profile = load_security_scan_profile_from_path(path);
+        match profile {
+            Ok(profile) => {
+                if let Some(expected_sha256) = policy.profile_sha256.as_deref() {
+                    let actual_sha256 = security_scan_profile_sha256(&profile);
+                    if !expected_sha256.eq_ignore_ascii_case(&actual_sha256) {
+                        return Err(format!(
+                            "security scan profile sha256 mismatch for {path}: expected {expected_sha256}, actual {actual_sha256}",
+                        ));
+                    }
+                }
+                return Ok(profile);
+            }
+            Err(error) if policy.profile_sha256.is_some() => {
+                return Err(format!(
+                    "failed to load security scan profile at {path} while profile_sha256 is pinned: {error}",
+                ));
+            }
+            Err(_) => {}
+        }
+    }
+
+    Ok(bundled_security_scan_profile())
 }
 
-fn load_security_scan_profile_from_path(path: &str) -> Option<SecurityScanProfile> {
-    let content = fs::read_to_string(path).ok()?;
-    serde_json::from_str::<SecurityScanProfile>(&content).ok()
+fn load_security_scan_profile_from_path(path: &str) -> Result<SecurityScanProfile, String> {
+    let content =
+        fs::read_to_string(path).map_err(|error| format!("read profile failed: {error}"))?;
+    serde_json::from_str::<SecurityScanProfile>(&content)
+        .map_err(|error| format!("parse profile failed: {error}"))
 }
 
 fn bundled_security_scan_profile() -> SecurityScanProfile {
@@ -2030,6 +2073,13 @@ fn emit_security_scan_audit_event(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
+    let finding_ids: Vec<String> = report
+        .findings
+        .iter()
+        .map(|finding| finding.correlation_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
 
     kernel
         .record_audit_event(
@@ -2044,9 +2094,65 @@ fn emit_security_scan_audit_event(
                 blocked: report.blocked,
                 block_reason: report.block_reason.clone(),
                 categories,
+                finding_ids,
             },
         )
         .map_err(|error| format!("failed to record security scan audit event: {error}"))
+}
+
+fn build_security_finding(
+    severity: SecurityFindingSeverity,
+    category: impl Into<String>,
+    plugin_id: impl Into<String>,
+    source_path: impl Into<String>,
+    message: impl Into<String>,
+    evidence: Value,
+) -> SecurityFinding {
+    let category = category.into();
+    let plugin_id = plugin_id.into();
+    let source_path = source_path.into();
+    let message = message.into();
+    let correlation_id = security_finding_correlation_id(
+        &severity,
+        &category,
+        &plugin_id,
+        &source_path,
+        &message,
+        &evidence,
+    );
+
+    SecurityFinding {
+        correlation_id,
+        severity,
+        category,
+        plugin_id,
+        source_path,
+        message,
+        evidence,
+    }
+}
+
+fn security_finding_correlation_id(
+    severity: &SecurityFindingSeverity,
+    category: &str,
+    plugin_id: &str,
+    source_path: &str,
+    message: &str,
+    evidence: &Value,
+) -> String {
+    let canonical = json!({
+        "severity": severity,
+        "category": category,
+        "plugin_id": plugin_id,
+        "source_path": source_path,
+        "message": message,
+        "evidence": evidence,
+    });
+    let payload =
+        serde_json::to_vec(&canonical).expect("serialize security finding correlation payload");
+    let digest = Sha256::digest(&payload);
+    let full = hex_lower(&digest);
+    format!("sf-{}", &full[..16])
 }
 
 fn evaluate_plugin_security_scan(
@@ -2072,18 +2178,17 @@ fn evaluate_plugin_security_scan(
                 accumulate_security_findings(&mut delta, findings);
             }
             PluginBridgeKind::NativeFfi => {
-                let finding = SecurityFinding {
-                    severity: SecurityFindingSeverity::Medium,
-                    category: "native_ffi_review".to_owned(),
-                    plugin_id: descriptor.manifest.plugin_id.clone(),
-                    source_path: descriptor.path.clone(),
-                    message: "native_ffi plugin requires manual review and stronger sandboxing"
-                        .to_owned(),
-                    evidence: json!({
+                let finding = build_security_finding(
+                    SecurityFindingSeverity::Medium,
+                    "native_ffi_review",
+                    descriptor.manifest.plugin_id.clone(),
+                    descriptor.path.clone(),
+                    "native_ffi plugin requires manual review and stronger sandboxing",
+                    json!({
                         "bridge_kind": bridge_kind.as_str(),
                         "recommendation": "prefer wasm_component for untrusted community plugins",
                     }),
-                };
+                );
                 accumulate_security_findings(&mut delta, vec![finding]);
             }
             PluginBridgeKind::WasmComponent if policy.wasm.enabled => {
@@ -2147,16 +2252,18 @@ fn scan_descriptor_metadata_keywords(
     keywords
         .iter()
         .filter(|keyword| haystack.contains(keyword.as_str()))
-        .map(|keyword| SecurityFinding {
-            severity: SecurityFindingSeverity::Medium,
-            category: "metadata_keyword".to_owned(),
-            plugin_id: descriptor.manifest.plugin_id.clone(),
-            source_path: descriptor.path.clone(),
-            message: format!("metadata contains high-risk keyword: {keyword}"),
-            evidence: json!({
-                "keyword": keyword,
-                "metadata": descriptor.manifest.metadata.clone(),
-            }),
+        .map(|keyword| {
+            build_security_finding(
+                SecurityFindingSeverity::Medium,
+                "metadata_keyword",
+                descriptor.manifest.plugin_id.clone(),
+                descriptor.path.clone(),
+                format!("metadata contains high-risk keyword: {keyword}"),
+                json!({
+                    "keyword": keyword,
+                    "metadata": descriptor.manifest.metadata.clone(),
+                }),
+            )
         })
         .collect()
 }
@@ -2171,29 +2278,29 @@ fn scan_process_stdio_security(
     match command {
         Some(command) => {
             if !is_process_command_allowed(&command, process_allowlist) {
-                findings.push(SecurityFinding {
-                    severity: SecurityFindingSeverity::High,
-                    category: "process_command_not_allowlisted".to_owned(),
-                    plugin_id: descriptor.manifest.plugin_id.clone(),
-                    source_path: descriptor.path.clone(),
-                    message: format!("process_stdio command {command} is not in runtime allowlist"),
-                    evidence: json!({
+                findings.push(build_security_finding(
+                    SecurityFindingSeverity::High,
+                    "process_command_not_allowlisted",
+                    descriptor.manifest.plugin_id.clone(),
+                    descriptor.path.clone(),
+                    format!("process_stdio command {command} is not in runtime allowlist"),
+                    json!({
                         "command": command,
                         "allowlist": process_allowlist,
                     }),
-                });
+                ));
             }
         }
-        None => findings.push(SecurityFinding {
-            severity: SecurityFindingSeverity::Medium,
-            category: "process_command_missing".to_owned(),
-            plugin_id: descriptor.manifest.plugin_id.clone(),
-            source_path: descriptor.path.clone(),
-            message: "process_stdio plugin does not declare metadata.command".to_owned(),
-            evidence: json!({
+        None => findings.push(build_security_finding(
+            SecurityFindingSeverity::Medium,
+            "process_command_missing",
+            descriptor.manifest.plugin_id.clone(),
+            descriptor.path.clone(),
+            "process_stdio plugin does not declare metadata.command",
+            json!({
                 "recommendation": "declare a fixed command and keep bridge allowlist strict",
             }),
-        }),
+        )),
     }
 
     findings
@@ -2208,29 +2315,28 @@ fn scan_wasm_plugin_security(
     let mut findings = Vec::new();
     let artifact = descriptor_wasm_artifact(descriptor);
     let Some(raw_artifact) = artifact else {
-        findings.push(SecurityFinding {
-            severity: SecurityFindingSeverity::High,
-            category: "wasm_artifact_missing".to_owned(),
-            plugin_id: descriptor.manifest.plugin_id.clone(),
-            source_path: descriptor.path.clone(),
-            message: "wasm plugin does not declare metadata.component/metadata.wasm_path/endpoint artifact".to_owned(),
-            evidence: json!({}),
-        });
+        findings.push(build_security_finding(
+            SecurityFindingSeverity::High,
+            "wasm_artifact_missing",
+            descriptor.manifest.plugin_id.clone(),
+            descriptor.path.clone(),
+            "wasm plugin does not declare metadata.component/metadata.wasm_path/endpoint artifact",
+            json!({}),
+        ));
         return findings;
     };
 
     if raw_artifact.starts_with("http://") || raw_artifact.starts_with("https://") {
-        findings.push(SecurityFinding {
-            severity: SecurityFindingSeverity::High,
-            category: "wasm_remote_artifact".to_owned(),
-            plugin_id: descriptor.manifest.plugin_id.clone(),
-            source_path: descriptor.path.clone(),
-            message: "remote wasm artifact cannot be statically verified for local hotplug safety"
-                .to_owned(),
-            evidence: json!({
+        findings.push(build_security_finding(
+            SecurityFindingSeverity::High,
+            "wasm_remote_artifact",
+            descriptor.manifest.plugin_id.clone(),
+            descriptor.path.clone(),
+            "remote wasm artifact cannot be statically verified for local hotplug safety",
+            json!({
                 "artifact": raw_artifact,
             }),
-        });
+        ));
         return findings;
     }
 
@@ -2241,71 +2347,71 @@ fn scan_wasm_plugin_security(
             .iter()
             .any(|prefix| normalized_artifact_path.starts_with(prefix))
     {
-        findings.push(SecurityFinding {
-            severity: SecurityFindingSeverity::High,
-            category: "wasm_artifact_path_not_allowed".to_owned(),
-            plugin_id: descriptor.manifest.plugin_id.clone(),
-            source_path: descriptor.path.clone(),
-            message: "wasm artifact path is outside allowed_path_prefixes".to_owned(),
-            evidence: json!({
+        findings.push(build_security_finding(
+            SecurityFindingSeverity::High,
+            "wasm_artifact_path_not_allowed",
+            descriptor.manifest.plugin_id.clone(),
+            descriptor.path.clone(),
+            "wasm artifact path is outside allowed_path_prefixes",
+            json!({
                 "artifact_path": normalized_artifact_path.display().to_string(),
                 "allowed_path_prefixes": allowed_path_prefixes
                     .iter()
                     .map(|prefix| prefix.display().to_string())
                     .collect::<Vec<_>>(),
             }),
-        });
+        ));
         return findings;
     }
 
     let bytes = match fs::read(&normalized_artifact_path) {
         Ok(bytes) => bytes,
         Err(error) => {
-            findings.push(SecurityFinding {
-                severity: SecurityFindingSeverity::High,
-                category: "wasm_artifact_unreadable".to_owned(),
-                plugin_id: descriptor.manifest.plugin_id.clone(),
-                source_path: descriptor.path.clone(),
-                message: "wasm artifact cannot be read from filesystem".to_owned(),
-                evidence: json!({
+            findings.push(build_security_finding(
+                SecurityFindingSeverity::High,
+                "wasm_artifact_unreadable",
+                descriptor.manifest.plugin_id.clone(),
+                descriptor.path.clone(),
+                "wasm artifact cannot be read from filesystem",
+                json!({
                     "artifact_path": normalized_artifact_path.display().to_string(),
                     "error": error.to_string(),
                 }),
-            });
+            ));
             return findings;
         }
     };
 
     if bytes.len() > policy.max_module_bytes {
-        findings.push(SecurityFinding {
-            severity: SecurityFindingSeverity::High,
-            category: "wasm_module_too_large".to_owned(),
-            plugin_id: descriptor.manifest.plugin_id.clone(),
-            source_path: descriptor.path.clone(),
-            message: format!(
+        findings.push(build_security_finding(
+            SecurityFindingSeverity::High,
+            "wasm_module_too_large",
+            descriptor.manifest.plugin_id.clone(),
+            descriptor.path.clone(),
+            format!(
                 "wasm module size {} exceeds max_module_bytes {}",
                 bytes.len(),
                 policy.max_module_bytes
             ),
-            evidence: json!({
+            json!({
                 "artifact_path": normalized_artifact_path.display().to_string(),
                 "module_size_bytes": bytes.len(),
                 "max_module_bytes": policy.max_module_bytes,
             }),
-        });
+        ));
     }
 
     if !bytes.starts_with(&[0x00, 0x61, 0x73, 0x6d]) {
-        findings.push(SecurityFinding {
-            severity: SecurityFindingSeverity::High,
-            category: "wasm_magic_header_invalid".to_owned(),
-            plugin_id: descriptor.manifest.plugin_id.clone(),
-            source_path: descriptor.path.clone(),
-            message: "artifact does not contain valid wasm magic header".to_owned(),
-            evidence: json!({
+        findings.push(build_security_finding(
+            SecurityFindingSeverity::High,
+            "wasm_magic_header_invalid",
+            descriptor.manifest.plugin_id.clone(),
+            descriptor.path.clone(),
+            "artifact does not contain valid wasm magic header",
+            json!({
                 "artifact_path": normalized_artifact_path.display().to_string(),
             }),
-        });
+        ));
         return findings;
     }
 
@@ -2317,45 +2423,45 @@ fn scan_wasm_plugin_security(
         .get(&descriptor.manifest.plugin_id)
     {
         if !expected.eq_ignore_ascii_case(&digest_hex) {
-            findings.push(SecurityFinding {
-                severity: SecurityFindingSeverity::High,
-                category: "wasm_sha256_mismatch".to_owned(),
-                plugin_id: descriptor.manifest.plugin_id.clone(),
-                source_path: descriptor.path.clone(),
-                message: "wasm sha256 does not match required pin".to_owned(),
-                evidence: json!({
+            findings.push(build_security_finding(
+                SecurityFindingSeverity::High,
+                "wasm_sha256_mismatch",
+                descriptor.manifest.plugin_id.clone(),
+                descriptor.path.clone(),
+                "wasm sha256 does not match required pin",
+                json!({
                     "expected_sha256": expected,
                     "actual_sha256": digest_hex,
                 }),
-            });
+            ));
         }
     } else if policy.require_hash_pin {
-        findings.push(SecurityFinding {
-            severity: SecurityFindingSeverity::High,
-            category: "wasm_sha256_pin_missing".to_owned(),
-            plugin_id: descriptor.manifest.plugin_id.clone(),
-            source_path: descriptor.path.clone(),
-            message: "wasm hash pin is required but missing for plugin".to_owned(),
-            evidence: json!({
+        findings.push(build_security_finding(
+            SecurityFindingSeverity::High,
+            "wasm_sha256_pin_missing",
+            descriptor.manifest.plugin_id.clone(),
+            descriptor.path.clone(),
+            "wasm hash pin is required but missing for plugin",
+            json!({
                 "required_sha256_by_plugin": policy.required_sha256_by_plugin,
             }),
-        });
+        ));
     }
 
     let imports = match parse_wasm_import_modules(&bytes) {
         Ok(imports) => imports,
         Err(error) => {
-            findings.push(SecurityFinding {
-                severity: SecurityFindingSeverity::High,
-                category: "wasm_parse_failed".to_owned(),
-                plugin_id: descriptor.manifest.plugin_id.clone(),
-                source_path: descriptor.path.clone(),
-                message: "wasm parser failed while reading module imports".to_owned(),
-                evidence: json!({
+            findings.push(build_security_finding(
+                SecurityFindingSeverity::High,
+                "wasm_parse_failed",
+                descriptor.manifest.plugin_id.clone(),
+                descriptor.path.clone(),
+                "wasm parser failed while reading module imports",
+                json!({
                     "artifact_path": normalized_artifact_path.display().to_string(),
                     "error": error,
                 }),
-            });
+            ));
             return findings;
         }
     };
@@ -2363,47 +2469,47 @@ fn scan_wasm_plugin_security(
     for module_name in &imports {
         let module_name_lower = module_name.to_ascii_lowercase();
         if !policy.allow_wasi && module_name_lower.starts_with("wasi") {
-            findings.push(SecurityFinding {
-                severity: SecurityFindingSeverity::High,
-                category: "wasm_wasi_import_blocked".to_owned(),
-                plugin_id: descriptor.manifest.plugin_id.clone(),
-                source_path: descriptor.path.clone(),
-                message: "wasi import is blocked by wasm security policy".to_owned(),
-                evidence: json!({
+            findings.push(build_security_finding(
+                SecurityFindingSeverity::High,
+                "wasm_wasi_import_blocked",
+                descriptor.manifest.plugin_id.clone(),
+                descriptor.path.clone(),
+                "wasi import is blocked by wasm security policy",
+                json!({
                     "import_module": module_name,
                 }),
-            });
+            ));
         }
         if blocked_import_prefixes
             .iter()
             .any(|prefix| module_name_lower.starts_with(prefix))
         {
-            findings.push(SecurityFinding {
-                severity: SecurityFindingSeverity::High,
-                category: "wasm_import_prefix_blocked".to_owned(),
-                plugin_id: descriptor.manifest.plugin_id.clone(),
-                source_path: descriptor.path.clone(),
-                message: "wasm import module matched blocked prefix".to_owned(),
-                evidence: json!({
+            findings.push(build_security_finding(
+                SecurityFindingSeverity::High,
+                "wasm_import_prefix_blocked",
+                descriptor.manifest.plugin_id.clone(),
+                descriptor.path.clone(),
+                "wasm import module matched blocked prefix",
+                json!({
                     "import_module": module_name,
                     "blocked_import_prefixes": blocked_import_prefixes,
                 }),
-            });
+            ));
         }
     }
 
-    findings.push(SecurityFinding {
-        severity: SecurityFindingSeverity::Low,
-        category: "wasm_digest_observed".to_owned(),
-        plugin_id: descriptor.manifest.plugin_id.clone(),
-        source_path: descriptor.path.clone(),
-        message: "wasm artifact digest captured for audit".to_owned(),
-        evidence: json!({
+    findings.push(build_security_finding(
+        SecurityFindingSeverity::Low,
+        "wasm_digest_observed",
+        descriptor.manifest.plugin_id.clone(),
+        descriptor.path.clone(),
+        "wasm artifact digest captured for audit",
+        json!({
             "artifact_path": normalized_artifact_path.display().to_string(),
             "sha256": digest_hex,
             "imports": imports,
         }),
-    });
+    ));
 
     findings
 }
@@ -3168,6 +3274,7 @@ fn canonical_security_scan_value(security_scan: Option<&SecurityScanSpec>) -> Va
         "enabled": scan.enabled,
         "block_on_high": scan.block_on_high,
         "profile_path": scan.profile_path,
+        "profile_sha256": scan.profile_sha256,
         "high_risk_metadata_keywords": keywords,
         "wasm": {
             "enabled": scan.wasm.enabled,
@@ -3179,6 +3286,45 @@ fn canonical_security_scan_value(security_scan: Option<&SecurityScanSpec>) -> Va
             "required_sha256_by_plugin": required_sha256_by_plugin,
         },
     })
+}
+
+fn canonical_security_scan_profile_value(profile: &SecurityScanProfile) -> Value {
+    let mut keywords = profile.high_risk_metadata_keywords.clone();
+    keywords.sort();
+
+    let mut blocked_import_prefixes = profile.wasm.blocked_import_prefixes.clone();
+    blocked_import_prefixes.sort();
+
+    let mut allowed_path_prefixes = profile.wasm.allowed_path_prefixes.clone();
+    allowed_path_prefixes.sort();
+
+    let required_sha256_by_plugin = profile
+        .wasm
+        .required_sha256_by_plugin
+        .iter()
+        .map(|(plugin, digest)| (plugin.clone(), digest.clone()))
+        .collect::<BTreeMap<_, _>>();
+
+    json!({
+        "high_risk_metadata_keywords": keywords,
+        "wasm": {
+            "enabled": profile.wasm.enabled,
+            "max_module_bytes": profile.wasm.max_module_bytes,
+            "allow_wasi": profile.wasm.allow_wasi,
+            "blocked_import_prefixes": blocked_import_prefixes,
+            "allowed_path_prefixes": allowed_path_prefixes,
+            "require_hash_pin": profile.wasm.require_hash_pin,
+            "required_sha256_by_plugin": required_sha256_by_plugin,
+        }
+    })
+}
+
+fn security_scan_profile_sha256(profile: &SecurityScanProfile) -> String {
+    let canonical = canonical_security_scan_profile_value(profile);
+    let encoded =
+        serde_json::to_vec(&canonical).expect("serialize security scan profile canonical payload");
+    let digest = Sha256::digest(&encoded);
+    hex_lower(&digest)
 }
 
 fn fnv1a64_hex(bytes: &[u8]) -> String {
@@ -3816,6 +3962,7 @@ mod tests {
                     enabled: true,
                     block_on_high: true,
                     profile_path: Some(path.display().to_string()),
+                    profile_sha256: None,
                     high_risk_metadata_keywords: Vec::new(),
                     wasm: WasmSecurityScanSpec {
                         enabled: true,
@@ -3839,7 +3986,9 @@ mod tests {
             },
         };
 
-        let policy = security_scan_policy(&spec).expect("security scan policy should resolve");
+        let policy = security_scan_policy(&spec)
+            .expect("security scan policy should resolve")
+            .expect("security scan policy should be enabled");
         assert_eq!(
             policy.high_risk_metadata_keywords,
             vec!["custom-danger-keyword".to_owned()]
@@ -3849,6 +3998,201 @@ mod tests {
             policy.wasm.blocked_import_prefixes,
             vec!["wasi-custom".to_owned()]
         );
+    }
+
+    #[test]
+    fn security_scan_profile_sha256_pin_accepts_matching_profile() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic")
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("chumos-security-profile-sha-match-{unique}.json"));
+        fs::write(
+            &path,
+            r#"{
+  "high_risk_metadata_keywords": ["pinned-danger"],
+  "wasm": {
+    "enabled": true,
+    "max_module_bytes": 654321,
+    "allow_wasi": false,
+    "blocked_import_prefixes": ["wasi-custom"],
+    "allowed_path_prefixes": [],
+    "require_hash_pin": false,
+    "required_sha256_by_plugin": {}
+  }
+}"#,
+        )
+        .expect("write pinned profile");
+
+        let profile = load_security_scan_profile_from_path(path.to_str().expect("utf8 path"))
+            .expect("profile should load");
+        let profile_sha256 = security_scan_profile_sha256(&profile);
+
+        let spec = RunnerSpec {
+            pack: VerticalPackManifest {
+                pack_id: "spec-security-profile-pin".to_owned(),
+                domain: "ops".to_owned(),
+                version: "0.1.0".to_owned(),
+                default_route: ExecutionRoute {
+                    harness_kind: HarnessKind::EmbeddedPi,
+                    adapter: Some("pi-local".to_owned()),
+                },
+                allowed_connectors: BTreeSet::new(),
+                granted_capabilities: BTreeSet::new(),
+                metadata: BTreeMap::new(),
+            },
+            agent_id: "agent-security-profile-pin".to_owned(),
+            ttl_s: 120,
+            approval: None,
+            defaults: None,
+            self_awareness: None,
+            plugin_scan: None,
+            bridge_support: Some(BridgeSupportSpec {
+                enabled: true,
+                supported_bridges: vec![PluginBridgeKind::WasmComponent],
+                supported_adapter_families: Vec::new(),
+                enforce_supported: true,
+                policy_version: None,
+                expected_checksum: None,
+                expected_sha256: None,
+                execute_process_stdio: false,
+                execute_http_json: false,
+                allowed_process_commands: Vec::new(),
+                enforce_execution_success: false,
+                security_scan: Some(SecurityScanSpec {
+                    enabled: true,
+                    block_on_high: true,
+                    profile_path: Some(path.display().to_string()),
+                    profile_sha256: Some(profile_sha256),
+                    high_risk_metadata_keywords: Vec::new(),
+                    wasm: WasmSecurityScanSpec {
+                        enabled: true,
+                        max_module_bytes: 0,
+                        allow_wasi: false,
+                        blocked_import_prefixes: Vec::new(),
+                        allowed_path_prefixes: Vec::new(),
+                        require_hash_pin: false,
+                        required_sha256_by_plugin: BTreeMap::new(),
+                    },
+                }),
+            }),
+            bootstrap: None,
+            auto_provision: None,
+            hotfixes: Vec::new(),
+            operation: OperationSpec::Task {
+                task_id: "t-security-profile-pin".to_owned(),
+                objective: "verify profile sha pin".to_owned(),
+                required_capabilities: BTreeSet::new(),
+                payload: json!({}),
+            },
+        };
+
+        let policy = security_scan_policy(&spec)
+            .expect("security scan policy should resolve")
+            .expect("security scan policy should be enabled");
+        assert_eq!(
+            policy.high_risk_metadata_keywords,
+            vec!["pinned-danger".to_owned()]
+        );
+        assert_eq!(policy.wasm.max_module_bytes, 654321);
+    }
+
+    #[tokio::test]
+    async fn execute_spec_blocks_when_security_scan_profile_sha256_mismatches() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "chumos-security-profile-sha-mismatch-{unique}.json"
+        ));
+        fs::write(
+            &path,
+            r#"{
+  "high_risk_metadata_keywords": ["mismatch-danger"],
+  "wasm": {
+    "enabled": true,
+    "max_module_bytes": 1024,
+    "allow_wasi": false,
+    "blocked_import_prefixes": [],
+    "allowed_path_prefixes": [],
+    "require_hash_pin": false,
+    "required_sha256_by_plugin": {}
+  }
+}"#,
+        )
+        .expect("write mismatched profile");
+
+        let spec = RunnerSpec {
+            pack: VerticalPackManifest {
+                pack_id: "spec-security-profile-mismatch".to_owned(),
+                domain: "ops".to_owned(),
+                version: "0.1.0".to_owned(),
+                default_route: ExecutionRoute {
+                    harness_kind: HarnessKind::EmbeddedPi,
+                    adapter: Some("pi-local".to_owned()),
+                },
+                allowed_connectors: BTreeSet::new(),
+                granted_capabilities: BTreeSet::new(),
+                metadata: BTreeMap::new(),
+            },
+            agent_id: "agent-security-profile-mismatch".to_owned(),
+            ttl_s: 120,
+            approval: None,
+            defaults: None,
+            self_awareness: None,
+            plugin_scan: None,
+            bridge_support: Some(BridgeSupportSpec {
+                enabled: true,
+                supported_bridges: vec![PluginBridgeKind::WasmComponent],
+                supported_adapter_families: Vec::new(),
+                enforce_supported: true,
+                policy_version: None,
+                expected_checksum: None,
+                expected_sha256: None,
+                execute_process_stdio: false,
+                execute_http_json: false,
+                allowed_process_commands: Vec::new(),
+                enforce_execution_success: false,
+                security_scan: Some(SecurityScanSpec {
+                    enabled: true,
+                    block_on_high: true,
+                    profile_path: Some(path.display().to_string()),
+                    profile_sha256: Some("deadbeef".repeat(8)),
+                    high_risk_metadata_keywords: Vec::new(),
+                    wasm: WasmSecurityScanSpec {
+                        enabled: true,
+                        max_module_bytes: 0,
+                        allow_wasi: false,
+                        blocked_import_prefixes: Vec::new(),
+                        allowed_path_prefixes: Vec::new(),
+                        require_hash_pin: false,
+                        required_sha256_by_plugin: BTreeMap::new(),
+                    },
+                }),
+            }),
+            bootstrap: None,
+            auto_provision: None,
+            hotfixes: Vec::new(),
+            operation: OperationSpec::Task {
+                task_id: "t-security-profile-mismatch".to_owned(),
+                objective: "mismatch pin should block".to_owned(),
+                required_capabilities: BTreeSet::new(),
+                payload: json!({}),
+            },
+        };
+
+        let report = execute_spec(spec, true).await;
+        assert_eq!(report.operation_kind, "blocked");
+        assert!(report
+            .blocked_reason
+            .expect("blocked reason should exist")
+            .contains("profile sha256 mismatch"));
     }
 
     #[tokio::test]
@@ -5111,6 +5455,7 @@ mod tests {
                     enabled: true,
                     block_on_high: true,
                     profile_path: None,
+                    profile_sha256: None,
                     high_risk_metadata_keywords: vec!["shell".to_owned()],
                     wasm: WasmSecurityScanSpec {
                         enabled: true,
@@ -5247,6 +5592,7 @@ mod tests {
                     enabled: true,
                     block_on_high: true,
                     profile_path: None,
+                    profile_sha256: None,
                     high_risk_metadata_keywords: vec!["shell".to_owned()],
                     wasm: WasmSecurityScanSpec {
                         enabled: true,
@@ -5368,6 +5714,7 @@ mod tests {
                     enabled: true,
                     block_on_high: false,
                     profile_path: None,
+                    profile_sha256: None,
                     high_risk_metadata_keywords: Vec::new(),
                     wasm: WasmSecurityScanSpec {
                         enabled: false,
@@ -5414,18 +5761,26 @@ mod tests {
                 blocked,
                 high_findings,
                 categories,
+                finding_ids,
                 ..
-            } => Some((*blocked, *high_findings, categories.clone())),
+            } => Some((
+                *blocked,
+                *high_findings,
+                categories.clone(),
+                finding_ids.clone(),
+            )),
             _ => None,
         });
 
-        let (blocked, high_findings, categories) =
+        let (blocked, high_findings, categories, finding_ids) =
             summary.expect("security scan audit summary should exist");
         assert!(!blocked);
         assert!(high_findings >= 1);
         assert!(categories
             .iter()
             .any(|value| value == "process_command_not_allowlisted"));
+        assert!(!finding_ids.is_empty());
+        assert!(finding_ids.iter().all(|value| value.starts_with("sf-")));
     }
 
     #[tokio::test]
@@ -5522,6 +5877,7 @@ mod tests {
                     enabled: true,
                     block_on_high: true,
                     profile_path: None,
+                    profile_sha256: None,
                     high_risk_metadata_keywords: Vec::new(),
                     wasm: WasmSecurityScanSpec {
                         enabled: false,

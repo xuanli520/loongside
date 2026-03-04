@@ -58,17 +58,19 @@ Delivered:
   - external risk profile loading
 - plugin bridge support matrix and checksum integrity lock
 - plugin security scan with `block_on_high`
+- external profile integrity lock (`security_scan.profile_sha256`) with fail-closed behavior
 - WASM static scan controls:
   - allowed artifact paths
   - module size cap
   - digest pin support
   - import policy (`allow_wasi`, blocked prefixes)
 - typed audit emission for security scan summary (`SecurityScanEvaluated`)
+- per-finding correlation IDs for deterministic audit aggregation
 
 Remaining:
 
-- sign/lock external security profile integrity (profile checksum pinning)
-- enrich audit stream with per-finding correlation IDs for SIEM pipelines
+- optional profile signature verification beyond hash pin (for centralized key-based trust)
+- SIEM-native export adapter for security findings stream
 
 Exit criteria:
 
@@ -181,4 +183,3 @@ All roadmap stages must keep these gates green:
 1. Stage 1 completion: profile integrity locking + audit correlation enrichment
 2. Stage 2 kickoff: WASM runtime isolation lane
 3. Stage 3 baseline: connector contract versioning and idempotent reconciliation
-

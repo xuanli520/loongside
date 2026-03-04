@@ -188,7 +188,9 @@ When audit output is enabled (`--print-audit`), security scan also emits a typed
 deduplicated finding categories for deterministic post-run governance.
 Security scan defaults are profile-driven from
 `crates/daemon/config/security-scan-medium-balanced.json`; for runtime customization, set
-`bridge_support.security_scan.profile_path` to a JSON profile file.
+`bridge_support.security_scan.profile_path` to a JSON profile file. For tamper resistance,
+optionally pin `bridge_support.security_scan.profile_sha256`; when pinned, profile load/parse/hash
+mismatch will fail closed and block execution.
 WASM-focused checks include artifact path constraints (`allowed_path_prefixes`), module size cap
 (`max_module_bytes`), SHA256 pin enforcement (`require_hash_pin` + `required_sha256_by_plugin`),
 and import policy (`allow_wasi`, `blocked_import_prefixes`).
