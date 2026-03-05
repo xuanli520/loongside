@@ -55,6 +55,14 @@
         "max_findings_per_record": 200,
         "fail_on_error": false
       },
+      "runtime": {
+        "execute_wasm_component": false,
+        "allowed_path_prefixes": [
+          "examples/plugins-wasm"
+        ],
+        "max_component_bytes": 262144,
+        "fuel_limit": 300000
+      },
       "high_risk_metadata_keywords": [
         "rm -rf",
         "shell",

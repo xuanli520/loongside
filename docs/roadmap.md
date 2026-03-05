@@ -82,13 +82,26 @@ Exit criteria:
 
 ## Stage 2: Safe Hotplug Runtime (Next)
 
-Status: planned  
+Status: in progress  
 Focus: runtime-grade isolation for untrusted extension execution.
 
-Planned deliverables:
+Delivered in current baseline:
+
+- WASM runtime execution lane wired into `bridge_execution` with Wasmtime backend.
+- Policy-driven runtime guardrails in `bridge_support.security_scan.runtime`:
+  - required `allowed_path_prefixes` when `execute_wasm_component=true` (fail closed)
+  - `max_component_bytes`
+  - optional `fuel_limit`
+- Runtime isolation tests for:
+  - successful wasm execution
+  - runtime prefix denial
+  - runtime size-limit denial
+  - invalid runtime policy denial
+
+Remaining deliverables:
 
 - WASM runtime lane with enforced resource limits:
-  - CPU budget
+  - CPU budget refinement
   - memory limits
   - timeout/termination policy
 - process bridge sandbox profile tiers (`restricted`, `balanced`, `trusted`)
@@ -182,6 +195,6 @@ All roadmap stages must keep these gates green:
 
 ## Current Priority Order
 
-1. Stage 1 completion: profile integrity locking + audit correlation enrichment
-2. Stage 2 kickoff: WASM runtime isolation lane
+1. Stage 2 hardening: memory/timeout isolation + sandbox tiers
+2. Stage 2 hot-reload reliability: pre/post checks + rollback contract
 3. Stage 3 baseline: connector contract versioning and idempotent reconciliation

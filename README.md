@@ -169,6 +169,10 @@ how each hotplug provider will execute (`http_json`, `process_stdio`, `native_ff
 `wasm_component`, `mcp_server`).
 When `execute_process_stdio=true` and command is allowlisted, bridge runtime can execute local
 process plugins directly and attach structured runtime evidence in `bridge_execution.runtime`.
+When `bridge_support.security_scan.runtime.execute_wasm_component=true`, bridge runtime can
+execute `wasm_component` plugins through Wasmtime with explicit runtime guardrails:
+`runtime.allowed_path_prefixes` (fail-closed required), `runtime.max_component_bytes`,
+and optional `runtime.fuel_limit`.
 Default approval policy is medium-balanced: only high-risk tool calls (for example delete/remove/drop)
 require human authorization; low-risk operations keep developer velocity.
 Human authorization is flexible: either approve each call (`approval.approved_calls`) or grant
@@ -196,6 +200,9 @@ For stronger supply-chain integrity, optionally configure
 fails closed.
 Security scan can export JSONL records for SIEM ingestion via
 `bridge_support.security_scan.siem_export` with optional fail-closed mode (`fail_on_error=true`).
+Security scan also carries runtime execution policy for wasm hotplug via
+`bridge_support.security_scan.runtime` so runtime behavior stays policy-driven instead of
+hardcoded environment branches.
 WASM-focused checks include artifact path constraints (`allowed_path_prefixes`), module size cap
 (`max_module_bytes`), SHA256 pin enforcement (`require_hash_pin` + `required_sha256_by_plugin`),
 and import policy (`allow_wasi`, `blocked_import_prefixes`).

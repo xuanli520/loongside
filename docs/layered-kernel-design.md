@@ -182,6 +182,9 @@ Rules:
   to prevent silent policy drift.
 - Bridge policy can optionally enable local bridge runtime execution in controlled mode
   (`process_stdio` allowlist and strict execution enforcement).
+- WASM runtime execution is policy-driven through `security_scan.runtime` with fail-closed
+  guards (`execute_wasm_component`, `allowed_path_prefixes`, `max_component_bytes`,
+  `fuel_limit`) so enabling execution never requires hardcoded kernel branches.
 
 ### L8. Self-Awareness and Architecture Guard Plane
 
@@ -272,6 +275,7 @@ Without layering these modules, the kernel becomes a monolith and loses long-ter
 
 - `daemon` command-level integration smoke.
 - Representative vertical-pack execution flows.
+- Runtime isolation smoke for `wasm_component` execution (success + path/size guard denials).
 
 ### T6. Property Tests
 

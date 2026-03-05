@@ -33,6 +33,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use wasmparser::{Parser as WasmParser, Payload as WasmPayload};
+use wasmtime::{
+    Config as WasmtimeConfig, Engine as WasmtimeEngine, Linker as WasmtimeLinker,
+    Module as WasmtimeModule, Store as WasmtimeStore,
+};
 
 const DEFAULT_PACK_ID: &str = "dev-automation";
 const DEFAULT_AGENT_ID: &str = "agent-dev-01";
@@ -362,7 +366,11 @@ struct BridgeSupportSpec {
 struct BridgeRuntimePolicy {
     execute_process_stdio: bool,
     execute_http_json: bool,
+    execute_wasm_component: bool,
     allowed_process_commands: BTreeSet<String>,
+    wasm_allowed_path_prefixes: Vec<PathBuf>,
+    wasm_max_component_bytes: Option<usize>,
+    wasm_fuel_limit: Option<u64>,
     enforce_execution_success: bool,
 }
 
@@ -380,6 +388,8 @@ struct SecurityScanSpec {
     #[serde(default)]
     siem_export: Option<SecuritySiemExportSpec>,
     #[serde(default)]
+    runtime: SecurityRuntimeExecutionSpec,
+    #[serde(default)]
     high_risk_metadata_keywords: Vec<String>,
     #[serde(default)]
     wasm: WasmSecurityScanSpec,
@@ -394,6 +404,7 @@ impl Default for SecurityScanSpec {
             profile_sha256: None,
             profile_signature: None,
             siem_export: None,
+            runtime: SecurityRuntimeExecutionSpec::default(),
             high_risk_metadata_keywords: Vec::new(),
             wasm: WasmSecurityScanSpec::default(),
         }
@@ -433,6 +444,18 @@ struct SecuritySiemExportReport {
     exported_findings: usize,
     truncated_findings: usize,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct SecurityRuntimeExecutionSpec {
+    #[serde(default)]
+    execute_wasm_component: bool,
+    #[serde(default)]
+    allowed_path_prefixes: Vec<String>,
+    #[serde(default)]
+    max_component_bytes: Option<usize>,
+    #[serde(default)]
+    fuel_limit: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -977,6 +1000,18 @@ fn maybe_execute_bridge(
         return execute_process_stdio_bridge(execution, provider, channel, command, runtime_policy);
     }
 
+    if runtime_policy.execute_wasm_component
+        && matches!(bridge_kind, PluginBridgeKind::WasmComponent)
+    {
+        return execute_wasm_component_bridge(
+            execution,
+            provider,
+            channel,
+            command,
+            runtime_policy,
+        );
+    }
+
     execution
 }
 
@@ -1077,6 +1112,193 @@ fn execute_process_stdio_bridge(
             execution
         }
     }
+}
+
+fn execute_wasm_component_bridge(
+    mut execution: Value,
+    provider: &kernel::ProviderConfig,
+    channel: &kernel::ChannelConfig,
+    command: &ConnectorCommand,
+    runtime_policy: &BridgeRuntimePolicy,
+) -> Value {
+    let artifact_path = match resolve_wasm_component_artifact_path(provider, &channel.endpoint) {
+        Ok(path) => path,
+        Err(reason) => {
+            execution["status"] = Value::String("blocked".to_owned());
+            execution["reason"] = Value::String(reason);
+            return execution;
+        }
+    };
+
+    if !runtime_policy.wasm_allowed_path_prefixes.is_empty()
+        && !runtime_policy
+            .wasm_allowed_path_prefixes
+            .iter()
+            .any(|prefix| artifact_path.starts_with(prefix))
+    {
+        execution["status"] = Value::String("blocked".to_owned());
+        execution["reason"] =
+            Value::String("wasm artifact path is outside runtime allowed_path_prefixes".to_owned());
+        execution["runtime"] = json!({
+            "executor": "wasmtime_module",
+            "artifact_path": artifact_path.display().to_string(),
+            "allowed_path_prefixes": runtime_policy
+                .wasm_allowed_path_prefixes
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>(),
+        });
+        return execution;
+    }
+
+    let module_bytes = match fs::read(&artifact_path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            execution["status"] = Value::String("failed".to_owned());
+            execution["reason"] = Value::String(format!("failed to read wasm artifact: {error}"));
+            execution["runtime"] = json!({
+                "executor": "wasmtime_module",
+                "artifact_path": artifact_path.display().to_string(),
+            });
+            return execution;
+        }
+    };
+
+    if let Some(limit) = runtime_policy.wasm_max_component_bytes {
+        if module_bytes.len() > limit {
+            execution["status"] = Value::String("blocked".to_owned());
+            execution["reason"] = Value::String(format!(
+                "wasm artifact size {} exceeds runtime max_component_bytes {limit}",
+                module_bytes.len()
+            ));
+            execution["runtime"] = json!({
+                "executor": "wasmtime_module",
+                "artifact_path": artifact_path.display().to_string(),
+                "module_size_bytes": module_bytes.len(),
+                "max_component_bytes": limit,
+            });
+            return execution;
+        }
+    }
+
+    let export_name = resolve_wasm_export_name(provider);
+
+    let run_result = (|| -> Result<Option<u64>, String> {
+        let mut config = WasmtimeConfig::new();
+        if runtime_policy.wasm_fuel_limit.is_some() {
+            config.consume_fuel(true);
+        }
+        let engine = WasmtimeEngine::new(&config)
+            .map_err(|error| format!("failed to initialize wasmtime engine: {error}"))?;
+        let module = WasmtimeModule::new(&engine, &module_bytes)
+            .map_err(|error| format!("failed to compile wasm module: {error}"))?;
+        let mut store = WasmtimeStore::new(&engine, ());
+        if let Some(limit) = runtime_policy.wasm_fuel_limit {
+            store
+                .set_fuel(limit)
+                .map_err(|error| format!("failed to set wasm fuel limit: {error}"))?;
+        }
+        let linker = WasmtimeLinker::new(&engine);
+        let instance = linker
+            .instantiate(&mut store, &module)
+            .map_err(|error| format!("failed to instantiate wasm module: {error}"))?;
+        let func = instance
+            .get_typed_func::<(), ()>(&mut store, export_name.as_str())
+            .map_err(|error| {
+                format!("failed to resolve exported wasm function {export_name}: {error}")
+            })?;
+        func.call(&mut store, ())
+            .map_err(|error| format!("wasm function call failed: {error}"))?;
+        let consumed_fuel = runtime_policy
+            .wasm_fuel_limit
+            .map(|limit| {
+                store
+                    .get_fuel()
+                    .map(|remaining| limit.saturating_sub(remaining))
+            })
+            .transpose()
+            .map_err(|error| format!("failed to query wasm fuel: {error}"))?;
+        Ok(consumed_fuel)
+    })();
+
+    match run_result {
+        Ok(consumed_fuel) => {
+            execution["status"] = Value::String("executed".to_owned());
+            execution["runtime"] = json!({
+                "executor": "wasmtime_module",
+                "artifact_path": artifact_path.display().to_string(),
+                "export": export_name,
+                "operation": command.operation,
+                "payload": command.payload,
+                "module_size_bytes": module_bytes.len(),
+                "fuel_limit": runtime_policy.wasm_fuel_limit,
+                "fuel_consumed": consumed_fuel,
+            });
+            execution
+        }
+        Err(reason) => {
+            execution["status"] = Value::String("failed".to_owned());
+            execution["reason"] = Value::String(reason);
+            execution["runtime"] = json!({
+                "executor": "wasmtime_module",
+                "artifact_path": artifact_path.display().to_string(),
+                "export": export_name,
+            });
+            execution
+        }
+    }
+}
+
+fn resolve_wasm_component_artifact_path(
+    provider: &kernel::ProviderConfig,
+    channel_endpoint: &str,
+) -> Result<PathBuf, String> {
+    let raw = provider
+        .metadata
+        .get("component_resolved_path")
+        .cloned()
+        .or_else(|| provider.metadata.get("component_path").cloned())
+        .or_else(|| provider.metadata.get("component").cloned())
+        .or_else(|| {
+            let endpoint = channel_endpoint.trim();
+            endpoint
+                .to_ascii_lowercase()
+                .ends_with(".wasm")
+                .then(|| endpoint.to_owned())
+        })
+        .ok_or_else(|| "wasm_component execution requires component artifact path".to_owned())?;
+
+    if raw.starts_with("http://") || raw.starts_with("https://") {
+        return Err(
+            "wasm_component execution requires a local artifact path, remote URL is not allowed"
+                .to_owned(),
+        );
+    }
+
+    let candidate = PathBuf::from(&raw);
+    let resolved = if candidate.is_absolute() {
+        candidate
+    } else if let Some(source_path) = provider.metadata.get("plugin_source_path") {
+        resolve_plugin_relative_path(source_path, &raw)
+    } else {
+        candidate
+    };
+
+    Ok(normalize_path_for_policy(&resolved))
+}
+
+fn resolve_wasm_export_name(provider: &kernel::ProviderConfig) -> String {
+    let raw = provider
+        .metadata
+        .get("entrypoint")
+        .or_else(|| provider.metadata.get("entrypoint_hint"))
+        .cloned()
+        .unwrap_or_else(|| "run".to_owned());
+    raw.split([':', '/'])
+        .filter(|segment| !segment.trim().is_empty())
+        .next_back()
+        .unwrap_or("run")
+        .to_owned()
 }
 
 fn parse_process_args(provider: &kernel::ProviderConfig) -> Vec<String> {
@@ -1956,7 +2178,7 @@ async fn execute_spec(spec: RunnerSpec, include_audit: bool) -> SpecRunReport {
     }
 
     let shared_catalog = Arc::new(Mutex::new(integration_catalog.clone()));
-    let bridge_runtime_policy = bridge_runtime_policy(&spec);
+    let bridge_runtime_policy = bridge_runtime_policy(&spec, security_scan_policy.as_ref());
     register_dynamic_catalog_connectors(&mut kernel, shared_catalog, bridge_runtime_policy);
 
     kernel
@@ -2078,6 +2300,11 @@ fn validate_security_scan_policy(policy: &SecurityScanSpec) -> Result<(), String
         if export.path.trim().is_empty() {
             return Err("security scan siem_export.path cannot be empty when enabled".to_owned());
         }
+    }
+    if policy.runtime.execute_wasm_component && policy.runtime.allowed_path_prefixes.is_empty() {
+        return Err(
+            "security scan runtime.execute_wasm_component requires runtime.allowed_path_prefixes to be configured".to_owned(),
+        );
     }
     Ok(())
 }
@@ -2857,7 +3084,10 @@ fn bridge_support_matrix(spec: &RunnerSpec) -> (BridgeSupportMatrix, bool) {
     }
 }
 
-fn bridge_runtime_policy(spec: &RunnerSpec) -> BridgeRuntimePolicy {
+fn bridge_runtime_policy(
+    spec: &RunnerSpec,
+    security_scan: Option<&SecurityScanSpec>,
+) -> BridgeRuntimePolicy {
     let Some(bridge) = &spec.bridge_support else {
         return BridgeRuntimePolicy::default();
     };
@@ -2865,15 +3095,29 @@ fn bridge_runtime_policy(spec: &RunnerSpec) -> BridgeRuntimePolicy {
         return BridgeRuntimePolicy::default();
     }
 
+    let runtime = security_scan
+        .map(|scan| scan.runtime.clone())
+        .unwrap_or_default();
+    let wasm_allowed_path_prefixes = runtime
+        .allowed_path_prefixes
+        .iter()
+        .map(PathBuf::from)
+        .map(|path| normalize_path_for_policy(&path))
+        .collect();
+
     BridgeRuntimePolicy {
         execute_process_stdio: bridge.execute_process_stdio,
         execute_http_json: bridge.execute_http_json,
+        execute_wasm_component: runtime.execute_wasm_component,
         allowed_process_commands: bridge
             .allowed_process_commands
             .iter()
             .map(|value| value.trim().to_ascii_lowercase())
             .filter(|value| !value.is_empty())
             .collect(),
+        wasm_allowed_path_prefixes,
+        wasm_max_component_bytes: runtime.max_component_bytes,
+        wasm_fuel_limit: runtime.fuel_limit,
         enforce_execution_success: bridge.enforce_execution_success,
     }
 }
@@ -3406,6 +3650,21 @@ fn enrich_scan_report_with_translation(
         .iter()
         .cloned()
         .map(|mut descriptor| {
+            descriptor
+                .manifest
+                .metadata
+                .entry("plugin_source_path".to_owned())
+                .or_insert_with(|| descriptor.path.clone());
+            if let Some(component) = descriptor.manifest.metadata.get("component").cloned() {
+                let resolved = resolve_plugin_relative_path(&descriptor.path, &component);
+                let normalized = normalize_path_for_policy(&resolved);
+                descriptor
+                    .manifest
+                    .metadata
+                    .entry("component_resolved_path".to_owned())
+                    .or_insert_with(|| normalized.display().to_string());
+            }
+
             if let Some((bridge_kind, adapter_family, entrypoint_hint, source_language)) =
                 runtime_by_key.get(&(
                     descriptor.path.clone(),
@@ -3502,6 +3761,7 @@ fn canonical_security_scan_value(security_scan: Option<&SecurityScanSpec>) -> Va
     let profile_signature =
         canonical_security_scan_profile_signature_value(scan.profile_signature.as_ref());
     let siem_export = canonical_security_scan_siem_export_value(scan.siem_export.as_ref());
+    let runtime = canonical_security_scan_runtime_value(&scan.runtime);
 
     json!({
         "enabled": scan.enabled,
@@ -3510,6 +3770,7 @@ fn canonical_security_scan_value(security_scan: Option<&SecurityScanSpec>) -> Va
         "profile_sha256": scan.profile_sha256,
         "profile_signature": profile_signature,
         "siem_export": siem_export,
+        "runtime": runtime,
         "high_risk_metadata_keywords": keywords,
         "wasm": {
             "enabled": scan.wasm.enabled,
@@ -3546,6 +3807,18 @@ fn canonical_security_scan_siem_export_value(export: Option<&SecuritySiemExportS
         "include_findings": export.include_findings,
         "max_findings_per_record": export.max_findings_per_record,
         "fail_on_error": export.fail_on_error,
+    })
+}
+
+fn canonical_security_scan_runtime_value(runtime: &SecurityRuntimeExecutionSpec) -> Value {
+    let mut allowed_path_prefixes = runtime.allowed_path_prefixes.clone();
+    allowed_path_prefixes.sort();
+
+    json!({
+        "execute_wasm_component": runtime.execute_wasm_component,
+        "allowed_path_prefixes": allowed_path_prefixes,
+        "max_component_bytes": runtime.max_component_bytes,
+        "fuel_limit": runtime.fuel_limit,
     })
 }
 
@@ -4239,6 +4512,7 @@ mod tests {
                     profile_sha256: None,
                     profile_signature: None,
                     siem_export: None,
+                    runtime: SecurityRuntimeExecutionSpec::default(),
                     high_risk_metadata_keywords: Vec::new(),
                     wasm: WasmSecurityScanSpec {
                         enabled: true,
@@ -4345,6 +4619,7 @@ mod tests {
                     profile_sha256: Some(profile_sha256),
                     profile_signature: None,
                     siem_export: None,
+                    runtime: SecurityRuntimeExecutionSpec::default(),
                     high_risk_metadata_keywords: Vec::new(),
                     wasm: WasmSecurityScanSpec {
                         enabled: true,
@@ -4444,6 +4719,7 @@ mod tests {
                     profile_sha256: Some("deadbeef".repeat(8)),
                     profile_signature: None,
                     siem_export: None,
+                    runtime: SecurityRuntimeExecutionSpec::default(),
                     high_risk_metadata_keywords: Vec::new(),
                     wasm: WasmSecurityScanSpec {
                         enabled: true,
@@ -4549,6 +4825,7 @@ mod tests {
                         signature_base64,
                     }),
                     siem_export: None,
+                    runtime: SecurityRuntimeExecutionSpec::default(),
                     high_risk_metadata_keywords: Vec::new(),
                     wasm: WasmSecurityScanSpec {
                         enabled: true,
@@ -4662,6 +4939,7 @@ mod tests {
                         signature_base64,
                     }),
                     siem_export: None,
+                    runtime: SecurityRuntimeExecutionSpec::default(),
                     high_risk_metadata_keywords: Vec::new(),
                     wasm: WasmSecurityScanSpec {
                         enabled: true,
@@ -5874,6 +6152,509 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_spec_wasm_component_bridge_executes_when_runtime_enabled() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic")
+            .as_nanos();
+        let plugin_root = std::env::temp_dir().join(format!("chumos-wasm-runtime-run-{unique}"));
+        fs::create_dir_all(&plugin_root).expect("create plugin root");
+
+        fs::write(
+            plugin_root.join("plugin.rs"),
+            r#"
+// CHUMOS_PLUGIN_START
+// {
+//   "plugin_id": "wasm-runtime-run",
+//   "provider_id": "wasm-runtime-provider",
+//   "connector_name": "wasm-runtime-provider",
+//   "channel_id": "primary",
+//   "endpoint": "local://wasm-runtime-provider/invoke",
+//   "capabilities": ["InvokeConnector"],
+//   "metadata": {
+//     "bridge_kind":"wasm_component",
+//     "component":"plugin.wasm",
+//     "entrypoint":"run",
+//     "version":"1.0.0"
+//   }
+// }
+// CHUMOS_PLUGIN_END
+"#,
+        )
+        .expect("write wasm plugin manifest");
+
+        let wasm_bytes = wat::parse_str(r#"(module (func (export "run")))"#).expect("compile wasm");
+        fs::write(plugin_root.join("plugin.wasm"), wasm_bytes).expect("write wasm module");
+
+        let spec = RunnerSpec {
+            pack: VerticalPackManifest {
+                pack_id: "spec-wasm-runtime-run".to_owned(),
+                domain: "ops".to_owned(),
+                version: "0.1.0".to_owned(),
+                default_route: ExecutionRoute {
+                    harness_kind: HarnessKind::EmbeddedPi,
+                    adapter: Some("pi-local".to_owned()),
+                },
+                allowed_connectors: BTreeSet::new(),
+                granted_capabilities: BTreeSet::new(),
+                metadata: BTreeMap::new(),
+            },
+            agent_id: "agent-wasm-runtime-run".to_owned(),
+            ttl_s: 120,
+            approval: None,
+            defaults: None,
+            self_awareness: None,
+            plugin_scan: Some(PluginScanSpec {
+                enabled: true,
+                roots: vec![plugin_root.display().to_string()],
+            }),
+            bridge_support: Some(BridgeSupportSpec {
+                enabled: true,
+                supported_bridges: vec![PluginBridgeKind::WasmComponent],
+                supported_adapter_families: Vec::new(),
+                enforce_supported: true,
+                policy_version: None,
+                expected_checksum: None,
+                expected_sha256: None,
+                execute_process_stdio: false,
+                execute_http_json: false,
+                allowed_process_commands: Vec::new(),
+                enforce_execution_success: true,
+                security_scan: Some(SecurityScanSpec {
+                    enabled: true,
+                    block_on_high: true,
+                    profile_path: None,
+                    profile_sha256: None,
+                    profile_signature: None,
+                    siem_export: None,
+                    runtime: SecurityRuntimeExecutionSpec {
+                        execute_wasm_component: true,
+                        allowed_path_prefixes: vec![plugin_root.display().to_string()],
+                        max_component_bytes: Some(128 * 1024),
+                        fuel_limit: Some(200_000),
+                    },
+                    high_risk_metadata_keywords: Vec::new(),
+                    wasm: WasmSecurityScanSpec {
+                        enabled: true,
+                        max_module_bytes: 128 * 1024,
+                        allow_wasi: false,
+                        blocked_import_prefixes: vec!["wasi".to_owned()],
+                        allowed_path_prefixes: vec![plugin_root.display().to_string()],
+                        require_hash_pin: false,
+                        required_sha256_by_plugin: BTreeMap::new(),
+                    },
+                }),
+            }),
+            bootstrap: Some(BootstrapSpec {
+                enabled: true,
+                allow_http_json_auto_apply: Some(false),
+                allow_process_stdio_auto_apply: Some(false),
+                allow_native_ffi_auto_apply: Some(false),
+                allow_wasm_component_auto_apply: Some(true),
+                allow_mcp_server_auto_apply: Some(false),
+                enforce_ready_execution: Some(true),
+                max_tasks: Some(5),
+            }),
+            auto_provision: None,
+            hotfixes: Vec::new(),
+            operation: OperationSpec::ConnectorLegacy {
+                connector_name: "wasm-runtime-provider".to_owned(),
+                operation: "invoke".to_owned(),
+                required_capabilities: BTreeSet::from([Capability::InvokeConnector]),
+                payload: json!({"input":"ping"}),
+            },
+        };
+
+        let report = execute_spec(spec, true).await;
+        assert_eq!(report.operation_kind, "connector_legacy");
+        assert_eq!(report.outcome["outcome"]["status"], "ok");
+        assert_eq!(
+            report.outcome["outcome"]["payload"]["bridge_execution"]["status"],
+            "executed"
+        );
+        assert_eq!(
+            report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]["executor"],
+            "wasmtime_module"
+        );
+        assert_eq!(
+            report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]["export"],
+            "run"
+        );
+        assert_eq!(
+            report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]["fuel_limit"],
+            200_000
+        );
+        assert!(
+            report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]["fuel_consumed"]
+                .is_number()
+        );
+
+        let provider = report
+            .integration_catalog
+            .provider("wasm-runtime-provider")
+            .expect("provider should exist");
+        assert!(provider.metadata.contains_key("plugin_source_path"));
+        assert!(provider.metadata.contains_key("component_resolved_path"));
+    }
+
+    #[tokio::test]
+    async fn execute_spec_wasm_component_bridge_blocks_artifact_outside_runtime_prefixes() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic")
+            .as_nanos();
+        let plugin_root =
+            std::env::temp_dir().join(format!("chumos-wasm-runtime-block-path-{unique}"));
+        let disallowed_root =
+            std::env::temp_dir().join(format!("chumos-wasm-runtime-deny-prefix-{unique}"));
+        fs::create_dir_all(&plugin_root).expect("create plugin root");
+        fs::create_dir_all(&disallowed_root).expect("create disallowed root");
+
+        fs::write(
+            plugin_root.join("plugin.rs"),
+            r#"
+// CHUMOS_PLUGIN_START
+// {
+//   "plugin_id": "wasm-runtime-path-block",
+//   "provider_id": "wasm-runtime-path-provider",
+//   "connector_name": "wasm-runtime-path-provider",
+//   "channel_id": "primary",
+//   "endpoint": "local://wasm-runtime-path-provider/invoke",
+//   "capabilities": ["InvokeConnector"],
+//   "metadata": {
+//     "bridge_kind":"wasm_component",
+//     "component":"plugin.wasm",
+//     "entrypoint":"run",
+//     "version":"1.0.0"
+//   }
+// }
+// CHUMOS_PLUGIN_END
+"#,
+        )
+        .expect("write wasm plugin manifest");
+
+        let wasm_bytes = wat::parse_str(r#"(module (func (export "run")))"#).expect("compile wasm");
+        fs::write(plugin_root.join("plugin.wasm"), wasm_bytes).expect("write wasm module");
+
+        let spec = RunnerSpec {
+            pack: VerticalPackManifest {
+                pack_id: "spec-wasm-runtime-block-path".to_owned(),
+                domain: "ops".to_owned(),
+                version: "0.1.0".to_owned(),
+                default_route: ExecutionRoute {
+                    harness_kind: HarnessKind::EmbeddedPi,
+                    adapter: Some("pi-local".to_owned()),
+                },
+                allowed_connectors: BTreeSet::new(),
+                granted_capabilities: BTreeSet::new(),
+                metadata: BTreeMap::new(),
+            },
+            agent_id: "agent-wasm-runtime-block-path".to_owned(),
+            ttl_s: 120,
+            approval: None,
+            defaults: None,
+            self_awareness: None,
+            plugin_scan: Some(PluginScanSpec {
+                enabled: true,
+                roots: vec![plugin_root.display().to_string()],
+            }),
+            bridge_support: Some(BridgeSupportSpec {
+                enabled: true,
+                supported_bridges: vec![PluginBridgeKind::WasmComponent],
+                supported_adapter_families: Vec::new(),
+                enforce_supported: true,
+                policy_version: None,
+                expected_checksum: None,
+                expected_sha256: None,
+                execute_process_stdio: false,
+                execute_http_json: false,
+                allowed_process_commands: Vec::new(),
+                enforce_execution_success: false,
+                security_scan: Some(SecurityScanSpec {
+                    enabled: true,
+                    block_on_high: true,
+                    profile_path: None,
+                    profile_sha256: None,
+                    profile_signature: None,
+                    siem_export: None,
+                    runtime: SecurityRuntimeExecutionSpec {
+                        execute_wasm_component: true,
+                        allowed_path_prefixes: vec![disallowed_root.display().to_string()],
+                        max_component_bytes: Some(128 * 1024),
+                        fuel_limit: Some(100_000),
+                    },
+                    high_risk_metadata_keywords: Vec::new(),
+                    wasm: WasmSecurityScanSpec {
+                        enabled: true,
+                        max_module_bytes: 128 * 1024,
+                        allow_wasi: false,
+                        blocked_import_prefixes: vec!["wasi".to_owned()],
+                        allowed_path_prefixes: vec![plugin_root.display().to_string()],
+                        require_hash_pin: false,
+                        required_sha256_by_plugin: BTreeMap::new(),
+                    },
+                }),
+            }),
+            bootstrap: Some(BootstrapSpec {
+                enabled: true,
+                allow_http_json_auto_apply: Some(false),
+                allow_process_stdio_auto_apply: Some(false),
+                allow_native_ffi_auto_apply: Some(false),
+                allow_wasm_component_auto_apply: Some(true),
+                allow_mcp_server_auto_apply: Some(false),
+                enforce_ready_execution: Some(true),
+                max_tasks: Some(5),
+            }),
+            auto_provision: None,
+            hotfixes: Vec::new(),
+            operation: OperationSpec::ConnectorLegacy {
+                connector_name: "wasm-runtime-path-provider".to_owned(),
+                operation: "invoke".to_owned(),
+                required_capabilities: BTreeSet::from([Capability::InvokeConnector]),
+                payload: json!({"input":"ping"}),
+            },
+        };
+
+        let report = execute_spec(spec, true).await;
+        assert_eq!(report.operation_kind, "connector_legacy");
+        assert_eq!(report.outcome["outcome"]["status"], "ok");
+        assert_eq!(
+            report.outcome["outcome"]["payload"]["bridge_execution"]["status"],
+            "blocked"
+        );
+        assert!(
+            report.outcome["outcome"]["payload"]["bridge_execution"]["reason"]
+                .as_str()
+                .expect("blocked reason should be string")
+                .contains("outside runtime allowed_path_prefixes")
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_spec_wasm_component_bridge_blocks_when_module_size_exceeds_runtime_limit() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic")
+            .as_nanos();
+        let plugin_root =
+            std::env::temp_dir().join(format!("chumos-wasm-runtime-block-size-{unique}"));
+        fs::create_dir_all(&plugin_root).expect("create plugin root");
+
+        fs::write(
+            plugin_root.join("plugin.rs"),
+            r#"
+// CHUMOS_PLUGIN_START
+// {
+//   "plugin_id": "wasm-runtime-size-block",
+//   "provider_id": "wasm-runtime-size-provider",
+//   "connector_name": "wasm-runtime-size-provider",
+//   "channel_id": "primary",
+//   "endpoint": "local://wasm-runtime-size-provider/invoke",
+//   "capabilities": ["InvokeConnector"],
+//   "metadata": {
+//     "bridge_kind":"wasm_component",
+//     "component":"plugin.wasm",
+//     "entrypoint":"run",
+//     "version":"1.0.0"
+//   }
+// }
+// CHUMOS_PLUGIN_END
+"#,
+        )
+        .expect("write wasm plugin manifest");
+
+        let wasm_bytes = wat::parse_str(r#"(module (func (export "run")))"#).expect("compile wasm");
+        let wasm_size = wasm_bytes.len();
+        fs::write(plugin_root.join("plugin.wasm"), wasm_bytes).expect("write wasm module");
+
+        let spec = RunnerSpec {
+            pack: VerticalPackManifest {
+                pack_id: "spec-wasm-runtime-block-size".to_owned(),
+                domain: "ops".to_owned(),
+                version: "0.1.0".to_owned(),
+                default_route: ExecutionRoute {
+                    harness_kind: HarnessKind::EmbeddedPi,
+                    adapter: Some("pi-local".to_owned()),
+                },
+                allowed_connectors: BTreeSet::new(),
+                granted_capabilities: BTreeSet::new(),
+                metadata: BTreeMap::new(),
+            },
+            agent_id: "agent-wasm-runtime-block-size".to_owned(),
+            ttl_s: 120,
+            approval: None,
+            defaults: None,
+            self_awareness: None,
+            plugin_scan: Some(PluginScanSpec {
+                enabled: true,
+                roots: vec![plugin_root.display().to_string()],
+            }),
+            bridge_support: Some(BridgeSupportSpec {
+                enabled: true,
+                supported_bridges: vec![PluginBridgeKind::WasmComponent],
+                supported_adapter_families: Vec::new(),
+                enforce_supported: true,
+                policy_version: None,
+                expected_checksum: None,
+                expected_sha256: None,
+                execute_process_stdio: false,
+                execute_http_json: false,
+                allowed_process_commands: Vec::new(),
+                enforce_execution_success: false,
+                security_scan: Some(SecurityScanSpec {
+                    enabled: true,
+                    block_on_high: true,
+                    profile_path: None,
+                    profile_sha256: None,
+                    profile_signature: None,
+                    siem_export: None,
+                    runtime: SecurityRuntimeExecutionSpec {
+                        execute_wasm_component: true,
+                        allowed_path_prefixes: vec![plugin_root.display().to_string()],
+                        max_component_bytes: Some(8),
+                        fuel_limit: Some(100_000),
+                    },
+                    high_risk_metadata_keywords: Vec::new(),
+                    wasm: WasmSecurityScanSpec {
+                        enabled: true,
+                        max_module_bytes: 128 * 1024,
+                        allow_wasi: false,
+                        blocked_import_prefixes: vec!["wasi".to_owned()],
+                        allowed_path_prefixes: vec![plugin_root.display().to_string()],
+                        require_hash_pin: false,
+                        required_sha256_by_plugin: BTreeMap::new(),
+                    },
+                }),
+            }),
+            bootstrap: Some(BootstrapSpec {
+                enabled: true,
+                allow_http_json_auto_apply: Some(false),
+                allow_process_stdio_auto_apply: Some(false),
+                allow_native_ffi_auto_apply: Some(false),
+                allow_wasm_component_auto_apply: Some(true),
+                allow_mcp_server_auto_apply: Some(false),
+                enforce_ready_execution: Some(true),
+                max_tasks: Some(5),
+            }),
+            auto_provision: None,
+            hotfixes: Vec::new(),
+            operation: OperationSpec::ConnectorLegacy {
+                connector_name: "wasm-runtime-size-provider".to_owned(),
+                operation: "invoke".to_owned(),
+                required_capabilities: BTreeSet::from([Capability::InvokeConnector]),
+                payload: json!({"input":"ping"}),
+            },
+        };
+
+        let report = execute_spec(spec, true).await;
+        assert_eq!(report.operation_kind, "connector_legacy");
+        assert_eq!(report.outcome["outcome"]["status"], "ok");
+        assert_eq!(
+            report.outcome["outcome"]["payload"]["bridge_execution"]["status"],
+            "blocked"
+        );
+        assert!(
+            report.outcome["outcome"]["payload"]["bridge_execution"]["reason"]
+                .as_str()
+                .expect("blocked reason should be string")
+                .contains("exceeds runtime max_component_bytes")
+        );
+        assert_eq!(
+            report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]
+                ["module_size_bytes"],
+            wasm_size
+        );
+        assert_eq!(
+            report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]
+                ["max_component_bytes"],
+            8
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_spec_blocks_when_wasm_runtime_enabled_without_allowed_prefixes() {
+        let spec = RunnerSpec {
+            pack: VerticalPackManifest {
+                pack_id: "spec-wasm-runtime-invalid-policy".to_owned(),
+                domain: "ops".to_owned(),
+                version: "0.1.0".to_owned(),
+                default_route: ExecutionRoute {
+                    harness_kind: HarnessKind::EmbeddedPi,
+                    adapter: Some("pi-local".to_owned()),
+                },
+                allowed_connectors: BTreeSet::new(),
+                granted_capabilities: BTreeSet::new(),
+                metadata: BTreeMap::new(),
+            },
+            agent_id: "agent-wasm-runtime-invalid-policy".to_owned(),
+            ttl_s: 120,
+            approval: None,
+            defaults: None,
+            self_awareness: None,
+            plugin_scan: None,
+            bridge_support: Some(BridgeSupportSpec {
+                enabled: true,
+                supported_bridges: vec![PluginBridgeKind::WasmComponent],
+                supported_adapter_families: Vec::new(),
+                enforce_supported: true,
+                policy_version: None,
+                expected_checksum: None,
+                expected_sha256: None,
+                execute_process_stdio: false,
+                execute_http_json: false,
+                allowed_process_commands: Vec::new(),
+                enforce_execution_success: false,
+                security_scan: Some(SecurityScanSpec {
+                    enabled: true,
+                    block_on_high: true,
+                    profile_path: None,
+                    profile_sha256: None,
+                    profile_signature: None,
+                    siem_export: None,
+                    runtime: SecurityRuntimeExecutionSpec {
+                        execute_wasm_component: true,
+                        allowed_path_prefixes: Vec::new(),
+                        max_component_bytes: Some(1024),
+                        fuel_limit: Some(10_000),
+                    },
+                    high_risk_metadata_keywords: Vec::new(),
+                    wasm: WasmSecurityScanSpec {
+                        enabled: true,
+                        max_module_bytes: 128 * 1024,
+                        allow_wasi: false,
+                        blocked_import_prefixes: vec!["wasi".to_owned()],
+                        allowed_path_prefixes: vec!["examples/plugins-wasm".to_owned()],
+                        require_hash_pin: false,
+                        required_sha256_by_plugin: BTreeMap::new(),
+                    },
+                }),
+            }),
+            bootstrap: None,
+            auto_provision: None,
+            hotfixes: Vec::new(),
+            operation: OperationSpec::Task {
+                task_id: "t-wasm-runtime-invalid-policy".to_owned(),
+                objective: "runtime policy should fail closed".to_owned(),
+                required_capabilities: BTreeSet::new(),
+                payload: json!({}),
+            },
+        };
+
+        let report = execute_spec(spec, true).await;
+        assert_eq!(report.operation_kind, "blocked");
+        assert!(report
+            .blocked_reason
+            .expect("blocked reason should exist")
+            .contains("runtime.execute_wasm_component requires runtime.allowed_path_prefixes"));
+    }
+
+    #[tokio::test]
     async fn execute_spec_security_scan_blocks_wasm_plugin_with_wasi_import() {
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -5956,6 +6737,7 @@ mod tests {
                     profile_sha256: None,
                     profile_signature: None,
                     siem_export: None,
+                    runtime: SecurityRuntimeExecutionSpec::default(),
                     high_risk_metadata_keywords: vec!["shell".to_owned()],
                     wasm: WasmSecurityScanSpec {
                         enabled: true,
@@ -6095,6 +6877,7 @@ mod tests {
                     profile_sha256: None,
                     profile_signature: None,
                     siem_export: None,
+                    runtime: SecurityRuntimeExecutionSpec::default(),
                     high_risk_metadata_keywords: vec!["shell".to_owned()],
                     wasm: WasmSecurityScanSpec {
                         enabled: true,
@@ -6219,6 +7002,7 @@ mod tests {
                     profile_sha256: None,
                     profile_signature: None,
                     siem_export: None,
+                    runtime: SecurityRuntimeExecutionSpec::default(),
                     high_risk_metadata_keywords: Vec::new(),
                     wasm: WasmSecurityScanSpec {
                         enabled: false,
@@ -6370,6 +7154,7 @@ mod tests {
                         max_findings_per_record: Some(1),
                         fail_on_error: true,
                     }),
+                    runtime: SecurityRuntimeExecutionSpec::default(),
                     high_risk_metadata_keywords: vec!["shell".to_owned()],
                     wasm: WasmSecurityScanSpec {
                         enabled: false,
@@ -6510,6 +7295,7 @@ mod tests {
                         max_findings_per_record: None,
                         fail_on_error: true,
                     }),
+                    runtime: SecurityRuntimeExecutionSpec::default(),
                     high_risk_metadata_keywords: Vec::new(),
                     wasm: WasmSecurityScanSpec {
                         enabled: false,
@@ -6655,6 +7441,7 @@ mod tests {
                     profile_sha256: None,
                     profile_signature: None,
                     siem_export: None,
+                    runtime: SecurityRuntimeExecutionSpec::default(),
                     high_risk_metadata_keywords: Vec::new(),
                     wasm: WasmSecurityScanSpec {
                         enabled: false,
