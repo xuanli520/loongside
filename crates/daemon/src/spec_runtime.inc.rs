@@ -1441,15 +1441,14 @@ fn execute_http_json_bridge(
     if let Err(reason) = authorize_connector_protocol_context(&mut protocol_context) {
         execution["status"] = Value::String("blocked".to_owned());
         execution["reason"] = Value::String(format!("http_json {reason}"));
-        let mut runtime = json!({
-            "executor": "http_json_reqwest",
-            "method": method_label,
-            "url": channel.endpoint,
-            "timeout_ms": timeout_ms,
-            "enforce_protocol_contract": enforce_protocol_contract,
-        });
-        append_connector_protocol_runtime_context(&mut runtime, &protocol_context);
-        execution["runtime"] = runtime;
+        execution["runtime"] = http_json_runtime_evidence(
+            &protocol_context,
+            &method_label,
+            &channel.endpoint,
+            timeout_ms,
+            enforce_protocol_contract,
+            HttpJsonRuntimeDetails::default(),
+        );
         return execution;
     }
 
@@ -1537,52 +1536,54 @@ fn execute_http_json_bridge(
                     "http_json bridge request failed with status {status_code}"
                 ));
             }
-            let mut runtime = json!({
-                "executor": "http_json_reqwest",
-                "method": method_label,
-                "url": channel.endpoint,
-                "status_code": status_code,
-                "request": request_payload_for_runtime,
-                "response_text": body,
-                "response_json": body_json,
-                "response_method": response_method,
-                "response_id": response_id,
-                "timeout_ms": timeout_ms,
-                "enforce_protocol_contract": enforce_protocol_contract,
-            });
-            append_connector_protocol_runtime_context(&mut runtime, &protocol_context);
-            execution["runtime"] = runtime;
+            execution["runtime"] = http_json_runtime_evidence(
+                &protocol_context,
+                &method_label,
+                &channel.endpoint,
+                timeout_ms,
+                enforce_protocol_contract,
+                HttpJsonRuntimeDetails {
+                    status_code: Some(status_code),
+                    request: Some(request_payload_for_runtime),
+                    response_text: Some(body),
+                    response_json: Some(body_json),
+                    response_method,
+                    response_id,
+                },
+            );
             execution
         }
         Ok(Err(reason)) => {
             execution["status"] = Value::String("failed".to_owned());
             execution["reason"] = Value::String(reason);
-            let mut runtime = json!({
-                "executor": "http_json_reqwest",
-                "method": method_label,
-                "url": channel.endpoint,
-                "request": request_payload_for_runtime,
-                "timeout_ms": timeout_ms,
-                "enforce_protocol_contract": enforce_protocol_contract,
-            });
-            append_connector_protocol_runtime_context(&mut runtime, &protocol_context);
-            execution["runtime"] = runtime;
+            execution["runtime"] = http_json_runtime_evidence(
+                &protocol_context,
+                &method_label,
+                &channel.endpoint,
+                timeout_ms,
+                enforce_protocol_contract,
+                HttpJsonRuntimeDetails {
+                    request: Some(request_payload_for_runtime),
+                    ..HttpJsonRuntimeDetails::default()
+                },
+            );
             execution
         }
         Err(_) => {
             execution["status"] = Value::String("failed".to_owned());
             execution["reason"] =
                 Value::String("http_json bridge worker thread panicked".to_owned());
-            let mut runtime = json!({
-                "executor": "http_json_reqwest",
-                "method": method_label,
-                "url": channel.endpoint,
-                "request": request_payload_for_runtime,
-                "timeout_ms": timeout_ms,
-                "enforce_protocol_contract": enforce_protocol_contract,
-            });
-            append_connector_protocol_runtime_context(&mut runtime, &protocol_context);
-            execution["runtime"] = runtime;
+            execution["runtime"] = http_json_runtime_evidence(
+                &protocol_context,
+                &method_label,
+                &channel.endpoint,
+                timeout_ms,
+                enforce_protocol_contract,
+                HttpJsonRuntimeDetails {
+                    request: Some(request_payload_for_runtime),
+                    ..HttpJsonRuntimeDetails::default()
+                },
+            );
             execution
         }
     }
@@ -1623,15 +1624,13 @@ async fn execute_process_stdio_bridge(
     if let Err(reason) = authorize_connector_protocol_context(&mut protocol_context) {
         execution["status"] = Value::String("blocked".to_owned());
         execution["reason"] = Value::String(format!("process_stdio {reason}"));
-        let mut runtime = json!({
-            "executor": "process_stdio_local",
-            "transport_kind": "json_line",
-            "command": program,
-            "args": args,
-            "timeout_ms": timeout_ms,
-        });
-        append_connector_protocol_runtime_context(&mut runtime, &protocol_context);
-        execution["runtime"] = runtime;
+        execution["runtime"] = process_stdio_runtime_evidence(
+            &protocol_context,
+            &program,
+            &args,
+            timeout_ms,
+            ProcessStdioRuntimeDetails::default(),
+        );
         return execution;
     }
 
@@ -1656,35 +1655,32 @@ async fn execute_process_stdio_bridge(
                     outcome.exit_code
                 ));
             }
-            let mut runtime = json!({
-                "executor": "process_stdio_local",
-                "transport_kind": "json_line",
-                "command": program,
-                "args": args,
-                "exit_code": outcome.exit_code,
-                "stdout": outcome.stdout,
-                "stderr": outcome.stderr,
-                "stdout_json": outcome.stdout_json,
-                "timeout_ms": timeout_ms,
-                "response_method": outcome.response_method,
-                "response_id": outcome.response_id,
-            });
-            append_connector_protocol_runtime_context(&mut runtime, &protocol_context);
-            execution["runtime"] = runtime;
+            execution["runtime"] = process_stdio_runtime_evidence(
+                &protocol_context,
+                &program,
+                &args,
+                timeout_ms,
+                ProcessStdioRuntimeDetails {
+                    exit_code: outcome.exit_code,
+                    stdout: Some(outcome.stdout),
+                    stderr: Some(outcome.stderr),
+                    stdout_json: Some(outcome.stdout_json),
+                    response_method: Some(outcome.response_method),
+                    response_id: outcome.response_id,
+                },
+            );
             execution
         }
         Err(reason) => {
             execution["status"] = Value::String("failed".to_owned());
             execution["reason"] = Value::String(reason);
-            let mut runtime = json!({
-                "executor": "process_stdio_local",
-                "transport_kind": "json_line",
-                "command": program,
-                "args": args,
-                "timeout_ms": timeout_ms,
-            });
-            append_connector_protocol_runtime_context(&mut runtime, &protocol_context);
-            execution["runtime"] = runtime;
+            execution["runtime"] = process_stdio_runtime_evidence(
+                &protocol_context,
+                &program,
+                &args,
+                timeout_ms,
+                ProcessStdioRuntimeDetails::default(),
+            );
             execution
         }
     }

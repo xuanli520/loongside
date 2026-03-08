@@ -27,6 +27,49 @@ fn assert_bridge_runtime_protocol_context(
     );
 }
 
+fn assert_http_json_runtime_shape(runtime: &Value) {
+    for key in [
+        "executor",
+        "method",
+        "url",
+        "timeout_ms",
+        "enforce_protocol_contract",
+        "request_method",
+        "request_id",
+        "protocol_route",
+        "protocol_required_capability",
+        "protocol_capabilities",
+    ] {
+        assert!(
+            runtime.get(key).is_some(),
+            "http_json runtime should include key `{key}`"
+        );
+    }
+    assert_eq!(runtime["executor"], "http_json_reqwest");
+}
+
+fn assert_process_stdio_runtime_shape(runtime: &Value) {
+    for key in [
+        "executor",
+        "transport_kind",
+        "command",
+        "args",
+        "timeout_ms",
+        "request_method",
+        "request_id",
+        "protocol_route",
+        "protocol_required_capability",
+        "protocol_capabilities",
+    ] {
+        assert!(
+            runtime.get(key).is_some(),
+            "process_stdio runtime should include key `{key}`"
+        );
+    }
+    assert_eq!(runtime["executor"], "process_stdio_local");
+    assert_eq!(runtime["transport_kind"], "json_line");
+}
+
 #[tokio::test]
 async fn execute_spec_process_stdio_bridge_executes_when_enabled_and_allowed() {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -119,27 +162,20 @@ async fn execute_spec_process_stdio_bridge_executes_when_enabled_and_allowed() {
     };
 
     let report = execute_spec(spec, true).await;
+    let runtime = &report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"];
     assert_eq!(report.operation_kind, "connector_legacy");
     assert_eq!(report.outcome["outcome"]["status"], "ok");
     assert_eq!(
         report.outcome["outcome"]["payload"]["bridge_execution"]["status"],
         "executed"
     );
-    assert_eq!(
-        report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]["executor"],
-        "process_stdio_local"
-    );
-    assert_eq!(
-        report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]["transport_kind"],
-        "json_line"
-    );
-    assert_eq!(
-        report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]["stdout_json"]
-            ["operation"],
-        "invoke"
-    );
+    assert_process_stdio_runtime_shape(runtime);
+    assert_eq!(runtime["stdout_json"]["operation"], "invoke");
+    assert!(runtime.get("exit_code").is_some());
+    assert!(runtime.get("response_method").is_some());
+    assert!(runtime.get("response_id").is_some());
     assert_bridge_runtime_protocol_context(
-        &report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"],
+        runtime,
         "stdio-provider:primary:invoke",
         "invoke",
         "invoke",
@@ -684,8 +720,13 @@ async fn execute_spec_process_stdio_bridge_blocks_when_protocol_authorization_fa
             .expect("blocked reason should be string")
             .contains("protocol route authorization failed")
     );
+    let runtime = &report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"];
+    assert_process_stdio_runtime_shape(runtime);
+    assert!(runtime.get("exit_code").is_none());
+    assert!(runtime.get("response_method").is_none());
+    assert!(runtime.get("response_id").is_none());
     assert_bridge_runtime_protocol_context(
-        &report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"],
+        runtime,
         "stdio-authz-block-provider:primary:invoke",
         "invoke",
         "discover",
@@ -914,23 +955,21 @@ async fn execute_spec_http_json_bridge_executes_against_local_server() {
 
     let report = execute_spec(spec, true).await;
     server.join().expect("join local http server");
+    let runtime = &report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"];
 
     assert_eq!(report.operation_kind, "connector_legacy");
     assert_eq!(
         report.outcome["outcome"]["payload"]["bridge_execution"]["status"],
         "executed"
     );
-    assert_eq!(
-        report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]["executor"],
-        "http_json_reqwest"
-    );
-    assert_eq!(
-        report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]["response_json"]
-            ["reply"],
-        "pong"
-    );
+    assert_http_json_runtime_shape(runtime);
+    assert_eq!(runtime["response_json"]["reply"], "pong");
+    assert!(runtime.get("status_code").is_some());
+    assert!(runtime.get("response_text").is_some());
+    assert!(runtime.get("response_method").is_none());
+    assert!(runtime.get("response_id").is_none());
     assert_bridge_runtime_protocol_context(
-        &report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"],
+        runtime,
         "http-runtime:primary:invoke",
         "invoke",
         "invoke",
@@ -1022,6 +1061,7 @@ async fn execute_spec_http_json_bridge_blocks_when_protocol_authorization_fails(
     };
 
     let report = execute_spec(spec, true).await;
+    let runtime = &report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"];
     assert_eq!(report.operation_kind, "connector_legacy");
     assert_eq!(
         report.outcome["outcome"]["payload"]["bridge_execution"]["status"],
@@ -1033,8 +1073,14 @@ async fn execute_spec_http_json_bridge_blocks_when_protocol_authorization_fails(
             .expect("blocked reason should be string")
             .contains("protocol route authorization failed")
     );
+    assert_http_json_runtime_shape(runtime);
+    assert!(runtime.get("status_code").is_none());
+    assert!(runtime.get("response_text").is_none());
+    assert!(runtime.get("response_json").is_none());
+    assert!(runtime.get("response_method").is_none());
+    assert!(runtime.get("response_id").is_none());
     assert_bridge_runtime_protocol_context(
-        &report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"],
+        runtime,
         "http-authz-block:primary:invoke",
         "invoke",
         "discover",

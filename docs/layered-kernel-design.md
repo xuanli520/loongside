@@ -172,6 +172,8 @@ Rules:
   to avoid unchecked line-count growth in the runtime orchestration file.
 - Bridge regression suites should be organized in dedicated test modules so
   protocol-contract and authorization assertions remain maintainable.
+- Bridge runtime telemetry should be emitted through typed evidence structs and
+  shared serialization to keep executor payload shape evolution controlled.
 
 ### L6. Integration Control Plane (Autonomous Provisioning)
 

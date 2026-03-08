@@ -154,6 +154,8 @@ Delivered in current baseline:
     (`spec_bridge_protocol.inc.rs`) to reduce spec runtime file growth
   - bridge-focused spec runtime tests split into dedicated module
     (`tests/spec_runtime_bridge.rs`) to reduce test-file maintenance debt
+  - typed bridge runtime evidence structs with shared serialization path to
+    reduce ad-hoc JSON field drift across executors
   - strict/lenient custom route control to avoid ad-hoc string dispatch at call sites
   - linked in-memory `ChannelTransport` primitive with:
     - bounded queue backpressure
