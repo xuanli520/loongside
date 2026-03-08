@@ -164,6 +164,8 @@ Rules:
   request/response method+id consistency, and bounded timeout controls.
 - Runtime http_json execution should enforce protocol-route authorization and
   support optional strict method/id response contract validation.
+- Shared protocol-context construction should be reused across bridge executors
+  to avoid policy drift between transport implementations.
 
 ### L6. Integration Control Plane (Autonomous Provisioning)
 

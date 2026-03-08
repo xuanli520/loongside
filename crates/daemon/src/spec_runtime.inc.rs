@@ -1410,6 +1410,62 @@ async fn maybe_execute_bridge(
     execution
 }
 
+#[derive(Debug, Clone)]
+struct ConnectorProtocolContext {
+    request_method: String,
+    request_id: Option<String>,
+    route_method: Option<String>,
+    required_capability: Option<String>,
+    capabilities: BTreeSet<String>,
+}
+
+impl ConnectorProtocolContext {
+    fn from_connector_command(
+        provider: &kernel::ProviderConfig,
+        channel: &kernel::ChannelConfig,
+        command: &ConnectorCommand,
+    ) -> Self {
+        Self {
+            request_method: "tools/call".to_owned(),
+            request_id: Some(format!(
+                "{}:{}:{}",
+                provider.provider_id, channel.channel_id, command.operation
+            )),
+            route_method: None,
+            required_capability: None,
+            capabilities: protocol_capabilities_for_connector_command(command),
+        }
+    }
+
+    fn capabilities_vec(&self) -> Vec<String> {
+        self.capabilities.iter().cloned().collect::<Vec<_>>()
+    }
+}
+
+fn authorize_connector_protocol_context(context: &mut ConnectorProtocolContext) -> Result<(), String> {
+    let router = ProtocolRouter::default();
+    let resolved_route = router
+        .resolve(&context.request_method)
+        .map_err(|error| {
+            format!(
+                "protocol method {} is invalid: {error}",
+                context.request_method
+            )
+        })?;
+    context.route_method = Some(resolved_route.method().to_owned());
+    context.required_capability = resolved_route.policy.required_capability.clone();
+    router
+        .authorize(
+            &resolved_route,
+            &RouteAuthorizationRequest {
+                authenticated: true,
+                capabilities: context.capabilities.clone(),
+            },
+        )
+        .map_err(|error| format!("protocol route authorization failed: {error}"))?;
+    Ok(())
+}
+
 fn execute_http_json_bridge(
     mut execution: Value,
     provider: &kernel::ProviderConfig,
@@ -1434,55 +1490,22 @@ fn execute_http_json_bridge(
 
     let timeout_ms = parse_http_timeout_ms(provider);
     let enforce_protocol_contract = parse_http_enforce_protocol_contract(provider);
-    let request_method = "tools/call".to_owned();
-    let request_id = Some(format!(
-        "{}:{}:{}",
-        provider.provider_id, channel.channel_id, command.operation
-    ));
-    let router = ProtocolRouter::default();
-    let resolved_route = match router.resolve(&request_method) {
-        Ok(route) => route,
-        Err(error) => {
-            execution["status"] = Value::String("blocked".to_owned());
-            execution["reason"] = Value::String(format!(
-                "http_json protocol method {request_method} is invalid: {error}"
-            ));
-            execution["runtime"] = json!({
-                "executor": "http_json_reqwest",
-                "method": method_label,
-                "url": channel.endpoint,
-                "request_method": request_method,
-                "request_id": request_id,
-                "timeout_ms": timeout_ms,
-                "enforce_protocol_contract": enforce_protocol_contract,
-            });
-            return execution;
-        }
-    };
-    let protocol_capabilities = protocol_capabilities_for_connector_command(command);
-    let required_route_capability = resolved_route.policy.required_capability.clone();
-    if let Err(error) = router.authorize(
-        &resolved_route,
-        &RouteAuthorizationRequest {
-            authenticated: true,
-            capabilities: protocol_capabilities.clone(),
-        },
-    ) {
+    let mut protocol_context =
+        ConnectorProtocolContext::from_connector_command(provider, channel, command);
+    if let Err(reason) = authorize_connector_protocol_context(&mut protocol_context) {
         execution["status"] = Value::String("blocked".to_owned());
-        execution["reason"] = Value::String(format!(
-            "http_json protocol route authorization failed: {error}"
-        ));
+        execution["reason"] = Value::String(format!("http_json {reason}"));
         execution["runtime"] = json!({
             "executor": "http_json_reqwest",
             "method": method_label,
             "url": channel.endpoint,
-            "request_method": request_method,
-            "request_id": request_id,
+            "request_method": protocol_context.request_method,
+            "request_id": protocol_context.request_id,
             "timeout_ms": timeout_ms,
             "enforce_protocol_contract": enforce_protocol_contract,
-            "protocol_route": resolved_route.method(),
-            "protocol_required_capability": required_route_capability.clone(),
-            "protocol_capabilities": protocol_capabilities.iter().cloned().collect::<Vec<_>>(),
+            "protocol_route": protocol_context.route_method,
+            "protocol_required_capability": protocol_context.required_capability,
+            "protocol_capabilities": protocol_context.capabilities_vec(),
         });
         return execution;
     }
@@ -1496,8 +1519,8 @@ fn execute_http_json_bridge(
     let url = channel.endpoint.clone();
     let request_payload_for_runtime = request_payload.clone();
     let request_payload_for_worker = request_payload.clone();
-    let request_method_for_worker = request_method.clone();
-    let request_id_for_worker = request_id.clone();
+    let request_method_for_worker = protocol_context.request_method.clone();
+    let request_id_for_worker = protocol_context.request_id.clone();
 
     let run = std::thread::spawn(move || -> Result<(u16, bool, String, Value, Option<String>, Option<String>), String> {
         let client = reqwest::blocking::Client::builder()
@@ -1577,17 +1600,17 @@ fn execute_http_json_bridge(
                 "url": channel.endpoint,
                 "status_code": status_code,
                 "request": request_payload_for_runtime,
-                "request_method": request_method,
-                "request_id": request_id,
+                "request_method": protocol_context.request_method.clone(),
+                "request_id": protocol_context.request_id.clone(),
                 "response_text": body,
                 "response_json": body_json,
                 "response_method": response_method,
                 "response_id": response_id,
                 "timeout_ms": timeout_ms,
                 "enforce_protocol_contract": enforce_protocol_contract,
-                "protocol_route": resolved_route.method(),
-                "protocol_required_capability": required_route_capability.clone(),
-                "protocol_capabilities": protocol_capabilities.iter().cloned().collect::<Vec<_>>(),
+                "protocol_route": protocol_context.route_method.clone(),
+                "protocol_required_capability": protocol_context.required_capability.clone(),
+                "protocol_capabilities": protocol_context.capabilities_vec(),
             });
             execution
         }
@@ -1599,13 +1622,13 @@ fn execute_http_json_bridge(
                 "method": method_label,
                 "url": channel.endpoint,
                 "request": request_payload_for_runtime,
-                "request_method": request_method,
-                "request_id": request_id,
+                "request_method": protocol_context.request_method.clone(),
+                "request_id": protocol_context.request_id.clone(),
                 "timeout_ms": timeout_ms,
                 "enforce_protocol_contract": enforce_protocol_contract,
-                "protocol_route": resolved_route.method(),
-                "protocol_required_capability": required_route_capability.clone(),
-                "protocol_capabilities": protocol_capabilities.iter().cloned().collect::<Vec<_>>(),
+                "protocol_route": protocol_context.route_method.clone(),
+                "protocol_required_capability": protocol_context.required_capability.clone(),
+                "protocol_capabilities": protocol_context.capabilities_vec(),
             });
             execution
         }
@@ -1618,13 +1641,13 @@ fn execute_http_json_bridge(
                 "method": method_label,
                 "url": channel.endpoint,
                 "request": request_payload_for_runtime,
-                "request_method": request_method,
-                "request_id": request_id,
+                "request_method": protocol_context.request_method,
+                "request_id": protocol_context.request_id,
                 "timeout_ms": timeout_ms,
                 "enforce_protocol_contract": enforce_protocol_contract,
-                "protocol_route": resolved_route.method(),
-                "protocol_required_capability": required_route_capability,
-                "protocol_capabilities": protocol_capabilities.iter().cloned().collect::<Vec<_>>(),
+                "protocol_route": protocol_context.route_method,
+                "protocol_required_capability": protocol_context.required_capability,
+                "protocol_capabilities": protocol_context.capabilities_vec(),
             });
             execution
         }
@@ -1661,55 +1684,22 @@ async fn execute_process_stdio_bridge(
         "operation": command.operation,
         "payload": command.payload,
     });
-    let request_method = "tools/call".to_owned();
-    let request_id = Some(format!(
-        "{}:{}:{}",
-        provider.provider_id, channel.channel_id, command.operation
-    ));
-    let router = ProtocolRouter::default();
-    let resolved_route = match router.resolve(&request_method) {
-        Ok(route) => route,
-        Err(error) => {
-            execution["status"] = Value::String("blocked".to_owned());
-            execution["reason"] = Value::String(format!(
-                "process_stdio protocol method {request_method} is invalid: {error}"
-            ));
-            execution["runtime"] = json!({
-                "executor": "process_stdio_local",
-                "transport_kind": "json_line",
-                "command": program,
-                "args": args,
-                "request_method": request_method,
-                "request_id": request_id,
-                "timeout_ms": timeout_ms,
-            });
-            return execution;
-        }
-    };
-    let protocol_capabilities = protocol_capabilities_for_connector_command(command);
-    let required_route_capability = resolved_route.policy.required_capability.clone();
-    if let Err(error) = router.authorize(
-        &resolved_route,
-        &RouteAuthorizationRequest {
-            authenticated: true,
-            capabilities: protocol_capabilities.clone(),
-        },
-    ) {
+    let mut protocol_context =
+        ConnectorProtocolContext::from_connector_command(provider, channel, command);
+    if let Err(reason) = authorize_connector_protocol_context(&mut protocol_context) {
         execution["status"] = Value::String("blocked".to_owned());
-        execution["reason"] = Value::String(format!(
-            "process_stdio protocol route authorization failed: {error}"
-        ));
+        execution["reason"] = Value::String(format!("process_stdio {reason}"));
         execution["runtime"] = json!({
             "executor": "process_stdio_local",
             "transport_kind": "json_line",
             "command": program,
             "args": args,
-            "request_method": request_method,
-            "request_id": request_id,
+            "request_method": protocol_context.request_method,
+            "request_id": protocol_context.request_id,
             "timeout_ms": timeout_ms,
-            "protocol_route": resolved_route.method(),
-            "protocol_required_capability": required_route_capability.clone(),
-            "protocol_capabilities": protocol_capabilities.iter().cloned().collect::<Vec<_>>(),
+            "protocol_route": protocol_context.route_method,
+            "protocol_required_capability": protocol_context.required_capability,
+            "protocol_capabilities": protocol_context.capabilities_vec(),
         });
         return execution;
     }
@@ -1719,8 +1709,8 @@ async fn execute_process_stdio_bridge(
         &args,
         timeout_ms,
         OutboundFrame {
-            method: request_method.clone(),
-            id: request_id.clone(),
+            method: protocol_context.request_method.clone(),
+            id: protocol_context.request_id.clone(),
             payload: envelope,
         },
     )
@@ -1748,12 +1738,12 @@ async fn execute_process_stdio_bridge(
                 "stdout": outcome.stdout,
                 "stderr": outcome.stderr,
                 "stdout_json": outcome.stdout_json,
-                "request_method": request_method,
-                "request_id": request_id,
+                "request_method": protocol_context.request_method.clone(),
+                "request_id": protocol_context.request_id.clone(),
                 "timeout_ms": timeout_ms,
-                "protocol_route": resolved_route.method(),
-                "protocol_required_capability": required_route_capability.clone(),
-                "protocol_capabilities": protocol_capabilities.iter().cloned().collect::<Vec<_>>(),
+                "protocol_route": protocol_context.route_method.clone(),
+                "protocol_required_capability": protocol_context.required_capability.clone(),
+                "protocol_capabilities": protocol_context.capabilities_vec(),
                 "response_method": outcome.response_method,
                 "response_id": outcome.response_id,
             });
@@ -1767,12 +1757,12 @@ async fn execute_process_stdio_bridge(
                 "transport_kind": "json_line",
                 "command": program,
                 "args": args,
-                "request_method": request_method,
-                "request_id": request_id,
+                "request_method": protocol_context.request_method,
+                "request_id": protocol_context.request_id,
                 "timeout_ms": timeout_ms,
-                "protocol_route": resolved_route.method(),
-                "protocol_required_capability": required_route_capability.clone(),
-                "protocol_capabilities": protocol_capabilities.iter().cloned().collect::<Vec<_>>(),
+                "protocol_route": protocol_context.route_method,
+                "protocol_required_capability": protocol_context.required_capability,
+                "protocol_capabilities": protocol_context.capabilities_vec(),
             });
             execution
         }
@@ -2130,13 +2120,7 @@ fn parse_process_args(provider: &kernel::ProviderConfig) -> Vec<String> {
 }
 
 fn parse_http_timeout_ms(provider: &kernel::ProviderConfig) -> u64 {
-    provider
-        .metadata
-        .get("http_timeout_ms")
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .map(|value| value.min(300_000))
-        .unwrap_or(8_000)
+    parse_clamped_timeout_ms(provider, "http_timeout_ms", 8_000, 300_000)
 }
 
 fn parse_http_enforce_protocol_contract(provider: &kernel::ProviderConfig) -> bool {
@@ -2149,18 +2133,27 @@ fn parse_http_enforce_protocol_contract(provider: &kernel::ProviderConfig) -> bo
 }
 
 fn parse_process_timeout_ms(provider: &kernel::ProviderConfig) -> u64 {
-    provider
-        .metadata
-        .get("process_timeout_ms")
-        .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .map(|value| value.min(300_000))
-        .unwrap_or(5_000)
+    parse_clamped_timeout_ms(provider, "process_timeout_ms", 5_000, 300_000)
 }
 
 fn parse_bool_flag(raw: Option<&str>) -> bool {
     raw.map(|value| value.trim().to_ascii_lowercase())
         .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+}
+
+fn parse_clamped_timeout_ms(
+    provider: &kernel::ProviderConfig,
+    metadata_key: &str,
+    default_ms: u64,
+    max_ms: u64,
+) -> u64 {
+    provider
+        .metadata
+        .get(metadata_key)
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .map(|value| value.min(max_ms))
+        .unwrap_or(default_ms)
 }
 
 fn protocol_capabilities_for_connector_command(command: &ConnectorCommand) -> BTreeSet<String> {
