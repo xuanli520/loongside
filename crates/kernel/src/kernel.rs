@@ -1,3 +1,4 @@
+use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
@@ -16,14 +17,14 @@ use crate::{
     contracts::{
         Capability, CapabilityToken, ConnectorCommand, ConnectorOutcome, HarnessRequest, TaskIntent,
     },
-    errors::KernelError,
+    errors::{KernelError, PolicyError},
     harness::{HarnessAdapter, HarnessBroker},
     memory::{
         CoreMemoryAdapter, MemoryCoreOutcome, MemoryCoreRequest, MemoryExtensionAdapter,
         MemoryExtensionOutcome, MemoryExtensionRequest, MemoryPlane,
     },
     pack::VerticalPackManifest,
-    policy::PolicyEngine,
+    policy::{PolicyContext, PolicyDecision, PolicyEngine, PolicyRequest},
     policy_ext::{PolicyExtension, PolicyExtensionChain, PolicyExtensionContext},
     runtime::{
         CoreRuntimeAdapter, RuntimeCoreOutcome, RuntimeCoreRequest, RuntimeExtensionAdapter,
@@ -537,6 +538,14 @@ impl<P: PolicyEngine> LoongClawKernel<P> {
             })
             .unwrap_or_else(|| "default".to_owned());
         let tool_name = request.tool_name.clone();
+        self.enforce_tool_policy(
+            pack,
+            token,
+            now,
+            required_capabilities,
+            &tool_name,
+            &request.payload,
+        )?;
         let outcome = self
             .tool_plane
             .execute_core(core_name, request)
@@ -578,6 +587,14 @@ impl<P: PolicyEngine> LoongClawKernel<P> {
             })
             .unwrap_or_else(|| "default".to_owned());
         let action = request.extension_action.clone();
+        self.enforce_tool_policy(
+            pack,
+            token,
+            now,
+            required_capabilities,
+            &action,
+            &request.payload,
+        )?;
         let outcome = self
             .tool_plane
             .execute_extension(extension_name, core_name, request)
@@ -746,6 +763,61 @@ impl<P: PolicyEngine> LoongClawKernel<P> {
             }
         }
         Ok(())
+    }
+
+    fn enforce_tool_policy(
+        &self,
+        pack: &VerticalPackManifest,
+        token: &CapabilityToken,
+        now_epoch_s: u64,
+        required_capabilities: &BTreeSet<Capability>,
+        tool_name: &str,
+        parameters: &Value,
+    ) -> Result<(), KernelError> {
+        let policy_request = PolicyRequest {
+            tool_name: tool_name.to_owned(),
+            parameters: parameters.clone(),
+            pack_id: pack.pack_id.clone(),
+            agent_id: token.agent_id.clone(),
+            capabilities_used: required_capabilities.iter().copied().collect(),
+            context: PolicyContext::default(),
+        };
+
+        match self.policy.check_tool_call(&policy_request) {
+            PolicyDecision::Allow => Ok(()),
+            PolicyDecision::Deny(reason) => {
+                let error = PolicyError::ToolCallDenied {
+                    tool_name: tool_name.to_owned(),
+                    reason,
+                };
+                self.audit.record(self.new_event(
+                    now_epoch_s,
+                    Some(token.agent_id.clone()),
+                    AuditEventKind::AuthorizationDenied {
+                        pack_id: pack.pack_id.clone(),
+                        token_id: token.token_id.clone(),
+                        reason: error.to_string(),
+                    },
+                ))?;
+                Err(KernelError::Policy(error))
+            }
+            PolicyDecision::RequireApproval(prompt) => {
+                let error = PolicyError::ToolCallApprovalRequired {
+                    tool_name: tool_name.to_owned(),
+                    prompt,
+                };
+                self.audit.record(self.new_event(
+                    now_epoch_s,
+                    Some(token.agent_id.clone()),
+                    AuditEventKind::AuthorizationDenied {
+                        pack_id: pack.pack_id.clone(),
+                        token_id: token.token_id.clone(),
+                        reason: error.to_string(),
+                    },
+                ))?;
+                Err(KernelError::Policy(error))
+            }
+        }
     }
 
     fn authorize_or_audit_denial(

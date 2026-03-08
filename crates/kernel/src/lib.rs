@@ -63,7 +63,7 @@ pub use plugin_ir::{
     BridgeSupportMatrix, PluginActivationCandidate, PluginActivationPlan, PluginActivationStatus,
     PluginBridgeKind, PluginIR, PluginRuntimeProfile, PluginTranslationReport, PluginTranslator,
 };
-pub use policy::{PolicyEngine, StaticPolicyEngine};
+pub use policy::{PolicyContext, PolicyDecision, PolicyEngine, PolicyRequest, StaticPolicyEngine};
 pub use policy_ext::{PolicyExtension, PolicyExtensionChain, PolicyExtensionContext};
 pub use runtime::{
     CoreRuntimeAdapter, RuntimeCoreOutcome, RuntimeCoreRequest, RuntimeExtensionAdapter,

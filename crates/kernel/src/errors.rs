@@ -35,6 +35,10 @@ pub enum PolicyError {
     RevokedToken { token_id: String },
     #[error("policy extension {extension} denied request: {reason}")]
     ExtensionDenied { extension: String, reason: String },
+    #[error("tool call denied by policy for `{tool_name}`: {reason}")]
+    ToolCallDenied { tool_name: String, reason: String },
+    #[error("tool call requires approval for `{tool_name}`: {prompt}")]
+    ToolCallApprovalRequired { tool_name: String, prompt: String },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]

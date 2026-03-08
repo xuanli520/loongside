@@ -37,6 +37,8 @@ Scope:
 Rules:
 
 - Every external action must pass L1.
+- Tool plane core/extension execution must call `PolicyEngine::check_tool_call` before dispatch
+  (Rule of Two: model intent plus deterministic policy decision).
 - Policy extensions can only tighten behavior, never weaken core policy.
 - Denials are auditable and deterministic.
 - Human approval gate should default to medium-balanced mode:

@@ -6,7 +6,42 @@ use std::{
     },
 };
 
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
 use crate::{contracts::CapabilityToken, errors::PolicyError, pack::VerticalPackManifest};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyContext {
+    pub conversation_hash: Option<String>,
+    pub call_depth: u32,
+}
+
+impl Default for PolicyContext {
+    fn default() -> Self {
+        Self {
+            conversation_hash: None,
+            call_depth: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicyRequest {
+    pub tool_name: String,
+    pub parameters: Value,
+    pub pack_id: String,
+    pub agent_id: String,
+    pub capabilities_used: BTreeSet<crate::contracts::Capability>,
+    pub context: PolicyContext,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PolicyDecision {
+    Allow,
+    Deny(String),
+    RequireApproval(String),
+}
 
 pub trait PolicyEngine: Send + Sync {
     fn issue_token(
@@ -26,6 +61,10 @@ pub trait PolicyEngine: Send + Sync {
     ) -> Result<(), PolicyError>;
 
     fn revoke_token(&self, token_id: &str) -> Result<(), PolicyError>;
+
+    fn check_tool_call(&self, _request: &PolicyRequest) -> PolicyDecision {
+        PolicyDecision::Allow
+    }
 }
 
 #[derive(Debug, Default)]
