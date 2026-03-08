@@ -130,6 +130,8 @@ Delivered in current baseline:
   - typed method routing (`ProtocolRoute`) and policy-aware resolver (`ProtocolRouter`)
   - route authorization contract (`RouteAuthorizationRequest`) for deterministic
     auth/capability gates before handler dispatch
+  - json-line stream transport (`JsonLineTransport`) for stdio/pipe integration
+    with deterministic decode/error handling and close semantics
   - strict/lenient custom route control to avoid ad-hoc string dispatch at call sites
   - linked in-memory `ChannelTransport` primitive with:
     - bounded queue backpressure

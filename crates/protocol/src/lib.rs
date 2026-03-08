@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+use tokio::io::{stdin, stdout, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, Mutex};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -365,10 +367,105 @@ impl Transport for ChannelTransport {
     }
 }
 
+pub struct JsonLineTransport<R, W> {
+    info: TransportInfo,
+    reader: Mutex<BufReader<R>>,
+    writer: Mutex<W>,
+    closed: AtomicBool,
+}
+
+impl<R, W> JsonLineTransport<R, W>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    pub fn new(info: TransportInfo, reader: R, writer: W) -> Self {
+        Self {
+            info,
+            reader: Mutex::new(BufReader::new(reader)),
+            writer: Mutex::new(writer),
+            closed: AtomicBool::new(false),
+        }
+    }
+}
+
+impl JsonLineTransport<tokio::io::Stdin, tokio::io::Stdout> {
+    pub fn stdio(info: TransportInfo) -> Self {
+        Self::new(info, stdin(), stdout())
+    }
+}
+
+#[async_trait]
+impl<R, W> Transport for JsonLineTransport<R, W>
+where
+    R: AsyncRead + Unpin + Send + Sync + 'static,
+    W: AsyncWrite + Unpin + Send + Sync + 'static,
+{
+    fn info(&self) -> TransportInfo {
+        self.info.clone()
+    }
+
+    async fn send(&self, frame: OutboundFrame) -> Result<(), TransportError> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(TransportError::Closed);
+        }
+
+        let mut payload = serde_json::to_vec(&frame).map_err(|error| {
+            TransportError::Failure(format!("failed to encode outbound frame: {error}"))
+        })?;
+        payload.push(b'\n');
+
+        let mut writer = self.writer.lock().await;
+        writer
+            .write_all(&payload)
+            .await
+            .map_err(|error| TransportError::Failure(format!("failed to write frame: {error}")))?;
+        writer
+            .flush()
+            .await
+            .map_err(|error| TransportError::Failure(format!("failed to flush frame: {error}")))?;
+        Ok(())
+    }
+
+    async fn recv(&self) -> Result<Option<InboundFrame>, TransportError> {
+        let mut reader = self.reader.lock().await;
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let read = reader.read_line(&mut line).await.map_err(|error| {
+                TransportError::Failure(format!("failed to read frame: {error}"))
+            })?;
+            if read == 0 {
+                return Ok(None);
+            }
+            let trimmed = line.trim_end_matches(['\n', '\r']);
+            if trimmed.is_empty() {
+                continue;
+            }
+            let frame = serde_json::from_str::<InboundFrame>(trimmed).map_err(|error| {
+                TransportError::Failure(format!("failed to decode inbound frame: {error}"))
+            })?;
+            return Ok(Some(frame));
+        }
+    }
+
+    async fn close(&self) -> Result<(), TransportError> {
+        if self.closed.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+        let mut writer = self.writer.lock().await;
+        writer
+            .shutdown()
+            .await
+            .map_err(|error| TransportError::Failure(format!("failed to shutdown writer: {error}")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
+    use tokio::io::{duplex, split, AsyncWriteExt};
     use tokio::time::{sleep, timeout};
 
     fn test_transport_info(name: &str) -> TransportInfo {
@@ -630,5 +727,107 @@ mod tests {
             ChannelTransport::linked(0, test_transport_info("left"), test_transport_info("right"))
                 .expect_err("zero capacity must fail");
         assert_eq!(error, TransportBuildError::InvalidCapacity(0));
+    }
+
+    #[tokio::test]
+    async fn json_line_transport_roundtrip_is_bidirectional() {
+        let (left_stream, right_stream) = duplex(4 * 1024);
+        let (left_read, left_write) = split(left_stream);
+        let (right_read, right_write) = split(right_stream);
+
+        let left = JsonLineTransport::new(test_transport_info("json-left"), left_read, left_write);
+        let right =
+            JsonLineTransport::new(test_transport_info("json-right"), right_read, right_write);
+
+        left.send(OutboundFrame {
+            method: "tools/call".to_owned(),
+            id: Some("left-1".to_owned()),
+            payload: serde_json::json!({"side":"left"}),
+        })
+        .await
+        .expect("left send should succeed");
+        let from_left = right
+            .recv()
+            .await
+            .expect("right recv should succeed")
+            .expect("right should receive frame");
+        assert_eq!(from_left.method, "tools/call");
+        assert_eq!(from_left.id.as_deref(), Some("left-1"));
+        assert_eq!(from_left.payload["side"], "left");
+
+        right
+            .send(OutboundFrame {
+                method: "resources/read".to_owned(),
+                id: Some("right-1".to_owned()),
+                payload: serde_json::json!({"side":"right"}),
+            })
+            .await
+            .expect("right send should succeed");
+        let from_right = left
+            .recv()
+            .await
+            .expect("left recv should succeed")
+            .expect("left should receive frame");
+        assert_eq!(from_right.method, "resources/read");
+        assert_eq!(from_right.id.as_deref(), Some("right-1"));
+        assert_eq!(from_right.payload["side"], "right");
+    }
+
+    #[tokio::test]
+    async fn json_line_transport_rejects_invalid_json_frame() {
+        let (transport_stream, mut peer_stream) = duplex(1024);
+        let (reader, writer) = split(transport_stream);
+        let transport = JsonLineTransport::new(test_transport_info("json-parse"), reader, writer);
+
+        peer_stream
+            .write_all(b"{\"method\":123,\"id\":null,\"payload\":{}}\n")
+            .await
+            .expect("peer write should succeed");
+
+        let error = transport
+            .recv()
+            .await
+            .expect_err("invalid frame should fail decode");
+        assert!(
+            matches!(error, TransportError::Failure(ref message) if message.contains("failed to decode inbound frame")),
+            "unexpected decode error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn json_line_transport_skips_empty_lines() {
+        let (transport_stream, mut peer_stream) = duplex(1024);
+        let (reader, writer) = split(transport_stream);
+        let transport = JsonLineTransport::new(test_transport_info("json-empty"), reader, writer);
+
+        peer_stream
+            .write_all(b"\n\n{\"method\":\"ping\",\"id\":null,\"payload\":{}}\n")
+            .await
+            .expect("peer write should succeed");
+
+        let received = transport
+            .recv()
+            .await
+            .expect("recv should succeed")
+            .expect("frame should be returned");
+        assert_eq!(received.method, "ping");
+    }
+
+    #[tokio::test]
+    async fn json_line_transport_close_blocks_future_sends() {
+        let (left_stream, _right_stream) = duplex(1024);
+        let (left_read, left_write) = split(left_stream);
+        let left = JsonLineTransport::new(test_transport_info("json-close"), left_read, left_write);
+
+        left.close().await.expect("close should succeed");
+        let error = left
+            .send(OutboundFrame {
+                method: "ping".to_owned(),
+                id: None,
+                payload: serde_json::json!({}),
+            })
+            .await
+            .expect_err("send after close should fail");
+        assert!(matches!(error, TransportError::Closed));
     }
 }

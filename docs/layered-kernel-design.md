@@ -145,6 +145,7 @@ Scope:
 - transport frame contracts
 - typed protocol method router
 - in-memory linked channel transport primitive
+- json-line stream transport primitive for stdio/pipe integration
 
 Responsibilities:
 
