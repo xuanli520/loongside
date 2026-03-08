@@ -36,4 +36,5 @@ jobs:
 
       - name: Analyze
         uses: github/codeql-action/analyze@v3
+        timeout-minutes: 10
         continue-on-error: true
