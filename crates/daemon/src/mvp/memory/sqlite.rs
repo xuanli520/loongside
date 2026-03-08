@@ -1,4 +1,3 @@
-#[cfg(feature = "memory-sqlite")]
 use std::{
     fs,
     path::PathBuf,
@@ -6,13 +5,9 @@ use std::{
 };
 
 use kernel::{MemoryCoreOutcome, MemoryCoreRequest};
-#[cfg(feature = "memory-sqlite")]
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-#[cfg(feature = "memory-sqlite")]
-use serde_json::Value;
+use serde_json::{json, Value};
 
-#[cfg(feature = "memory-sqlite")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationTurn {
     pub role: String,
@@ -20,24 +15,7 @@ pub struct ConversationTurn {
     pub ts: i64,
 }
 
-pub fn execute_memory_core(request: MemoryCoreRequest) -> Result<MemoryCoreOutcome, String> {
-    match request.operation.as_str() {
-        "append_turn" => append_turn(request),
-        "window" => load_window(request),
-        "clear_session" => clear_session(request),
-        _ => Ok(MemoryCoreOutcome {
-            status: "ok".to_owned(),
-            payload: json!({
-                "adapter": "kv-core",
-                "operation": request.operation,
-                "payload": request.payload,
-            }),
-        }),
-    }
-}
-
-#[cfg(feature = "memory-sqlite")]
-fn append_turn(request: MemoryCoreRequest) -> Result<MemoryCoreOutcome, String> {
+pub(super) fn append_turn(request: MemoryCoreRequest) -> Result<MemoryCoreOutcome, String> {
     let payload = request
         .payload
         .as_object()
@@ -83,13 +61,7 @@ fn append_turn(request: MemoryCoreRequest) -> Result<MemoryCoreOutcome, String> 
     })
 }
 
-#[cfg(not(feature = "memory-sqlite"))]
-fn append_turn(_request: MemoryCoreRequest) -> Result<MemoryCoreOutcome, String> {
-    Err("sqlite memory is disabled in this build (enable feature `memory-sqlite`)".to_owned())
-}
-
-#[cfg(feature = "memory-sqlite")]
-fn load_window(request: MemoryCoreRequest) -> Result<MemoryCoreOutcome, String> {
+pub(super) fn load_window(request: MemoryCoreRequest) -> Result<MemoryCoreOutcome, String> {
     let payload = request
         .payload
         .as_object()
@@ -155,13 +127,7 @@ fn load_window(request: MemoryCoreRequest) -> Result<MemoryCoreOutcome, String> 
     })
 }
 
-#[cfg(not(feature = "memory-sqlite"))]
-fn load_window(_request: MemoryCoreRequest) -> Result<MemoryCoreOutcome, String> {
-    Err("sqlite memory is disabled in this build (enable feature `memory-sqlite`)".to_owned())
-}
-
-#[cfg(feature = "memory-sqlite")]
-fn clear_session(request: MemoryCoreRequest) -> Result<MemoryCoreOutcome, String> {
+pub(super) fn clear_session(request: MemoryCoreRequest) -> Result<MemoryCoreOutcome, String> {
     let payload = request
         .payload
         .as_object()
@@ -194,13 +160,11 @@ fn clear_session(request: MemoryCoreRequest) -> Result<MemoryCoreOutcome, String
     })
 }
 
-#[cfg(not(feature = "memory-sqlite"))]
-fn clear_session(_request: MemoryCoreRequest) -> Result<MemoryCoreOutcome, String> {
-    Err("sqlite memory is disabled in this build (enable feature `memory-sqlite`)".to_owned())
-}
-
-#[cfg(feature = "memory-sqlite")]
-pub fn append_turn_direct(session_id: &str, role: &str, content: &str) -> Result<(), String> {
+pub(super) fn append_turn_direct(
+    session_id: &str,
+    role: &str,
+    content: &str,
+) -> Result<(), String> {
     let request = MemoryCoreRequest {
         operation: "append_turn".to_owned(),
         payload: json!({
@@ -209,12 +173,14 @@ pub fn append_turn_direct(session_id: &str, role: &str, content: &str) -> Result
             "content": content,
         }),
     };
-    execute_memory_core(request)?;
+    super::execute_memory_core(request)?;
     Ok(())
 }
 
-#[cfg(feature = "memory-sqlite")]
-pub fn window_direct(session_id: &str, limit: usize) -> Result<Vec<ConversationTurn>, String> {
+pub(super) fn window_direct(
+    session_id: &str,
+    limit: usize,
+) -> Result<Vec<ConversationTurn>, String> {
     let request = MemoryCoreRequest {
         operation: "window".to_owned(),
         payload: json!({
@@ -222,20 +188,18 @@ pub fn window_direct(session_id: &str, limit: usize) -> Result<Vec<ConversationT
             "limit": limit,
         }),
     };
-    let outcome = execute_memory_core(request)?;
+    let outcome = super::execute_memory_core(request)?;
     let turns_raw = outcome.payload["turns"].clone();
     serde_json::from_value(turns_raw)
         .map_err(|error| format!("decode memory turns failed: {error}"))
 }
 
-#[cfg(feature = "memory-sqlite")]
-pub fn ensure_memory_db_ready(path: Option<PathBuf>) -> Result<PathBuf, String> {
+pub(super) fn ensure_memory_db_ready(path: Option<PathBuf>) -> Result<PathBuf, String> {
     let effective = path.unwrap_or_else(memory_db_path);
     ensure_sqlite_schema(&effective)?;
     Ok(effective)
 }
 
-#[cfg(feature = "memory-sqlite")]
 fn default_window_size() -> usize {
     std::env::var("LOONGCLAW_SLIDING_WINDOW")
         .ok()
@@ -244,12 +208,10 @@ fn default_window_size() -> usize {
         .unwrap_or(12)
 }
 
-#[cfg(feature = "memory-sqlite")]
 fn default_window_size_u64() -> u64 {
     default_window_size() as u64
 }
 
-#[cfg(feature = "memory-sqlite")]
 fn unix_ts_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -257,7 +219,6 @@ fn unix_ts_now() -> i64 {
         .unwrap_or_default()
 }
 
-#[cfg(feature = "memory-sqlite")]
 fn memory_db_path() -> PathBuf {
     std::env::var("LOONGCLAW_SQLITE_PATH")
         .ok()
@@ -271,7 +232,6 @@ fn memory_db_path() -> PathBuf {
         })
 }
 
-#[cfg(feature = "memory-sqlite")]
 fn ensure_sqlite_schema(path: &PathBuf) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -296,20 +256,4 @@ fn ensure_sqlite_schema(path: &PathBuf) -> Result<(), String> {
     )
     .map_err(|error| format!("initialize sqlite memory schema failed: {error}"))?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fallback_memory_operation_stays_compatible() {
-        let outcome = execute_memory_core(MemoryCoreRequest {
-            operation: "noop".to_owned(),
-            payload: json!({"a":1}),
-        })
-        .expect("fallback operation should succeed");
-        assert_eq!(outcome.status, "ok");
-        assert_eq!(outcome.payload["adapter"], "kv-core");
-    }
 }

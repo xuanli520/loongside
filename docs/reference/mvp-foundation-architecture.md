@@ -16,7 +16,7 @@ LoongClaw MVP is intentionally split into four layers:
    - Owns turn orchestration: request assembly, provider call, error policy,
      and memory persistence semantics.
    - Serves as a single use-case pipeline for all channels.
-3. `Adapter Layer` (`mvp/channel/*`, `mvp/provider/*`, `mvp/tools.rs`, `mvp/memory.rs`)
+3. `Adapter Layer` (`mvp/channel/*`, `mvp/provider/*`, `mvp/tools/*`, `mvp/memory/*`)
    - Owns protocol-specific I/O and translation.
    - No adapter should directly re-implement orchestration rules.
 4. `Kernel Layer` (`crates/kernel`)
