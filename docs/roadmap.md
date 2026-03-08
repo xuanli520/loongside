@@ -125,6 +125,10 @@ Focus: dynamic provider/channel integration without hardcoding.
 
 Delivered in current baseline:
 
+- protocol foundation crate (`crates/protocol`) with:
+  - transport contract (`Transport` trait + typed frame envelopes)
+  - typed method routing (`ProtocolRoute`) and policy-aware resolver (`ProtocolRouter`)
+  - strict/lenient custom route control to avoid ad-hoc string dispatch at call sites
 - `tool_search` operation for runtime tool discovery over:
   - loaded providers in integration catalog
   - scanned-but-not-absorbed plugin descriptors
