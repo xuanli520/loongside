@@ -242,6 +242,11 @@ Delivered in current baseline:
   - Feishu encrypted webhook payload decrypt lane with signature verification
   - `mvp/provider/*` split into policy/transport/shape layers
   - `ConversationRuntime` port for non-invasive backend extension and contract testing
+- daemon runtime entrypoint decomposition:
+  - `crates/daemon/src/main.rs` reduced to CLI routing + bootstrap wiring
+  - spec/runtime models and adapter inventory extracted to `spec_runtime.inc.rs`
+  - heavy spec execution/security/approval pipeline extracted to `spec_execution.inc.rs`
+  - keeps behavior stable while removing multi-thousand-line single-file coupling
 
 Remaining deliverables:
 
