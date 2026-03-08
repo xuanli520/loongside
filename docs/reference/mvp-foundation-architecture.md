@@ -12,7 +12,7 @@ LoongClaw MVP is intentionally split into four layers:
 1. `Entry Layer` (`loongclawd` CLI commands)
    - Owns process lifecycle and command argument parsing.
    - Must not embed business logic beyond argument validation.
-2. `Application Layer` (`mvp/conversation.rs`)
+2. `Application Layer` (`mvp/conversation/*`)
    - Owns turn orchestration: request assembly, provider call, error policy,
      and memory persistence semantics.
    - Serves as a single use-case pipeline for all channels.
@@ -26,9 +26,10 @@ LoongClaw MVP is intentionally split into four layers:
 
 ### 2.1 Conversation Contract
 
-`ConversationOrchestrator` is the canonical turn pipeline.
-It now depends on a runtime port (`ConversationRuntime`) rather than concrete
-provider/memory functions directly:
+`ConversationOrchestrator` is the canonical turn pipeline. The conversation
+domain is now split by responsibility (`mod.rs`, `runtime.rs`,
+`orchestrator.rs`, `persistence.rs`, `tests.rs`), and depends on a runtime port
+(`ConversationRuntime`) rather than concrete provider/memory functions directly:
 
 - Input: `session_id`, `user_input`, `ProviderErrorMode`
 - Output: final assistant text (`Ok`) or propagated provider error (`Err`)
@@ -52,7 +53,11 @@ Current first-party adapters:
 - Telegram polling adapter (`mvp/channel/telegram.rs`)
 - Feishu send + webhook adapter (`mvp/channel/feishu/*`)
   - `adapter.rs`: Feishu API auth/send/reply transport
-  - `payload.rs`: payload encode/decode and webhook parsing policy
+  - `payload/mod.rs`: payload public surface and module wiring
+  - `payload/outbound.rs`: outbound payload encode/response checks
+  - `payload/inbound.rs`: inbound webhook parse/filter policy
+  - `payload/crypto.rs`: encrypted webhook payload decrypt lane
+  - `payload/types.rs`: inbound event/action domain types
   - `webhook.rs`: webhook state machine and dedupe/retry reply flow
 
 ### 2.3 Provider Contract
