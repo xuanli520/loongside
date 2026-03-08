@@ -64,7 +64,9 @@ Schema fingerprint behavior:
 - Baseline `expected_schema_fingerprint` enforces schema compatibility across refactors.
 - If multiple schema variants appear across iterations, the report emits a `multi:<sha256>` aggregate fingerprint.
 - In strict mode (`--enforce-gate`), every `spec_run` scenario is expected to define `expected_schema_fingerprint`.
-- Strict mode now validates that coverage as a preflight gate before running scenarios.
+- Strict mode now validates baseline coverage as a preflight gate before running scenarios.
+- Preflight errors include: duplicate matrix scenario names, any missing baseline scenario entry, and missing `expected_schema_fingerprint` on `spec_run`.
+- Preflight warnings include: baseline-only unknown scenarios and `expected_schema_fingerprint` configured on non-`spec_run` scenarios.
 - Benchmark reports now include `gate.preflight` with structured preflight issues (when baseline is provided).
 
 ### Drift Example
@@ -119,13 +121,18 @@ cargo run -p loongclaw-daemon -- benchmark-programmatic-pressure-lint \
   --matrix examples/benchmarks/programmatic-pressure-matrix.json \
   --baseline examples/benchmarks/programmatic-pressure-baseline.json \
   --enforce-gate \
+  --fail-on-warnings \
   --output target/benchmarks/programmatic-pressure-baseline-lint-report.json
 ```
 
 or:
 
 ```bash
-./scripts/lint_programmatic_pressure_baseline.sh
+./scripts/lint_programmatic_pressure_baseline.sh \
+  examples/benchmarks/programmatic-pressure-matrix.json \
+  examples/benchmarks/programmatic-pressure-baseline.json \
+  target/benchmarks/programmatic-pressure-baseline-lint-report.json \
+  true
 ```
 
 Refresh baseline schema fingerprints from the latest report:
@@ -147,5 +154,6 @@ The report includes:
 - per-scenario `schema_fingerprint` for contract drift detection
 - structured gate checks and pass/fail status
 - structured `gate.preflight` baseline-coverage audit output
+- baseline lint report includes both `passed` (error-only) and `gate_passed` (respects `--fail-on-warnings`)
 
 Use the report as the machine-readable artifact for performance regression audits.

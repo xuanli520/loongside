@@ -177,6 +177,8 @@ struct ProgrammaticPressureGateSummary {
 struct ProgrammaticPressureBaselinePreflight {
     strict: bool,
     passed: bool,
+    error_count: usize,
+    warning_count: usize,
     issue_count: usize,
     issues: Vec<ProgrammaticPressureBaselineIssue>,
 }
@@ -191,6 +193,8 @@ enum ProgrammaticPressureBaselineIssueSeverity {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum ProgrammaticPressureBaselineIssueKind {
+    DuplicateMatrixScenarioName,
+    MissingMatrixScenarioBaselineThresholds,
     MissingSpecRunBaselineScenario,
     MissingSpecRunSchemaFingerprint,
     UnknownBaselineScenario,
@@ -215,7 +219,9 @@ struct ProgrammaticPressureBaselineLintReport {
     scenario_count: usize,
     spec_run_scenario_count: usize,
     baseline_scenario_count: usize,
+    fail_on_warnings: bool,
     passed: bool,
+    gate_passed: bool,
     error_count: usize,
     warning_count: usize,
     issues: Vec<ProgrammaticPressureBaselineIssue>,
@@ -292,16 +298,18 @@ pub(super) async fn run_programmatic_pressure_benchmark_cli(
         .as_ref()
         .map(|lint| ProgrammaticPressureBaselinePreflight {
             strict: enforce_gate,
-            passed: lint.error_count() == 0,
-            issue_count: lint.error_count(),
-            issues: lint.errors(),
+            passed: lint.passed(),
+            error_count: lint.error_count(),
+            warning_count: lint.warning_count(),
+            issue_count: lint.issues.len(),
+            issues: lint.issues.clone(),
         });
     if enforce_gate {
         if let Some(lint) = baseline_lint.as_ref() {
             let errors = lint.errors();
             if !errors.is_empty() {
                 return Err(format!(
-                    "programmatic pressure strict preflight failed: baseline missing spec_run schema fingerprint coverage for: {}",
+                    "programmatic pressure strict preflight failed: {}",
                     format_baseline_issue_list(&errors)
                 ));
             }
@@ -356,6 +364,7 @@ pub(super) fn run_programmatic_pressure_baseline_lint_cli(
     baseline_path: Option<&str>,
     output_path: &str,
     enforce_gate: bool,
+    fail_on_warnings: bool,
 ) -> CliResult<()> {
     let matrix: ProgrammaticPressureMatrix = read_json_file(matrix_path)?;
     let selected_baseline_path = baseline_path
@@ -366,6 +375,7 @@ pub(super) fn run_programmatic_pressure_baseline_lint_cli(
     })?;
     let baseline: ProgrammaticPressureBaseline = read_json_file(&baseline_path)?;
     let lint = lint_programmatic_pressure_baseline(&matrix, &baseline);
+    let gate_passed = lint_gate_passed(&lint, fail_on_warnings);
 
     let report = ProgrammaticPressureBaselineLintReport {
         generated_at_epoch_s: current_epoch_seconds(),
@@ -385,7 +395,9 @@ pub(super) fn run_programmatic_pressure_baseline_lint_cli(
             })
             .count(),
         baseline_scenario_count: baseline.scenarios.len(),
+        fail_on_warnings,
         passed: lint.passed(),
+        gate_passed,
         error_count: lint.error_count(),
         warning_count: lint.warning_count(),
         issues: lint.issues.clone(),
@@ -394,8 +406,12 @@ pub(super) fn run_programmatic_pressure_baseline_lint_cli(
     write_json_file(output_path, &report)?;
     println!("programmatic pressure baseline lint report written to {output_path}");
     println!(
-        "baseline lint: passed={} errors={} warnings={}",
-        report.passed, report.error_count, report.warning_count
+        "baseline lint: passed={} gate_passed={} errors={} warnings={} fail_on_warnings={}",
+        report.passed,
+        report.gate_passed,
+        report.error_count,
+        report.warning_count,
+        report.fail_on_warnings
     );
     for issue in &report.issues {
         println!(
@@ -404,16 +420,19 @@ pub(super) fn run_programmatic_pressure_baseline_lint_cli(
         );
     }
 
-    if enforce_gate && !report.passed {
-        let errors: Vec<ProgrammaticPressureBaselineIssue> = report
+    if enforce_gate && !report.gate_passed {
+        let gate_issues: Vec<ProgrammaticPressureBaselineIssue> = report
             .issues
             .iter()
-            .filter(|issue| issue.severity == ProgrammaticPressureBaselineIssueSeverity::Error)
+            .filter(|issue| match issue.severity {
+                ProgrammaticPressureBaselineIssueSeverity::Error => true,
+                ProgrammaticPressureBaselineIssueSeverity::Warning => fail_on_warnings,
+            })
             .cloned()
             .collect();
         return Err(format!(
             "programmatic pressure baseline lint failed: {}",
-            format_baseline_issue_list(&errors)
+            format_baseline_issue_list(&gate_issues)
         ));
     }
 
@@ -493,11 +512,40 @@ impl ProgrammaticPressureBaselineLintResult {
     }
 }
 
+fn lint_gate_passed(lint: &ProgrammaticPressureBaselineLintResult, fail_on_warnings: bool) -> bool {
+    if lint.error_count() > 0 {
+        return false;
+    }
+    if fail_on_warnings && lint.warning_count() > 0 {
+        return false;
+    }
+    true
+}
+
 fn lint_programmatic_pressure_baseline(
     matrix: &ProgrammaticPressureMatrix,
     baseline: &ProgrammaticPressureBaseline,
 ) -> ProgrammaticPressureBaselineLintResult {
     let mut issues = Vec::new();
+    let mut matrix_name_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for scenario in &matrix.scenarios {
+        *matrix_name_counts
+            .entry(scenario.name.as_str())
+            .or_insert(0) += 1;
+    }
+    for (scenario_name, count) in &matrix_name_counts {
+        if *count > 1 {
+            issues.push(ProgrammaticPressureBaselineIssue {
+                severity: ProgrammaticPressureBaselineIssueSeverity::Error,
+                kind: ProgrammaticPressureBaselineIssueKind::DuplicateMatrixScenarioName,
+                scenario_name: (*scenario_name).to_owned(),
+                message: format!(
+                    "matrix defines duplicate scenario name {scenario_name} ({count} entries)"
+                ),
+            });
+        }
+    }
+
     let matrix_scenario_map: BTreeMap<&str, &ProgrammaticPressureScenario> = matrix
         .scenarios
         .iter()
@@ -505,34 +553,58 @@ fn lint_programmatic_pressure_baseline(
         .collect();
 
     for scenario in &matrix.scenarios {
-        if !matches!(
+        let is_spec_run = matches!(
             &scenario.kind,
             ProgrammaticPressureScenarioKind::SpecRun { .. }
-        ) {
-            continue;
-        }
+        );
         match baseline.scenarios.get(&scenario.name) {
-            Some(thresholds)
-                if baseline_has_schema_fingerprint(
-                    thresholds.expected_schema_fingerprint.as_deref(),
-                ) => {}
-            Some(_) => issues.push(ProgrammaticPressureBaselineIssue {
-                severity: ProgrammaticPressureBaselineIssueSeverity::Error,
-                kind: ProgrammaticPressureBaselineIssueKind::MissingSpecRunSchemaFingerprint,
-                scenario_name: scenario.name.clone(),
-                message: "expected_schema_fingerprint missing for spec_run scenario in baseline"
-                    .to_owned(),
-            }),
-            None => issues.push(ProgrammaticPressureBaselineIssue {
+            Some(thresholds) => {
+                if is_spec_run
+                    && !baseline_has_schema_fingerprint(
+                        thresholds.expected_schema_fingerprint.as_deref(),
+                    )
+                {
+                    issues.push(ProgrammaticPressureBaselineIssue {
+                        severity: ProgrammaticPressureBaselineIssueSeverity::Error,
+                        kind:
+                            ProgrammaticPressureBaselineIssueKind::MissingSpecRunSchemaFingerprint,
+                        scenario_name: scenario.name.clone(),
+                        message:
+                            "expected_schema_fingerprint missing for spec_run scenario in baseline"
+                                .to_owned(),
+                    });
+                }
+                if !is_spec_run
+                    && baseline_has_schema_fingerprint(
+                        thresholds.expected_schema_fingerprint.as_deref(),
+                    )
+                {
+                    issues.push(ProgrammaticPressureBaselineIssue {
+                        severity: ProgrammaticPressureBaselineIssueSeverity::Warning,
+                        kind: ProgrammaticPressureBaselineIssueKind::NonSpecRunSchemaFingerprintConfigured,
+                        scenario_name: scenario.name.clone(),
+                        message: "expected_schema_fingerprint is ignored for non-spec_run scenario"
+                            .to_owned(),
+                    });
+                }
+            }
+            None if is_spec_run => issues.push(ProgrammaticPressureBaselineIssue {
                 severity: ProgrammaticPressureBaselineIssueSeverity::Error,
                 kind: ProgrammaticPressureBaselineIssueKind::MissingSpecRunBaselineScenario,
                 scenario_name: scenario.name.clone(),
                 message: "baseline scenario missing for spec_run coverage".to_owned(),
             }),
+            None => issues.push(ProgrammaticPressureBaselineIssue {
+                severity: ProgrammaticPressureBaselineIssueSeverity::Error,
+                kind:
+                    ProgrammaticPressureBaselineIssueKind::MissingMatrixScenarioBaselineThresholds,
+                scenario_name: scenario.name.clone(),
+                message: "baseline scenario missing for matrix scenario coverage".to_owned(),
+            }),
         }
     }
 
-    for (scenario_name, thresholds) in &baseline.scenarios {
+    for (scenario_name, _thresholds) in &baseline.scenarios {
         let matrix_scenario = matrix_scenario_map.get(scenario_name.as_str());
         if matrix_scenario.is_none() {
             issues.push(ProgrammaticPressureBaselineIssue {
@@ -542,22 +614,6 @@ fn lint_programmatic_pressure_baseline(
                 message: "baseline scenario does not exist in matrix".to_owned(),
             });
             continue;
-        }
-
-        let is_spec_run = matches!(
-            matrix_scenario.unwrap().kind,
-            ProgrammaticPressureScenarioKind::SpecRun { .. }
-        );
-        if !is_spec_run
-            && baseline_has_schema_fingerprint(thresholds.expected_schema_fingerprint.as_deref())
-        {
-            issues.push(ProgrammaticPressureBaselineIssue {
-                severity: ProgrammaticPressureBaselineIssueSeverity::Warning,
-                kind: ProgrammaticPressureBaselineIssueKind::NonSpecRunSchemaFingerprintConfigured,
-                scenario_name: scenario_name.clone(),
-                message: "expected_schema_fingerprint is ignored for non-spec_run scenario"
-                    .to_owned(),
-            });
         }
     }
 
@@ -1584,7 +1640,6 @@ mod tests {
             serde_json::from_str(baseline_raw).expect("baseline fixture must parse");
 
         baseline.scenarios.remove("adaptive_concurrency_recovery");
-        baseline.scenarios.remove("circuit_half_open_transition");
 
         let lint = lint_programmatic_pressure_baseline(&matrix, &baseline);
         assert_eq!(lint.error_count(), 1);
@@ -1592,10 +1647,28 @@ mod tests {
             issue.kind == ProgrammaticPressureBaselineIssueKind::MissingSpecRunBaselineScenario
                 && issue.scenario_name == "adaptive_concurrency_recovery"
         }));
-        assert!(!lint
-            .issues
-            .iter()
-            .any(|issue| issue.scenario_name == "circuit_half_open_transition"));
+    }
+
+    #[test]
+    fn strict_preflight_reports_missing_non_spec_run_baseline_entry() {
+        let matrix_raw =
+            include_str!("../../../examples/benchmarks/programmatic-pressure-matrix.json");
+        let matrix: ProgrammaticPressureMatrix =
+            serde_json::from_str(matrix_raw).expect("matrix fixture must parse");
+        let baseline_raw =
+            include_str!("../../../examples/benchmarks/programmatic-pressure-baseline.json");
+        let mut baseline: ProgrammaticPressureBaseline =
+            serde_json::from_str(baseline_raw).expect("baseline fixture must parse");
+
+        baseline.scenarios.remove("circuit_half_open_transition");
+
+        let lint = lint_programmatic_pressure_baseline(&matrix, &baseline);
+        assert_eq!(lint.error_count(), 1);
+        assert!(lint.issues.iter().any(|issue| {
+            issue.kind
+                == ProgrammaticPressureBaselineIssueKind::MissingMatrixScenarioBaselineThresholds
+                && issue.scenario_name == "circuit_half_open_transition"
+        }));
     }
 
     #[test]
@@ -1689,6 +1762,47 @@ mod tests {
                 == ProgrammaticPressureBaselineIssueKind::NonSpecRunSchemaFingerprintConfigured
                 && issue.scenario_name == "circuit_half_open_transition"
         }));
+    }
+
+    #[test]
+    fn baseline_lint_reports_duplicate_matrix_scenario_name() {
+        let matrix_raw =
+            include_str!("../../../examples/benchmarks/programmatic-pressure-matrix.json");
+        let mut matrix: ProgrammaticPressureMatrix =
+            serde_json::from_str(matrix_raw).expect("matrix fixture must parse");
+        let baseline_raw =
+            include_str!("../../../examples/benchmarks/programmatic-pressure-baseline.json");
+        let baseline: ProgrammaticPressureBaseline =
+            serde_json::from_str(baseline_raw).expect("baseline fixture must parse");
+
+        let duplicate = matrix
+            .scenarios
+            .first()
+            .expect("matrix should have first scenario")
+            .clone();
+        matrix.scenarios.push(duplicate);
+
+        let lint = lint_programmatic_pressure_baseline(&matrix, &baseline);
+        assert!(lint.error_count() >= 1);
+        assert!(lint.issues.iter().any(|issue| {
+            issue.kind == ProgrammaticPressureBaselineIssueKind::DuplicateMatrixScenarioName
+                && issue.scenario_name == "rate_limit_steady_state"
+        }));
+    }
+
+    #[test]
+    fn lint_gate_can_optionally_fail_on_warnings() {
+        let lint = ProgrammaticPressureBaselineLintResult {
+            issues: vec![ProgrammaticPressureBaselineIssue {
+                severity: ProgrammaticPressureBaselineIssueSeverity::Warning,
+                kind: ProgrammaticPressureBaselineIssueKind::UnknownBaselineScenario,
+                scenario_name: "unknown-extra-scenario".to_owned(),
+                message: "baseline scenario does not exist in matrix".to_owned(),
+            }],
+        };
+
+        assert!(lint_gate_passed(&lint, false));
+        assert!(!lint_gate_passed(&lint, true));
     }
 
     #[test]

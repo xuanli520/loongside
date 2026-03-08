@@ -141,6 +141,8 @@ enum Commands {
         output: String,
         #[arg(long, default_value_t = false)]
         enforce_gate: bool,
+        #[arg(long, default_value_t = false)]
+        fail_on_warnings: bool,
     },
     /// Generate a beginner-friendly TOML config and bootstrap local state
     Setup {
@@ -218,11 +220,13 @@ async fn main() {
             baseline,
             output,
             enforce_gate,
+            fail_on_warnings,
         } => run_programmatic_pressure_baseline_lint_cli(
             &matrix,
             baseline.as_deref(),
             &output,
             enforce_gate,
+            fail_on_warnings,
         ),
         Commands::Setup { output, force } => run_setup_cli(output.as_deref(), force),
         Commands::Chat { config, session } => {
