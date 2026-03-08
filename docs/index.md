@@ -17,6 +17,7 @@ Use this page as the single entry point.
 - [Plugin Manifest Format](./reference/plugin-manifest-format.md)
 - [MVP Quickstart](./reference/mvp-quickstart.md)
 - [MVP Foundation Architecture](./reference/mvp-foundation-architecture.md)
+- [Status, Roadmap, and MVP Progress (2026-03-08)](./reference/status-roadmap-mvp-2026-03-08.md)
 
 ## Examples
 

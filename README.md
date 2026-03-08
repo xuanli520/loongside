@@ -22,8 +22,8 @@ For full details, see [Layered Kernel Design](docs/layered-kernel-design.md).
 
 ## Current Validation Status
 
-- `loongclaw-kernel`: 39 unit tests passing.
-- `loongclaw-daemon`: 99 unit tests passing.
+- `loongclaw-kernel`: 41 unit tests passing.
+- `loongclaw-daemon`: 135 unit tests passing.
 - `loongclawd` smoke/spec execution verified.
 - `programmatic` pressure benchmark gate (matrix + baseline) verified.
 
@@ -81,6 +81,7 @@ pwsh ./scripts/install.ps1 -Setup
 - [Plugin Manifest Format](docs/reference/plugin-manifest-format.md)
 - [MVP Quickstart](docs/reference/mvp-quickstart.md)
 - [MVP Foundation Architecture](docs/reference/mvp-foundation-architecture.md)
+- [Status, Roadmap, and MVP Progress (2026-03-08)](docs/reference/status-roadmap-mvp-2026-03-08.md)
 
 ## Open Source Contribution
 
