@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fs,
+    io::Read,
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex, OnceLock},
@@ -2018,6 +2019,34 @@ fn normalize_allowed_wasm_path_prefixes(prefixes: &[PathBuf]) -> Vec<PathBuf> {
         .collect()
 }
 
+#[derive(Debug)]
+struct WasmArtifactBytes {
+    bytes: Vec<u8>,
+    modified_unix_ns: Option<u128>,
+}
+
+fn read_wasm_artifact_bytes(artifact_path: &Path) -> Result<WasmArtifactBytes, String> {
+    let mut artifact_file = fs::File::open(artifact_path)
+        .map_err(|error| format!("failed to open wasm artifact: {error}"))?;
+    let artifact_metadata = artifact_file
+        .metadata()
+        .map_err(|error| format!("failed to read wasm artifact metadata: {error}"))?;
+    if !artifact_metadata.file_type().is_file() {
+        return Err("wasm artifact path must reference a regular file".to_owned());
+    }
+
+    let expected_size = artifact_metadata.len().min(8 * 1024 * 1024_u64) as usize;
+    let mut bytes = Vec::with_capacity(expected_size);
+    artifact_file
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("failed to read wasm artifact: {error}"))?;
+
+    Ok(WasmArtifactBytes {
+        bytes,
+        modified_unix_ns: modified_unix_nanos(&artifact_metadata),
+    })
+}
+
 fn compile_wasm_module(
     module_bytes: &[u8],
     fuel_enabled: bool,
@@ -2140,6 +2169,16 @@ pub fn execute_wasm_component_bridge(
     };
     let artifact_modified_unix_ns = modified_unix_nanos(&artifact_metadata);
     let mut module_size_bytes = artifact_metadata.len() as usize;
+    if !artifact_metadata.file_type().is_file() {
+        execution["status"] = Value::String("blocked".to_owned());
+        execution["reason"] =
+            Value::String("wasm artifact path must reference a regular file".to_owned());
+        execution["runtime"] = json!({
+            "executor": "wasmtime_module",
+            "artifact_path": artifact_path.display().to_string(),
+        });
+        return execution;
+    }
 
     if let Some(limit) = runtime_policy.wasm_max_component_bytes {
         if module_size_bytes > limit {
@@ -2171,12 +2210,11 @@ pub fn execute_wasm_component_bridge(
     let (cached_module, cache_lookup) = match lookup_cached_wasm_module(&initial_cache_key) {
         Ok(Some(hit)) => hit,
         Ok(None) => {
-            let module_bytes = match fs::read(&artifact_path) {
+            let artifact_bytes = match read_wasm_artifact_bytes(&artifact_path) {
                 Ok(bytes) => bytes,
                 Err(error) => {
                     execution["status"] = Value::String("failed".to_owned());
-                    execution["reason"] =
-                        Value::String(format!("failed to read wasm artifact: {error}"));
+                    execution["reason"] = Value::String(error);
                     execution["runtime"] = json!({
                         "executor": "wasmtime_module",
                         "artifact_path": artifact_path.display().to_string(),
@@ -2194,6 +2232,7 @@ pub fn execute_wasm_component_bridge(
                     return execution;
                 }
             };
+            let module_bytes = artifact_bytes.bytes;
 
             module_size_bytes = module_bytes.len();
             if let Some(limit) = runtime_policy.wasm_max_component_bytes {
@@ -2213,13 +2252,12 @@ pub fn execute_wasm_component_bridge(
                 }
             }
 
-            let refreshed_modified_unix_ns = fs::metadata(&artifact_path)
-                .ok()
-                .and_then(|metadata| modified_unix_nanos(&metadata));
             let refreshed_cache_key = build_wasm_module_cache_key(
                 &artifact_path,
                 module_size_bytes as u64,
-                refreshed_modified_unix_ns.or(artifact_modified_unix_ns),
+                artifact_bytes
+                    .modified_unix_ns
+                    .or(artifact_modified_unix_ns),
                 fuel_enabled,
             );
 
