@@ -225,7 +225,10 @@ fn verify_feishu_signature(
     }
 
     let Some(encrypt_key) = encrypt_key.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(());
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "unauthorized: feishu encrypt key is not configured".to_owned(),
+        ));
     };
 
     let timestamp = read_header_required(headers, "X-Lark-Request-Timestamp")?;
@@ -331,6 +334,17 @@ mod tests {
         let error =
             verify_feishu_signature(&headers, body, &payload, Some("key")).expect_err("mismatch");
         assert_eq!(error.0, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn signature_verification_requires_encrypt_key_for_event_payloads() {
+        let headers = HeaderMap::new();
+        let body = "{\"header\":{\"event_type\":\"im.message.receive_v1\"}}";
+        let payload = serde_json::from_str::<Value>(body).expect("payload");
+        let error = verify_feishu_signature(&headers, body, &payload, None)
+            .expect_err("missing encrypt key should fail");
+        assert_eq!(error.0, StatusCode::UNAUTHORIZED);
+        assert!(error.1.contains("encrypt key is not configured"));
     }
 
     #[test]

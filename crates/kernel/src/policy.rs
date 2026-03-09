@@ -11,6 +11,34 @@ pub use loongclaw_contracts::{PolicyContext, PolicyDecision, PolicyRequest};
 
 use crate::{contracts::CapabilityToken, errors::PolicyError, pack::VerticalPackManifest};
 
+const SHELL_HARD_DENY_COMMANDS: &[&str] = &[
+    "rm", "dd", "mkfs", "shutdown", "reboot", "poweroff", "halt", "init",
+];
+const SHELL_APPROVAL_REQUIRED_COMMANDS: &[&str] = &[
+    "bash",
+    "sh",
+    "zsh",
+    "fish",
+    "sudo",
+    "su",
+    "curl",
+    "wget",
+    "ssh",
+    "scp",
+    "sftp",
+    "nc",
+    "ncat",
+    "netcat",
+    "python",
+    "python3",
+    "node",
+    "perl",
+    "ruby",
+    "php",
+    "pwsh",
+    "powershell",
+];
+
 pub trait PolicyEngine: Send + Sync {
     fn issue_token(
         &self,
@@ -157,5 +185,125 @@ impl PolicyEngine for StaticPolicyEngine {
 
     fn revoke_generation(&self, below: u64) {
         self.revoke_generation(below);
+    }
+
+    fn check_tool_call(&self, request: &PolicyRequest) -> PolicyDecision {
+        default_tool_policy(request)
+    }
+}
+
+fn default_tool_policy(request: &PolicyRequest) -> PolicyDecision {
+    match normalize_tool_name(request.tool_name.as_str()) {
+        "shell.exec" => default_shell_policy(&request.parameters),
+        _ => PolicyDecision::Allow,
+    }
+}
+
+fn normalize_tool_name(raw: &str) -> &str {
+    match raw {
+        "shell_exec" | "shell" => "shell.exec",
+        "file_read" => "file.read",
+        "file_write" => "file.write",
+        other => other,
+    }
+}
+
+fn default_shell_policy(parameters: &serde_json::Value) -> PolicyDecision {
+    let command = parameters
+        .as_object()
+        .and_then(|map| map.get("command"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+
+    let Some(command) = command else {
+        // Keep malformed-payload handling in tool adapter for backward compatibility.
+        return PolicyDecision::Allow;
+    };
+
+    if SHELL_HARD_DENY_COMMANDS
+        .iter()
+        .any(|blocked| command == *blocked)
+    {
+        return PolicyDecision::Deny(format!(
+            "command `{command}` is blocked by default shell policy"
+        ));
+    }
+
+    if SHELL_APPROVAL_REQUIRED_COMMANDS
+        .iter()
+        .any(|gated| command == *gated)
+    {
+        return PolicyDecision::RequireApproval(format!(
+            "command `{command}` requires approval by default shell policy"
+        ));
+    }
+
+    PolicyDecision::Allow
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use serde_json::json;
+
+    use super::*;
+
+    fn policy_request(tool_name: &str, parameters: serde_json::Value) -> PolicyRequest {
+        PolicyRequest {
+            tool_name: tool_name.to_owned(),
+            parameters,
+            pack_id: "test-pack".to_owned(),
+            agent_id: "test-agent".to_owned(),
+            capabilities_used: BTreeSet::new(),
+            context: PolicyContext::default(),
+        }
+    }
+
+    #[test]
+    fn static_policy_denies_destructive_shell_commands() {
+        let request = policy_request("shell.exec", json!({"command": "rm", "args": ["-rf", "/"]}));
+        let decision = default_tool_policy(&request);
+        assert!(matches!(decision, PolicyDecision::Deny(_)));
+    }
+
+    #[test]
+    fn static_policy_requires_approval_for_high_risk_shell_commands() {
+        let request = policy_request(
+            "shell.exec",
+            json!({"command": "curl", "args": ["https://example.com"]}),
+        );
+        let decision = default_tool_policy(&request);
+        assert!(matches!(decision, PolicyDecision::RequireApproval(_)));
+    }
+
+    #[test]
+    fn static_policy_allows_safe_shell_commands() {
+        let request = policy_request("shell.exec", json!({"command": "echo", "args": ["hello"]}));
+        let decision = default_tool_policy(&request);
+        assert_eq!(decision, PolicyDecision::Allow);
+    }
+
+    #[test]
+    fn static_policy_normalizes_underscore_shell_alias() {
+        let request = policy_request("shell_exec", json!({"command": "curl"}));
+        let decision = default_tool_policy(&request);
+        assert!(matches!(decision, PolicyDecision::RequireApproval(_)));
+    }
+
+    #[test]
+    fn static_policy_keeps_non_shell_tools_allowed() {
+        let request = policy_request("file.read", json!({"path": "README.md"}));
+        let decision = default_tool_policy(&request);
+        assert_eq!(decision, PolicyDecision::Allow);
+    }
+
+    #[test]
+    fn static_policy_allows_malformed_shell_payloads_to_adapter_layer() {
+        let request = policy_request("shell.exec", json!("not an object"));
+        let decision = default_tool_policy(&request);
+        assert_eq!(decision, PolicyDecision::Allow);
     }
 }

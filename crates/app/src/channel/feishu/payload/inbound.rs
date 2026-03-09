@@ -74,7 +74,7 @@ pub(in crate::channel::feishu) fn parse_feishu_webhook_payload(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "feishu message event missing message.chat_id".to_owned())?;
-    if !allowed_chat_ids.is_empty() && !allowed_chat_ids.contains(chat_id) {
+    if !allowed_chat_ids.contains(chat_id) {
         return Ok(FeishuWebhookAction::Ignore);
     }
 
@@ -124,7 +124,7 @@ fn verify_feishu_token(payload: &Value, verification_token: Option<&str>) -> Cli
         .map(str::trim)
         .filter(|value| !value.is_empty())
     else {
-        return Ok(());
+        return Err("unauthorized: feishu verification token is not configured".to_owned());
     };
 
     let incoming = payload

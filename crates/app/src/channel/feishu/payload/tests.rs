@@ -46,9 +46,9 @@ fn feishu_message_event_parses_text_payload() {
         }
     });
 
-    let action =
-        parse_feishu_webhook_payload(&payload, Some("token-123"), None, &BTreeSet::new(), true)
-            .expect("parse feishu event");
+    let allowlist = BTreeSet::from([String::from("oc_123")]);
+    let action = parse_feishu_webhook_payload(&payload, Some("token-123"), None, &allowlist, true)
+        .expect("parse feishu event");
 
     match action {
         FeishuWebhookAction::Inbound(event) => {
@@ -150,11 +150,12 @@ fn feishu_encrypted_payload_parses_with_encrypt_key() {
     let encrypted = encrypt_event_payload_for_test(&plain_payload_str, "encrypt-key");
     let wrapper = json!({ "encrypt": encrypted });
 
+    let allowlist = BTreeSet::from([String::from("oc_encrypt")]);
     let parsed = parse_feishu_webhook_payload(
         &wrapper,
         Some("token-123"),
         Some("encrypt-key"),
-        &BTreeSet::new(),
+        &allowlist,
         true,
     )
     .expect("parse encrypted payload");
@@ -178,4 +179,57 @@ fn feishu_encrypted_payload_requires_encrypt_key() {
             .expect_err("encrypted payload without key should fail");
 
     assert!(error.contains("encrypt key is not configured"));
+}
+
+#[test]
+fn feishu_message_event_is_ignored_when_allowlist_is_empty() {
+    let payload = json!({
+        "token": "token-123",
+        "header": {
+            "event_type": "im.message.receive_v1"
+        },
+        "event": {
+            "sender": {
+                "sender_type": "user"
+            },
+            "message": {
+                "chat_id": "oc_123",
+                "message_id": "om_123",
+                "message_type": "text",
+                "content": "{\"text\":\"hello loongclaw\"}"
+            }
+        }
+    });
+
+    let action =
+        parse_feishu_webhook_payload(&payload, Some("token-123"), None, &BTreeSet::new(), true)
+            .expect("parse feishu event");
+    assert!(matches!(action, FeishuWebhookAction::Ignore));
+}
+
+#[test]
+fn feishu_message_event_requires_verification_token_configuration() {
+    let payload = json!({
+        "token": "token-123",
+        "header": {
+            "event_type": "im.message.receive_v1"
+        },
+        "event": {
+            "sender": {
+                "sender_type": "user"
+            },
+            "message": {
+                "chat_id": "oc_123",
+                "message_id": "om_123",
+                "message_type": "text",
+                "content": "{\"text\":\"hello loongclaw\"}"
+            }
+        }
+    });
+
+    let allowlist = BTreeSet::from([String::from("oc_123")]);
+    let error = parse_feishu_webhook_payload(&payload, None, None, &allowlist, true)
+        .expect_err("missing verification token should fail");
+
+    assert!(error.contains("verification token is not configured"));
 }

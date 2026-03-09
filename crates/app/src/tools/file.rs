@@ -1,5 +1,6 @@
 #[cfg(feature = "tool-file")]
 use std::{
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
 };
@@ -136,14 +137,7 @@ fn resolve_safe_file_path_with_config(
         root.join(candidate)
     };
     let normalized = normalize_without_fs_access(&combined);
-    if !normalized.starts_with(&root) {
-        return Err(format!(
-            "file path {} escapes configured file root {}",
-            normalized.display(),
-            root.display()
-        ));
-    }
-    Ok(normalized)
+    resolve_path_within_root(&root, &normalized)
 }
 
 #[cfg(feature = "tool-file")]
@@ -153,6 +147,78 @@ fn canonicalize_or_fallback(path: PathBuf) -> Result<PathBuf, String> {
             .map_err(|error| format!("failed to canonicalize {}: {error}", path.display()));
     }
     Ok(normalize_without_fs_access(&path))
+}
+
+#[cfg(feature = "tool-file")]
+fn resolve_path_within_root(root: &Path, normalized: &Path) -> Result<PathBuf, String> {
+    ensure_path_within_root(root, normalized)?;
+
+    if normalized.exists() {
+        let canonical = fs::canonicalize(normalized).map_err(|error| {
+            format!(
+                "failed to canonicalize target file path {}: {error}",
+                normalized.display()
+            )
+        })?;
+        ensure_path_within_root(root, &canonical)?;
+        return Ok(canonical);
+    }
+
+    let (ancestor, suffix) = split_existing_ancestor(normalized)?;
+    let canonical_ancestor = fs::canonicalize(&ancestor).map_err(|error| {
+        format!(
+            "failed to canonicalize ancestor {}: {error}",
+            ancestor.display()
+        )
+    })?;
+    ensure_path_within_root(root, &canonical_ancestor)?;
+
+    let mut reconstructed = canonical_ancestor;
+    for component in suffix {
+        reconstructed.push(component);
+    }
+    ensure_path_within_root(root, &reconstructed)?;
+    Ok(reconstructed)
+}
+
+#[cfg(feature = "tool-file")]
+fn ensure_path_within_root(root: &Path, path: &Path) -> Result<(), String> {
+    if path.starts_with(root) {
+        return Ok(());
+    }
+    Err(format!(
+        "file path {} escapes configured file root {}",
+        path.display(),
+        root.display()
+    ))
+}
+
+#[cfg(feature = "tool-file")]
+fn split_existing_ancestor(path: &Path) -> Result<(PathBuf, Vec<OsString>), String> {
+    let mut cursor = path.to_path_buf();
+    let mut suffix = Vec::new();
+
+    loop {
+        if cursor.exists() {
+            suffix.reverse();
+            return Ok((cursor, suffix));
+        }
+
+        let Some(name) = cursor.file_name().map(|value| value.to_owned()) else {
+            return Err(format!(
+                "cannot resolve existing ancestor for {}",
+                path.display()
+            ));
+        };
+        suffix.push(name);
+        let Some(parent) = cursor.parent() else {
+            return Err(format!(
+                "cannot resolve existing ancestor for {}",
+                path.display()
+            ));
+        };
+        cursor = parent.to_path_buf();
+    }
 }
 
 #[cfg(feature = "tool-file")]
@@ -175,4 +241,110 @@ fn normalize_without_fs_access(path: &Path) -> PathBuf {
         normalized.push(part);
     }
     normalized
+}
+
+#[cfg(all(test, feature = "tool-file"))]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use loongclaw_contracts::ToolCoreRequest;
+    use serde_json::json;
+
+    use super::*;
+    use crate::tools::runtime_config::ToolRuntimeConfig;
+
+    #[cfg(unix)]
+    fn create_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{nanos}"))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_safe_file_path_rejects_symlink_escape_on_read() {
+        let base = unique_temp_dir("loongclaw-file-read");
+        let root = base.join("root");
+        let outside = base.join("outside");
+        fs::create_dir_all(&root).expect("create root");
+        fs::create_dir_all(&outside).expect("create outside");
+
+        let outside_file = outside.join("secret.txt");
+        fs::write(&outside_file, "secret").expect("write outside file");
+        let link = root.join("secret-link");
+        assert!(create_symlink(&outside_file, &link).is_ok());
+
+        let config = ToolRuntimeConfig {
+            shell_allowlist: Default::default(),
+            file_root: Some(root.clone()),
+        };
+        let error =
+            resolve_safe_file_path_with_config("secret-link", &config).expect_err("escape denied");
+
+        assert!(error.contains("escapes configured file root"));
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_write_rejects_symlink_directory_escape() {
+        let base = unique_temp_dir("loongclaw-file-write");
+        let root = base.join("root");
+        let outside_dir = base.join("outside-dir");
+        fs::create_dir_all(&root).expect("create root");
+        fs::create_dir_all(&outside_dir).expect("create outside dir");
+
+        let link = root.join("escape");
+        assert!(create_symlink(&outside_dir, &link).is_ok());
+
+        let config = ToolRuntimeConfig {
+            shell_allowlist: Default::default(),
+            file_root: Some(root.clone()),
+        };
+        let request = ToolCoreRequest {
+            tool_name: "file.write".to_owned(),
+            payload: json!({
+                "path": "escape/pwned.txt",
+                "content": "owned",
+                "create_dirs": true
+            }),
+        };
+        let error =
+            execute_file_write_tool_with_config(request, &config).expect_err("escape denied");
+
+        assert!(error.contains("escapes configured file root"));
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn file_write_allows_path_inside_root() {
+        let base = unique_temp_dir("loongclaw-file-safe");
+        let root = base.join("root");
+        fs::create_dir_all(&root).expect("create root");
+
+        let config = ToolRuntimeConfig {
+            shell_allowlist: Default::default(),
+            file_root: Some(root.clone()),
+        };
+        let request = ToolCoreRequest {
+            tool_name: "file.write".to_owned(),
+            payload: json!({
+                "path": "safe/note.txt",
+                "content": "hello",
+                "create_dirs": true
+            }),
+        };
+        let result = execute_file_write_tool_with_config(request, &config);
+        assert!(result.is_ok());
+
+        let written = fs::read_to_string(root.join("safe/note.txt")).expect("read written file");
+        assert_eq!(written, "hello");
+        let _ = fs::remove_dir_all(base);
+    }
 }

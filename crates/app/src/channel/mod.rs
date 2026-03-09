@@ -58,6 +58,7 @@ pub async fn run_telegram_channel(config_path: Option<&str>, once: bool) -> CliR
         if !config.telegram.enabled {
             return Err("telegram channel is disabled by config.telegram.enabled=false".to_owned());
         }
+        validate_telegram_security_config(&config)?;
         apply_runtime_env(&config);
         let kernel_ctx = bootstrap_kernel_context("channel-telegram", DEFAULT_TOKEN_TTL_S)?;
 
@@ -149,6 +150,7 @@ pub async fn run_feishu_channel(
         if !config.feishu.enabled {
             return Err("feishu channel is disabled by config.feishu.enabled=false".to_owned());
         }
+        validate_feishu_security_config(&config)?;
         apply_runtime_env(&config);
         let kernel_ctx = bootstrap_kernel_context("channel-feishu", DEFAULT_TOKEN_TTL_S)?;
 
@@ -211,4 +213,95 @@ fn apply_runtime_env(config: &LoongClawConfig) {
         file_root: Some(config.tools.resolved_file_root()),
     };
     let _ = crate::tools::runtime_config::init_tool_runtime_config(tool_rt);
+}
+
+#[cfg(feature = "channel-telegram")]
+fn validate_telegram_security_config(config: &LoongClawConfig) -> CliResult<()> {
+    if config.telegram.allowed_chat_ids.is_empty() {
+        return Err(
+            "telegram.allowed_chat_ids is empty; configure at least one trusted chat id".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "channel-feishu")]
+fn validate_feishu_security_config(config: &LoongClawConfig) -> CliResult<()> {
+    let has_allowlist = config
+        .feishu
+        .allowed_chat_ids
+        .iter()
+        .any(|value| !value.trim().is_empty());
+    if !has_allowlist {
+        return Err(
+            "feishu.allowed_chat_ids is empty; configure at least one trusted chat id".to_owned(),
+        );
+    }
+
+    let has_verification_token = config
+        .feishu
+        .verification_token()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    if !has_verification_token {
+        return Err(
+            "feishu.verification_token is missing; configure token or verification_token_env"
+                .to_owned(),
+        );
+    }
+
+    let has_encrypt_key = config
+        .feishu
+        .encrypt_key()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    if !has_encrypt_key {
+        return Err("feishu.encrypt_key is missing; configure key or encrypt_key_env".to_owned());
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(feature = "channel-telegram")]
+    #[test]
+    fn telegram_security_validation_requires_allowlist() {
+        let config = LoongClawConfig::default();
+        let error = validate_telegram_security_config(&config)
+            .expect_err("empty allowlist must be rejected");
+        assert!(error.contains("allowed_chat_ids"));
+    }
+
+    #[cfg(feature = "channel-telegram")]
+    #[test]
+    fn telegram_security_validation_accepts_configured_allowlist() {
+        let mut config = LoongClawConfig::default();
+        config.telegram.allowed_chat_ids = vec![123_i64];
+        assert!(validate_telegram_security_config(&config).is_ok());
+    }
+
+    #[cfg(feature = "channel-feishu")]
+    #[test]
+    fn feishu_security_validation_requires_secrets_and_allowlist() {
+        let config = LoongClawConfig::default();
+        let error =
+            validate_feishu_security_config(&config).expect_err("empty config must be rejected");
+        assert!(error.contains("allowed_chat_ids"));
+    }
+
+    #[cfg(feature = "channel-feishu")]
+    #[test]
+    fn feishu_security_validation_accepts_complete_configuration() {
+        let mut config = LoongClawConfig::default();
+        config.feishu.allowed_chat_ids = vec!["oc_123".to_owned()];
+        config.feishu.verification_token = Some("token-123".to_owned());
+        config.feishu.verification_token_env = None;
+        config.feishu.encrypt_key = Some("encrypt-key-123".to_owned());
+        config.feishu.encrypt_key_env = None;
+
+        assert!(validate_feishu_security_config(&config).is_ok());
+    }
 }

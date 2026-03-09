@@ -150,7 +150,7 @@ pub(super) fn parse_telegram_updates(
             .and_then(|chat| chat.get("id"))
             .and_then(Value::as_i64)
             .unwrap_or_default();
-        let allowed = allowlist.is_empty() || allowlist.contains(&chat_id);
+        let allowed = allowlist.contains(&chat_id);
         if !allowed {
             continue;
         }
@@ -235,5 +235,28 @@ mod tests {
         assert_eq!(inbox[0].session_id, "telegram:123");
         assert_eq!(inbox[0].text, "hello");
         assert_eq!(next_offset, Some(102));
+    }
+
+    #[test]
+    fn telegram_parser_rejects_all_when_allowlist_is_empty() {
+        let payload = json!({
+            "ok": true,
+            "result": [
+                {
+                    "update_id": 8,
+                    "message": {
+                        "text": "hello",
+                        "chat": {"id": 42}
+                    }
+                }
+            ]
+        });
+
+        let allowlist = BTreeSet::new();
+        let (inbox, next_offset) =
+            parse_telegram_updates(&payload, &allowlist, 0).expect("parse telegram updates");
+
+        assert!(inbox.is_empty());
+        assert_eq!(next_offset, Some(9));
     }
 }

@@ -300,13 +300,13 @@ mod tests {
         let result = harness.execute(&turn).await;
 
         match result {
-            TurnResult::ToolError(err) => {
+            TurnResult::ToolDenied(err) => {
                 assert!(
-                    err.contains("not allowed"),
-                    "expected 'not allowed' in error, got: {err}"
+                    err.contains("blocked by default shell policy"),
+                    "expected policy-block reason, got: {err}"
                 );
             }
-            other => panic!("expected ToolError with 'not allowed', got: {other:?}"),
+            other => panic!("expected ToolDenied with policy reason, got: {other:?}"),
         }
     }
 
