@@ -5,6 +5,8 @@
 - Release status:
 - Target commitish:
 - Artifact count:
+- Trace ID:
+- Trace path:
 
 ## Process
 - Date:
@@ -35,3 +37,4 @@
 - [Release workflow run](https://github.com/<org>/<repo>/actions/runs/<id>)
 - [GitHub release page](https://github.com/<org>/<repo>/releases/tag/vX.Y.Z)
 - [Release workflow definition](../../.github/workflows/release.yml)
+- Trace directory: `.docs/traces/<timestamp>-<command>-<tag>-<trace-id>`

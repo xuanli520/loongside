@@ -17,7 +17,8 @@ fi
 
 # --- 2. Dead internal links in docs/ ---
 DEAD_LINK_FILE=$(mktemp)
-trap 'rm -f "$DEAD_LINK_FILE"' EXIT
+RELEASE_TAGS_FILE=$(mktemp)
+trap 'rm -f "$DEAD_LINK_FILE" "$RELEASE_TAGS_FILE"' EXIT
 
 find "$REPO_ROOT/docs" "$REPO_ROOT/CLAUDE.md" "$REPO_ROOT/AGENTS.md" -name '*.md' 2>/dev/null | while IFS= read -r md_file; do
     dir="$(dirname "$md_file")"
@@ -83,13 +84,65 @@ else
             ERRORS=$((ERRORS + 1))
         fi
 
+        if ! grep -Fq "Trace ID:" "$doc_path"; then
+            echo "FAIL: ${doc_path} missing trace summary field 'Trace ID:'"
+            ERRORS=$((ERRORS + 1))
+        fi
+        if ! grep -Fq "Trace path:" "$doc_path"; then
+            echo "FAIL: ${doc_path} missing trace summary field 'Trace path:'"
+            ERRORS=$((ERRORS + 1))
+        fi
+
         DETAIL_LINKS_CONTENT="$(awk '/^## Detail Links$/{flag=1; next} /^## /{flag=0} flag {print}' "$doc_path")"
         DETAIL_LINK_COUNT="$(printf '%s\n' "$DETAIL_LINKS_CONTENT" | grep -Eo '\[[^]]+\]\([^)]+\)' | wc -l | tr -d ' ')"
         if [ "$DETAIL_LINK_COUNT" -lt 3 ]; then
             echo "FAIL: ${doc_path} needs at least three markdown links under '## Detail Links'"
             ERRORS=$((ERRORS + 1))
         fi
+
+        debug_doc_path="$REPO_ROOT/.docs/releases/${tag}-debug.md"
+        if [ ! -f "$debug_doc_path" ]; then
+            echo "FAIL: missing local debug doc for ${tag}: .docs/releases/${tag}-debug.md"
+            ERRORS=$((ERRORS + 1))
+        else
+            if ! grep -Fq "Trace path:" "$debug_doc_path"; then
+                echo "FAIL: ${debug_doc_path} missing trace field 'Trace path:'"
+                ERRORS=$((ERRORS + 1))
+            fi
+        fi
+
+        echo "$tag" >> "$RELEASE_TAGS_FILE"
     done <<< "$RELEASE_VERSIONS"
+fi
+
+# --- 4. Trace index linkage checks ---
+if [ -s "$RELEASE_TAGS_FILE" ]; then
+    TRACE_INDEX="$REPO_ROOT/.docs/traces/index.jsonl"
+    TRACE_LATEST="$REPO_ROOT/.docs/traces/latest"
+    if [ ! -f "$TRACE_INDEX" ]; then
+        echo "FAIL: missing trace index for released versions: .docs/traces/index.jsonl"
+        ERRORS=$((ERRORS + 1))
+    fi
+    if [ ! -f "$TRACE_LATEST" ]; then
+        echo "FAIL: missing latest trace pointer: .docs/traces/latest"
+        ERRORS=$((ERRORS + 1))
+    fi
+
+    while IFS= read -r tag; do
+        [ -z "$tag" ] && continue
+        by_tag_latest="$REPO_ROOT/.docs/traces/by-tag/${tag}/latest"
+        if [ ! -f "$by_tag_latest" ]; then
+            echo "FAIL: missing by-tag latest pointer for ${tag}: .docs/traces/by-tag/${tag}/latest"
+            ERRORS=$((ERRORS + 1))
+        fi
+
+        if [ -f "$TRACE_INDEX" ]; then
+            if ! grep -F "\"tag\":\"${tag}\"" "$TRACE_INDEX" | grep -F "\"command\":\"post-release\"" | grep -F "\"status\":\"success\"" > /dev/null; then
+                echo "FAIL: trace index missing successful post-release record for ${tag}"
+                ERRORS=$((ERRORS + 1))
+            fi
+        fi
+    done < "$RELEASE_TAGS_FILE"
 fi
 
 # --- Summary ---
