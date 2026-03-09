@@ -553,6 +553,144 @@ async fn handle_turn_with_runtime_repeated_tool_signature_guard_triggers_complet
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handle_turn_with_runtime_truncates_large_tool_result_in_followup_payload() {
+    use super::integration_tests::TurnTestHarness;
+
+    let harness = TurnTestHarness::new();
+    let large_note = format!("BEGIN-UNIQUE-{}-END-UNIQUE", "x".repeat(1_600));
+    std::fs::write(harness.temp_dir.join("large_note.md"), large_note).expect("seed large note");
+
+    let runtime = FakeRuntime::with_turns(
+        vec![],
+        vec![
+            Ok(ProviderTurn {
+                assistant_text: "Reading large note.".to_owned(),
+                tool_intents: vec![ToolIntent {
+                    tool_name: "file.read".to_owned(),
+                    args_json: json!({"path": "large_note.md"}),
+                    source: "provider_tool_call".to_owned(),
+                    session_id: "session-truncate-tool-result".to_owned(),
+                    turn_id: "turn-truncate-tool-result-1".to_owned(),
+                    tool_call_id: "call-truncate-tool-result-1".to_owned(),
+                }],
+                raw_meta: Value::Null,
+            }),
+            Ok(ProviderTurn {
+                assistant_text: "Summary completed.".to_owned(),
+                tool_intents: vec![],
+                raw_meta: Value::Null,
+            }),
+        ],
+    );
+
+    let mut config = test_config();
+    config
+        .conversation
+        .turn_loop
+        .max_followup_tool_payload_chars = 220;
+
+    let turn_loop = ConversationTurnLoop::new();
+    let reply = turn_loop
+        .handle_turn_with_runtime(
+            &config,
+            "session-truncate-tool-result",
+            "read large_note.md and summarize",
+            ProviderErrorMode::Propagate,
+            &runtime,
+            Some(&harness.kernel_ctx),
+        )
+        .await
+        .expect("tool-result truncation path should succeed");
+
+    assert_eq!(reply, "Summary completed.");
+    assert_eq!(*runtime.turn_calls.lock().expect("turn calls lock"), 2);
+
+    let requested_turns = runtime
+        .turn_requested_messages
+        .lock()
+        .expect("turn request lock");
+    assert_eq!(requested_turns.len(), 2);
+    let second_turn_payload = serde_json::to_string(&requested_turns[1]).expect("serialize turns");
+    assert!(
+        second_turn_payload.contains("[tool_result_truncated]"),
+        "followup payload should include tool-result truncation marker, got: {second_turn_payload}"
+    );
+    assert!(
+        second_turn_payload.contains("BEGIN-UNIQUE-"),
+        "followup payload should retain leading tool context, got: {second_turn_payload}"
+    );
+    assert!(
+        !second_turn_payload.contains("-END-UNIQUE"),
+        "followup payload should trim tail content when truncated, got: {second_turn_payload}"
+    );
+}
+
+#[tokio::test]
+async fn handle_turn_with_runtime_truncates_large_tool_failure_in_followup_payload() {
+    let oversized_tool_name = format!("tool_{}", "z".repeat(900));
+    let runtime = FakeRuntime::with_turns(
+        vec![],
+        vec![
+            Ok(ProviderTurn {
+                assistant_text: "Attempting unknown tool.".to_owned(),
+                tool_intents: vec![ToolIntent {
+                    tool_name: oversized_tool_name.clone(),
+                    args_json: json!({}),
+                    source: "provider_tool_call".to_owned(),
+                    session_id: "session-truncate-tool-failure".to_owned(),
+                    turn_id: "turn-truncate-tool-failure-1".to_owned(),
+                    tool_call_id: "call-truncate-tool-failure-1".to_owned(),
+                }],
+                raw_meta: Value::Null,
+            }),
+            Ok(ProviderTurn {
+                assistant_text: "Fallback answer after tool failure.".to_owned(),
+                tool_intents: vec![],
+                raw_meta: Value::Null,
+            }),
+        ],
+    );
+
+    let mut config = test_config();
+    config
+        .conversation
+        .turn_loop
+        .max_followup_tool_payload_chars = 180;
+    config.conversation.turn_loop.max_repeated_tool_call_rounds = 5;
+
+    let turn_loop = ConversationTurnLoop::new();
+    let reply = turn_loop
+        .handle_turn_with_runtime(
+            &config,
+            "session-truncate-tool-failure",
+            "run this tool",
+            ProviderErrorMode::Propagate,
+            &runtime,
+            None,
+        )
+        .await
+        .expect("tool-failure truncation path should succeed");
+
+    assert_eq!(reply, "Fallback answer after tool failure.");
+    assert_eq!(*runtime.turn_calls.lock().expect("turn calls lock"), 2);
+
+    let requested_turns = runtime
+        .turn_requested_messages
+        .lock()
+        .expect("turn request lock");
+    assert_eq!(requested_turns.len(), 2);
+    let second_turn_payload = serde_json::to_string(&requested_turns[1]).expect("serialize turns");
+    assert!(
+        second_turn_payload.contains("[tool_failure_truncated]"),
+        "followup payload should include tool-failure truncation marker, got: {second_turn_payload}"
+    );
+    assert!(
+        second_turn_payload.contains("tool_not_found"),
+        "followup payload should retain failure type, got: {second_turn_payload}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn handle_turn_with_runtime_turn_loop_policy_override_allows_multiple_tool_steps() {
     use super::integration_tests::TurnTestHarness;
 

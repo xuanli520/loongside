@@ -134,6 +134,7 @@ impl ConversationTurnLoop {
                             turn.assistant_text.as_str(),
                             tool_text.as_str(),
                             user_input,
+                            policy.max_followup_tool_payload_chars,
                         );
                         if round_index + 1 < policy.max_rounds {
                             continue;
@@ -162,6 +163,7 @@ impl ConversationTurnLoop {
                             turn.assistant_text.as_str(),
                             reason.as_str(),
                             user_input,
+                            policy.max_followup_tool_payload_chars,
                         );
                         if round_index + 1 < policy.max_rounds {
                             continue;
@@ -190,6 +192,7 @@ impl ConversationTurnLoop {
                             turn.assistant_text.as_str(),
                             reason.as_str(),
                             user_input,
+                            policy.max_followup_tool_payload_chars,
                         );
                         if round_index + 1 < policy.max_rounds {
                             continue;
@@ -226,6 +229,7 @@ fn append_tool_followup_messages(
     assistant_preface: &str,
     tool_result_text: &str,
     user_input: &str,
+    max_followup_tool_payload_chars: usize,
 ) {
     let preface = assistant_preface.trim();
     if !preface.is_empty() {
@@ -234,9 +238,14 @@ fn append_tool_followup_messages(
             "content": preface,
         }));
     }
+    let bounded_result = truncate_followup_tool_payload(
+        "tool_result",
+        tool_result_text,
+        max_followup_tool_payload_chars,
+    );
     messages.push(json!({
         "role": "assistant",
-        "content": format!("[tool_result]\n{tool_result_text}"),
+        "content": format!("[tool_result]\n{bounded_result}"),
     }));
     messages.push(json!({
         "role": "user",
@@ -249,6 +258,7 @@ fn append_tool_failure_followup_messages(
     assistant_preface: &str,
     tool_failure_reason: &str,
     user_input: &str,
+    max_followup_tool_payload_chars: usize,
 ) {
     let preface = assistant_preface.trim();
     if !preface.is_empty() {
@@ -257,9 +267,14 @@ fn append_tool_failure_followup_messages(
             "content": preface,
         }));
     }
+    let bounded_failure = truncate_followup_tool_payload(
+        "tool_failure",
+        tool_failure_reason,
+        max_followup_tool_payload_chars,
+    );
     messages.push(json!({
         "role": "assistant",
-        "content": format!("[tool_failure]\n{tool_failure_reason}"),
+        "content": format!("[tool_failure]\n{bounded_failure}"),
     }));
     messages.push(json!({
         "role": "user",
@@ -324,6 +339,20 @@ fn user_requested_raw_tool_output(user_input: &str) -> bool {
     .any(|signal| normalized.contains(signal))
 }
 
+fn truncate_followup_tool_payload(label: &str, text: &str, max_chars: usize) -> String {
+    let normalized = text.trim();
+    let total_chars = normalized.chars().count();
+    if total_chars <= max_chars {
+        return normalized.to_owned();
+    }
+
+    let reserved_chars = 80usize;
+    let keep_chars = max_chars.saturating_sub(reserved_chars).max(1);
+    let truncated = normalized.chars().take(keep_chars).collect::<String>();
+    let removed = total_chars.saturating_sub(keep_chars);
+    format!("{truncated}\n[{label}_truncated] removed_chars={removed}")
+}
+
 fn tool_intent_signature_for_turn(turn: &ProviderTurn) -> String {
     tool_intent_signature(&turn.tool_intents)
 }
@@ -345,6 +374,7 @@ struct TurnLoopPolicy {
     max_rounds: usize,
     max_tool_steps_per_round: usize,
     max_repeated_tool_call_rounds: usize,
+    max_followup_tool_payload_chars: usize,
 }
 
 impl TurnLoopPolicy {
@@ -354,6 +384,7 @@ impl TurnLoopPolicy {
             max_rounds: turn_loop.max_rounds.max(1),
             max_tool_steps_per_round: turn_loop.max_tool_steps_per_round.max(1),
             max_repeated_tool_call_rounds: turn_loop.max_repeated_tool_call_rounds.max(1),
+            max_followup_tool_payload_chars: turn_loop.max_followup_tool_payload_chars.max(256),
         }
     }
 }
