@@ -32,7 +32,11 @@ pub(crate) use loongclaw_spec::programmatic::{
 mod tests;
 
 #[derive(Parser, Debug)]
-#[command(name = "loongclawd", about = "LoongClaw low-level runtime daemon")]
+#[command(
+    name = "loongclawd",
+    about = "LoongClaw low-level runtime daemon",
+    version
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
