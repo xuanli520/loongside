@@ -127,6 +127,7 @@ Scope baseline (current target) and assessed status:
 | 4. TOML config format | Done | `setup` flow and config modules active |
 | 5. Shell tool | Done | `shell.exec` available under policy |
 | 6. File tool | Done | `file.read` / `file.write` available under policy |
+| 6b. Tool-call foundation | Done | capability snapshot disclosure in system prompt; tool registry, turn engine, kernel-routed execution |
 | 7. SQLite memory + sliding window | Done | conversation memory and windowed retrieval are active |
 | 8. Minimal install (prebuilt + setup) | Partial | `setup` exists; prebuilt binary distribution still pending |
 | 9. Beginner-friendly onboarding | Partial | quickstart/setup exists; guided doctor-style workflow still missing |

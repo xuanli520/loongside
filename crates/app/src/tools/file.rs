@@ -8,10 +8,13 @@ use loongclaw_contracts::{ToolCoreOutcome, ToolCoreRequest};
 #[cfg(feature = "tool-file")]
 use serde_json::{json, Value};
 
-pub(super) fn execute_file_read_tool(request: ToolCoreRequest) -> Result<ToolCoreOutcome, String> {
+pub(super) fn execute_file_read_tool_with_config(
+    request: ToolCoreRequest,
+    config: &super::runtime_config::ToolRuntimeConfig,
+) -> Result<ToolCoreOutcome, String> {
     #[cfg(not(feature = "tool-file"))]
     {
-        let _ = request;
+        let _ = (request, config);
         return Err("file tool is disabled in this build (enable feature `tool-file`)".to_owned());
     }
 
@@ -34,7 +37,7 @@ pub(super) fn execute_file_read_tool(request: ToolCoreRequest) -> Result<ToolCor
             .unwrap_or(1_048_576)
             .min(8 * 1_048_576) as usize;
 
-        let resolved = resolve_safe_file_path(target)?;
+        let resolved = resolve_safe_file_path_with_config(target, config)?;
         let bytes = fs::read(&resolved)
             .map_err(|error| format!("failed to read file {}: {error}", resolved.display()))?;
         let clipped = bytes.len() > max_bytes;
@@ -54,10 +57,13 @@ pub(super) fn execute_file_read_tool(request: ToolCoreRequest) -> Result<ToolCor
     }
 }
 
-pub(super) fn execute_file_write_tool(request: ToolCoreRequest) -> Result<ToolCoreOutcome, String> {
+pub(super) fn execute_file_write_tool_with_config(
+    request: ToolCoreRequest,
+    config: &super::runtime_config::ToolRuntimeConfig,
+) -> Result<ToolCoreOutcome, String> {
     #[cfg(not(feature = "tool-file"))]
     {
-        let _ = request;
+        let _ = (request, config);
         return Err("file tool is disabled in this build (enable feature `tool-file`)".to_owned());
     }
 
@@ -82,7 +88,7 @@ pub(super) fn execute_file_write_tool(request: ToolCoreRequest) -> Result<ToolCo
             .and_then(Value::as_bool)
             .unwrap_or(true);
 
-        let resolved = resolve_safe_file_path(target)?;
+        let resolved = resolve_safe_file_path_with_config(target, config)?;
         if create_dirs {
             if let Some(parent) = resolved.parent() {
                 fs::create_dir_all(parent).map_err(|error| {
@@ -109,10 +115,13 @@ pub(super) fn execute_file_write_tool(request: ToolCoreRequest) -> Result<ToolCo
 }
 
 #[cfg(feature = "tool-file")]
-fn resolve_safe_file_path(raw: &str) -> Result<PathBuf, String> {
-    let root = std::env::var("LOONGCLAW_FILE_ROOT")
-        .ok()
-        .map(PathBuf::from)
+fn resolve_safe_file_path_with_config(
+    raw: &str,
+    config: &super::runtime_config::ToolRuntimeConfig,
+) -> Result<PathBuf, String> {
+    let root = config
+        .file_root
+        .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let root = canonicalize_or_fallback(root)?;
 

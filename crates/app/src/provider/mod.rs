@@ -13,6 +13,8 @@ mod policy;
 mod shape;
 mod transport;
 
+pub use shape::extract_provider_turn;
+
 pub fn build_messages_for_session(
     config: &LoongClawConfig,
     session_id: &str,
@@ -21,12 +23,16 @@ pub fn build_messages_for_session(
     let mut messages = Vec::new();
     if include_system_prompt {
         let system = config.cli.system_prompt.trim();
-        if !system.is_empty() {
-            messages.push(json!({
-                "role": "system",
-                "content": system,
-            }));
-        }
+        let snapshot = super::tools::capability_snapshot();
+        let content = if system.is_empty() {
+            snapshot
+        } else {
+            format!("{system}\n\n{snapshot}")
+        };
+        messages.push(json!({
+            "role": "system",
+            "content": content,
+        }));
     }
 
     #[cfg(feature = "memory-sqlite")]
@@ -72,6 +78,47 @@ pub async fn request_completion(config: &LoongClawConfig, messages: &[Value]) ->
         .await
         {
             Ok(content) => return Ok(content),
+            Err(model_error) => {
+                if model_error.try_next_model && index + 1 < model_candidates.len() {
+                    last_error = Some(model_error.message);
+                    continue;
+                }
+                return Err(model_error.message);
+            }
+        }
+    }
+    Err(last_error
+        .unwrap_or_else(|| "provider request failed for every model candidate".to_owned()))
+}
+
+pub async fn request_turn(
+    config: &LoongClawConfig,
+    messages: &[Value],
+) -> CliResult<crate::conversation::turn_engine::ProviderTurn> {
+    validate_provider_feature_gate(config)?;
+
+    let endpoint = config.provider.endpoint();
+    let headers = transport::build_request_headers(&config.provider.headers)?;
+    let request_policy = policy::ProviderRequestPolicy::from_config(&config.provider);
+    let client = build_http_client(&request_policy)?;
+    let model_candidates = resolve_request_models(config, &headers, &request_policy).await?;
+    let auto_model_mode = config.provider.model_selection_requires_fetch();
+
+    let mut last_error = None;
+    for (index, model) in model_candidates.iter().enumerate() {
+        match request_turn_with_model(
+            config,
+            messages,
+            model,
+            auto_model_mode,
+            &endpoint,
+            &headers,
+            &request_policy,
+            &client,
+        )
+        .await
+        {
+            Ok(turn) => return Ok(turn),
             Err(model_error) => {
                 if model_error.try_next_model && index + 1 < model_candidates.len() {
                     last_error = Some(model_error.message);
@@ -573,6 +620,110 @@ async fn request_completion_with_model(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn request_turn_with_model(
+    config: &LoongClawConfig,
+    messages: &[Value],
+    model: &str,
+    auto_model_mode: bool,
+    endpoint: &str,
+    headers: &reqwest::header::HeaderMap,
+    request_policy: &policy::ProviderRequestPolicy,
+    client: &reqwest::Client,
+) -> Result<crate::conversation::turn_engine::ProviderTurn, ModelRequestError> {
+    let mut attempt = 0usize;
+    let mut backoff_ms = request_policy.initial_backoff_ms;
+    let mut payload_mode = CompletionPayloadMode::default_for(&config.provider);
+    let mut tried_payload_modes = vec![payload_mode];
+
+    loop {
+        attempt += 1;
+        let body = build_completion_request_body(config, messages, model, payload_mode);
+        let mut req = client.post(endpoint).headers(headers.clone()).json(&body);
+        if let Some(auth_header) = config.provider.authorization_header() {
+            req = req.header(reqwest::header::AUTHORIZATION, auth_header);
+        }
+
+        match req.send().await {
+            Ok(response) => {
+                let status = response.status();
+                let response_body = transport::decode_response_body(response)
+                    .await
+                    .map_err(|error| ModelRequestError {
+                        message: format!(
+                            "provider response decode failed for model `{model}` on attempt {attempt}/{max_attempts}: {error}",
+                            max_attempts = request_policy.max_attempts
+                        ),
+                        try_next_model: false,
+                    })?;
+
+                if status.is_success() {
+                    let turn = shape::extract_provider_turn(&response_body).ok_or_else(|| {
+                        ModelRequestError {
+                            message: format!(
+                                "provider response missing choices[0].message for model `{model}` on attempt {attempt}/{max_attempts}: {response_body}",
+                                max_attempts = request_policy.max_attempts
+                            ),
+                            try_next_model: false,
+                        }
+                    })?;
+                    return Ok(turn);
+                }
+
+                let api_error = parse_provider_api_error(&response_body);
+                if let Some(next_mode) =
+                    adapt_payload_mode_for_error(payload_mode, &config.provider, &api_error)
+                {
+                    if !tried_payload_modes.contains(&next_mode) {
+                        payload_mode = next_mode;
+                        tried_payload_modes.push(next_mode);
+                        continue;
+                    }
+                }
+
+                let status_code = status.as_u16();
+                if attempt < request_policy.max_attempts && policy::should_retry_status(status_code)
+                {
+                    sleep(Duration::from_millis(backoff_ms)).await;
+                    backoff_ms = policy::next_backoff_ms(backoff_ms, request_policy.max_backoff_ms);
+                    continue;
+                }
+
+                if auto_model_mode && should_try_next_model_on_error(&api_error) {
+                    return Err(ModelRequestError {
+                        message: format!(
+                            "model `{model}` rejected by provider endpoint; trying next candidate. status {status_code}: {response_body}"
+                        ),
+                        try_next_model: true,
+                    });
+                }
+
+                return Err(ModelRequestError {
+                    message: format!(
+                        "provider returned status {status_code} for model `{model}` on attempt {attempt}/{max_attempts}: {response_body}",
+                        max_attempts = request_policy.max_attempts
+                    ),
+                    try_next_model: false,
+                });
+            }
+            Err(error) => {
+                if attempt < request_policy.max_attempts && policy::should_retry_error(&error) {
+                    sleep(Duration::from_millis(backoff_ms)).await;
+                    backoff_ms = policy::next_backoff_ms(backoff_ms, request_policy.max_backoff_ms);
+                    continue;
+                }
+                return Err(ModelRequestError {
+                    message: format!(
+                        "provider request failed for model `{model}` on attempt {attempt}/{max_attempts}: {error}",
+                        max_attempts = request_policy.max_attempts
+                    ),
+                    try_next_model: false,
+                });
+            }
+        }
+    }
+}
+
 fn validate_provider_feature_gate(config: &LoongClawConfig) -> CliResult<()> {
     match config.provider.kind {
         ProviderKind::Volcengine => {
@@ -618,6 +769,39 @@ mod tests {
             build_messages_for_session(&config, "noop-session", true).expect("build messages");
         assert!(!messages.is_empty());
         assert_eq!(messages[0]["role"], "system");
+    }
+
+    #[test]
+    fn build_messages_includes_capability_snapshot_block() {
+        let config = LoongClawConfig {
+            provider: ProviderConfig::default(),
+            cli: crate::config::CliChannelConfig::default(),
+            telegram: crate::config::TelegramChannelConfig::default(),
+            feishu: FeishuChannelConfig::default(),
+            tools: ToolConfig::default(),
+            memory: MemoryConfig::default(),
+        };
+
+        let messages =
+            build_messages_for_session(&config, "noop-session", true).expect("build messages");
+        assert!(!messages.is_empty());
+        let system_content = messages[0]["content"].as_str().expect("system content");
+        assert!(
+            system_content.contains("[available_tools]"),
+            "system prompt should contain capability snapshot marker, got: {system_content}"
+        );
+        assert!(
+            system_content.contains("- shell.exec: Execute shell commands"),
+            "system prompt should list shell.exec tool"
+        );
+        assert!(
+            system_content.contains("- file.read: Read file contents"),
+            "system prompt should list file.read tool"
+        );
+        assert!(
+            system_content.contains("- file.write: Write file contents"),
+            "system prompt should list file.write tool"
+        );
     }
 
     #[test]

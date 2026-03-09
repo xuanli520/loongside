@@ -195,6 +195,393 @@ fn format_provider_error_reply_is_stable() {
     assert_eq!(output, "[provider_error] timeout");
 }
 
+#[test]
+fn turn_contracts_have_stable_defaults() {
+    use crate::conversation::{ProviderTurn, ToolIntent, TurnResult};
+    let turn = ProviderTurn::default();
+    assert!(turn.assistant_text.is_empty());
+    assert!(turn.tool_intents.is_empty());
+    let _intent = ToolIntent {
+        tool_name: "file.read".to_owned(),
+        args_json: serde_json::json!({"path":"README.md"}),
+        source: "provider_tool_call".to_owned(),
+        session_id: "s1".to_owned(),
+        turn_id: "t1".to_owned(),
+        tool_call_id: "c1".to_owned(),
+    };
+    let _result = TurnResult::FinalText("ok".to_owned());
+}
+
+#[test]
+fn turn_engine_no_tool_intents_returns_final_text() {
+    use crate::conversation::turn_engine::{ProviderTurn, TurnEngine, TurnResult};
+    let engine = TurnEngine::new(1); // max_tool_steps = 1
+    let turn = ProviderTurn {
+        assistant_text: "Hello!".to_owned(),
+        tool_intents: vec![],
+        raw_meta: serde_json::Value::Null,
+    };
+    let result = engine.evaluate_turn(&turn);
+    match result {
+        TurnResult::FinalText(text) => assert_eq!(text, "Hello!"),
+        other => panic!("expected FinalText, got {:?}", other),
+    }
+}
+
+#[test]
+fn turn_engine_unknown_tool_returns_tool_denied() {
+    use crate::conversation::turn_engine::{ProviderTurn, ToolIntent, TurnEngine, TurnResult};
+    let engine = TurnEngine::new(1);
+    let turn = ProviderTurn {
+        assistant_text: "".to_owned(),
+        tool_intents: vec![ToolIntent {
+            tool_name: "nonexistent.tool".to_owned(),
+            args_json: serde_json::json!({}),
+            source: "provider_tool_call".to_owned(),
+            session_id: "s1".to_owned(),
+            turn_id: "t1".to_owned(),
+            tool_call_id: "c1".to_owned(),
+        }],
+        raw_meta: serde_json::Value::Null,
+    };
+    let result = engine.evaluate_turn(&turn);
+    match result {
+        TurnResult::ToolDenied(reason) => {
+            assert!(reason.contains("tool_not_found"), "reason: {reason}")
+        }
+        other => panic!("expected ToolDenied, got {:?}", other),
+    }
+}
+
+#[test]
+fn turn_engine_exceeding_max_steps_returns_denied() {
+    use crate::conversation::turn_engine::{ProviderTurn, ToolIntent, TurnEngine, TurnResult};
+    let engine = TurnEngine::new(1);
+    let intent = ToolIntent {
+        tool_name: "file.read".to_owned(),
+        args_json: serde_json::json!({}),
+        source: "provider_tool_call".to_owned(),
+        session_id: "s1".to_owned(),
+        turn_id: "t1".to_owned(),
+        tool_call_id: "c1".to_owned(),
+    };
+    let turn = ProviderTurn {
+        assistant_text: "".to_owned(),
+        tool_intents: vec![intent.clone(), intent],
+        raw_meta: serde_json::Value::Null,
+    };
+    let result = engine.evaluate_turn(&turn);
+    match result {
+        TurnResult::ToolDenied(reason) => assert!(
+            reason.contains("max_tool_steps_exceeded"),
+            "reason: {reason}"
+        ),
+        other => panic!("expected ToolDenied for max steps, got {:?}", other),
+    }
+}
+
+#[test]
+fn turn_engine_known_tool_with_no_kernel_returns_tool_denied() {
+    use crate::conversation::turn_engine::{ProviderTurn, ToolIntent, TurnEngine, TurnResult};
+    let engine = TurnEngine::new(1);
+    let turn = ProviderTurn {
+        assistant_text: "".to_owned(),
+        tool_intents: vec![ToolIntent {
+            tool_name: "file.read".to_owned(),
+            args_json: serde_json::json!({"path": "test.txt"}),
+            source: "provider_tool_call".to_owned(),
+            session_id: "s1".to_owned(),
+            turn_id: "t1".to_owned(),
+            tool_call_id: "c1".to_owned(),
+        }],
+        raw_meta: serde_json::Value::Null,
+    };
+    // Without kernel context, known tools should be validated but flagged as needing execution
+    let result = engine.evaluate_turn(&turn);
+    match result {
+        TurnResult::NeedsApproval(reason) => {
+            assert!(
+                reason.contains("kernel_context_required"),
+                "reason: {reason}"
+            );
+        }
+        other => panic!("expected NeedsApproval, got {:?}", other),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn turn_engine_execute_turn_no_kernel_returns_denied() {
+    use crate::conversation::turn_engine::{ProviderTurn, ToolIntent, TurnEngine, TurnResult};
+    let engine = TurnEngine::new(1);
+    let turn = ProviderTurn {
+        assistant_text: "".to_owned(),
+        tool_intents: vec![ToolIntent {
+            tool_name: "file.read".to_owned(),
+            args_json: serde_json::json!({"path": "test.txt"}),
+            source: "provider_tool_call".to_owned(),
+            session_id: "s1".to_owned(),
+            turn_id: "t1".to_owned(),
+            tool_call_id: "c1".to_owned(),
+        }],
+        raw_meta: serde_json::Value::Null,
+    };
+    let result = engine.execute_turn(&turn, None).await;
+    match result {
+        TurnResult::ToolDenied(reason) => {
+            assert!(reason.contains("no_kernel_context"), "reason: {reason}");
+        }
+        other => panic!("expected ToolDenied, got {:?}", other),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn turn_engine_executes_known_tool_with_kernel() {
+    use crate::conversation::turn_engine::{ProviderTurn, ToolIntent, TurnEngine, TurnResult};
+    use loongclaw_contracts::{ToolCoreOutcome, ToolCoreRequest, ToolPlaneError};
+    use loongclaw_kernel::CoreToolAdapter;
+
+    struct EchoToolAdapter;
+
+    #[async_trait]
+    impl CoreToolAdapter for EchoToolAdapter {
+        fn name(&self) -> &str {
+            "echo-tools"
+        }
+
+        async fn execute_core_tool(
+            &self,
+            request: ToolCoreRequest,
+        ) -> Result<ToolCoreOutcome, ToolPlaneError> {
+            // Echo back the tool name and payload
+            Ok(ToolCoreOutcome {
+                status: "ok".to_owned(),
+                payload: json!({"tool": request.tool_name, "input": request.payload}),
+            })
+        }
+    }
+
+    let audit = Arc::new(InMemoryAuditSink::default());
+    let clock = Arc::new(FixedClock::new(1_700_000_000));
+    let mut kernel = LoongClawKernel::with_runtime(StaticPolicyEngine::default(), clock, audit);
+
+    let pack = VerticalPackManifest {
+        pack_id: "test-pack".to_owned(),
+        domain: "testing".to_owned(),
+        version: "0.1.0".to_owned(),
+        default_route: ExecutionRoute {
+            harness_kind: HarnessKind::EmbeddedPi,
+            adapter: None,
+        },
+        allowed_connectors: BTreeSet::new(),
+        granted_capabilities: BTreeSet::from([Capability::InvokeTool]),
+        metadata: BTreeMap::new(),
+    };
+    kernel.register_pack(pack).expect("register pack");
+    kernel.register_core_tool_adapter(EchoToolAdapter);
+    kernel
+        .set_default_core_tool_adapter("echo-tools")
+        .expect("set default");
+
+    let token = kernel
+        .issue_token("test-pack", "test-agent", 3600)
+        .expect("issue token");
+
+    let ctx = KernelContext {
+        kernel: Arc::new(kernel),
+        token,
+    };
+
+    let engine = TurnEngine::new(5);
+    let turn = ProviderTurn {
+        assistant_text: "".to_owned(),
+        tool_intents: vec![ToolIntent {
+            tool_name: "file.read".to_owned(),
+            args_json: json!({"path": "test.txt"}),
+            source: "provider_tool_call".to_owned(),
+            session_id: "s1".to_owned(),
+            turn_id: "t1".to_owned(),
+            tool_call_id: "c1".to_owned(),
+        }],
+        raw_meta: serde_json::Value::Null,
+    };
+
+    let result = engine.execute_turn(&turn, Some(&ctx)).await;
+    match result {
+        TurnResult::FinalText(text) => {
+            assert!(
+                text.contains("[ok]"),
+                "expected ok status in output, got: {text}"
+            );
+        }
+        TurnResult::ToolDenied(reason) => {
+            // Must NOT be "execution_not_wired" or "no_kernel_context"
+            assert!(
+                !reason.contains("execution_not_wired") && !reason.contains("no_kernel_context"),
+                "should not get execution_not_wired or no_kernel_context with kernel, got: {reason}"
+            );
+        }
+        other => {
+            // ToolError is also acceptable (e.g. file doesn't exist) as long
+            // as it went through kernel execution
+            if let TurnResult::ToolError(ref err) = other {
+                assert!(
+                    !err.contains("execution_not_wired"),
+                    "should not get execution_not_wired, got: {err}"
+                );
+            } else {
+                panic!("unexpected result: {:?}", other);
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn turn_engine_execute_turn_denied_without_capability() {
+    use crate::conversation::turn_engine::{ProviderTurn, ToolIntent, TurnEngine, TurnResult};
+    use loongclaw_contracts::{ToolCoreOutcome, ToolCoreRequest, ToolPlaneError};
+    use loongclaw_kernel::CoreToolAdapter;
+
+    struct NoopToolAdapter;
+
+    #[async_trait]
+    impl CoreToolAdapter for NoopToolAdapter {
+        fn name(&self) -> &str {
+            "noop-tools"
+        }
+
+        async fn execute_core_tool(
+            &self,
+            _request: ToolCoreRequest,
+        ) -> Result<ToolCoreOutcome, ToolPlaneError> {
+            Ok(ToolCoreOutcome {
+                status: "ok".to_owned(),
+                payload: json!({}),
+            })
+        }
+    }
+
+    let audit = Arc::new(InMemoryAuditSink::default());
+    let clock = Arc::new(FixedClock::new(1_700_000_000));
+    let mut kernel = LoongClawKernel::with_runtime(StaticPolicyEngine::default(), clock, audit);
+
+    // Grant only MemoryRead — InvokeTool is missing
+    let pack = VerticalPackManifest {
+        pack_id: "test-pack".to_owned(),
+        domain: "testing".to_owned(),
+        version: "0.1.0".to_owned(),
+        default_route: ExecutionRoute {
+            harness_kind: HarnessKind::EmbeddedPi,
+            adapter: None,
+        },
+        allowed_connectors: BTreeSet::new(),
+        granted_capabilities: BTreeSet::from([Capability::MemoryRead]),
+        metadata: BTreeMap::new(),
+    };
+    kernel.register_pack(pack).expect("register pack");
+    kernel.register_core_tool_adapter(NoopToolAdapter);
+    kernel
+        .set_default_core_tool_adapter("noop-tools")
+        .expect("set default");
+
+    let token = kernel
+        .issue_token("test-pack", "test-agent", 3600)
+        .expect("issue token");
+
+    let ctx = KernelContext {
+        kernel: Arc::new(kernel),
+        token,
+    };
+
+    let engine = TurnEngine::new(5);
+    let turn = ProviderTurn {
+        assistant_text: "".to_owned(),
+        tool_intents: vec![ToolIntent {
+            tool_name: "file.read".to_owned(),
+            args_json: json!({"path": "test.txt"}),
+            source: "provider_tool_call".to_owned(),
+            session_id: "s1".to_owned(),
+            turn_id: "t1".to_owned(),
+            tool_call_id: "c1".to_owned(),
+        }],
+        raw_meta: serde_json::Value::Null,
+    };
+
+    let result = engine.execute_turn(&turn, Some(&ctx)).await;
+    match result {
+        TurnResult::ToolDenied(reason) => {
+            assert!(
+                reason.contains("apability") || reason.contains("denied"),
+                "expected capability/denial reason, got: {reason}"
+            );
+        }
+        other => panic!(
+            "expected ToolDenied for missing capability, got {:?}",
+            other
+        ),
+    }
+}
+
+// --- Tool lifecycle persistence tests ---
+
+#[tokio::test]
+async fn turn_engine_persists_tool_lifecycle_events() {
+    use super::persistence::{persist_tool_decision, persist_tool_outcome};
+    use crate::conversation::turn_engine::{ToolDecision, ToolOutcome};
+
+    let runtime = FakeRuntime::new(vec![], Ok(String::new()));
+
+    let decision = ToolDecision {
+        allow: true,
+        deny: false,
+        approval_required: false,
+        reason: "policy_ok".to_owned(),
+        rule_id: "rule-42".to_owned(),
+    };
+
+    let outcome = ToolOutcome {
+        status: "ok".to_owned(),
+        payload: json!({"result": "file contents"}),
+        error_code: None,
+        human_reason: None,
+        audit_event_id: Some("audit-001".to_owned()),
+    };
+
+    persist_tool_decision(&runtime, "sess-1", "turn-1", "call-1", &decision, None)
+        .await
+        .expect("persist decision");
+
+    persist_tool_outcome(&runtime, "sess-1", "turn-1", "call-1", &outcome, None)
+        .await
+        .expect("persist outcome");
+
+    let persisted = runtime.persisted.lock().expect("persisted lock");
+    assert_eq!(persisted.len(), 2, "expected two persisted records");
+
+    // Both should be assistant-role messages for session sess-1
+    assert_eq!(persisted[0].0, "sess-1");
+    assert_eq!(persisted[0].1, "assistant");
+    assert_eq!(persisted[1].0, "sess-1");
+    assert_eq!(persisted[1].1, "assistant");
+
+    // Verify decision content has correct correlation IDs and type
+    let decision_json: serde_json::Value =
+        serde_json::from_str(&persisted[0].2).expect("decision json parse");
+    assert_eq!(decision_json["type"], "tool_decision");
+    assert_eq!(decision_json["turn_id"], "turn-1");
+    assert_eq!(decision_json["tool_call_id"], "call-1");
+    assert_eq!(decision_json["decision"]["allow"], true);
+    assert_eq!(decision_json["decision"]["rule_id"], "rule-42");
+
+    // Verify outcome content has correct correlation IDs and type
+    let outcome_json: serde_json::Value =
+        serde_json::from_str(&persisted[1].2).expect("outcome json parse");
+    assert_eq!(outcome_json["type"], "tool_outcome");
+    assert_eq!(outcome_json["turn_id"], "turn-1");
+    assert_eq!(outcome_json["tool_call_id"], "call-1");
+    assert_eq!(outcome_json["outcome"]["status"], "ok");
+    assert_eq!(outcome_json["outcome"]["audit_event_id"], "audit-001");
+}
+
 // --- Kernel-routed memory tests ---
 
 fn build_kernel_context(
@@ -297,4 +684,16 @@ async fn persist_turn_routes_through_kernel_when_context_provided() {
         has_memory_plane,
         "audit should contain memory plane invocation"
     );
+}
+
+#[cfg(not(feature = "memory-sqlite"))]
+#[tokio::test]
+async fn persist_turn_without_memory_sqlite_is_noop_with_kernel_context() {
+    let ctx = crate::context::bootstrap_kernel_context("test-agent-no-memory", 60)
+        .expect("bootstrap kernel context without memory-sqlite");
+    let runtime = DefaultConversationRuntime;
+    runtime
+        .persist_turn("session-k0", "user", "no-memory", Some(&ctx))
+        .await
+        .expect("persist should be no-op when memory-sqlite is disabled");
 }

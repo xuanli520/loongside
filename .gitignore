@@ -3,3 +3,4 @@
 /.docs
 /.loongclaw.local.toml
 /.env.local
+.worktrees/

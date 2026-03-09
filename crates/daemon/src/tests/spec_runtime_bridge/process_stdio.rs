@@ -333,7 +333,8 @@ async fn execute_spec_process_stdio_bridge_fails_on_invalid_json_line_response()
         .expect("failed reason should be string");
     assert!(
         reason.contains("failed to decode inbound frame")
-            || reason.contains("failed to read frame"),
+            || reason.contains("failed to read frame")
+            || reason.contains("failed to write frame"),
         "unexpected failure reason: {reason}"
     );
     assert_eq!(

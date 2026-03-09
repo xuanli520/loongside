@@ -2,7 +2,29 @@ use async_trait::async_trait;
 use loongclaw_contracts::ToolPlaneError;
 use loongclaw_kernel::{CoreToolAdapter, ToolCoreOutcome, ToolCoreRequest};
 
-pub struct MvpToolAdapter;
+use super::runtime_config::ToolRuntimeConfig;
+
+pub struct MvpToolAdapter {
+    config: Option<ToolRuntimeConfig>,
+}
+
+impl Default for MvpToolAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MvpToolAdapter {
+    pub fn new() -> Self {
+        Self { config: None }
+    }
+
+    pub fn with_config(config: ToolRuntimeConfig) -> Self {
+        Self {
+            config: Some(config),
+        }
+    }
+}
 
 #[async_trait]
 impl CoreToolAdapter for MvpToolAdapter {
@@ -14,6 +36,10 @@ impl CoreToolAdapter for MvpToolAdapter {
         &self,
         request: ToolCoreRequest,
     ) -> Result<ToolCoreOutcome, ToolPlaneError> {
-        super::execute_tool_core(request).map_err(ToolPlaneError::Execution)
+        match &self.config {
+            Some(config) => super::execute_tool_core_with_config(request, config),
+            None => super::execute_tool_core(request),
+        }
+        .map_err(ToolPlaneError::Execution)
     }
 }

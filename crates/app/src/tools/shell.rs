@@ -1,14 +1,17 @@
 #[cfg(feature = "tool-shell")]
-use std::{collections::BTreeSet, path::PathBuf, process::Command};
+use std::{path::PathBuf, process::Command};
 
 use loongclaw_contracts::{ToolCoreOutcome, ToolCoreRequest};
 #[cfg(feature = "tool-shell")]
 use serde_json::{json, Value};
 
-pub(super) fn execute_shell_tool(request: ToolCoreRequest) -> Result<ToolCoreOutcome, String> {
+pub(super) fn execute_shell_tool_with_config(
+    request: ToolCoreRequest,
+    config: &super::runtime_config::ToolRuntimeConfig,
+) -> Result<ToolCoreOutcome, String> {
     #[cfg(not(feature = "tool-shell"))]
     {
-        let _ = request;
+        let _ = (request, config);
         return Err(
             "shell tool is disabled in this build (enable feature `tool-shell`)".to_owned(),
         );
@@ -42,7 +45,7 @@ pub(super) fn execute_shell_tool(request: ToolCoreRequest) -> Result<ToolCoreOut
             .map(PathBuf::from)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-        let allowlist = shell_allowlist();
+        let allowlist = &config.shell_allowlist;
         let normalized_command = command.to_ascii_lowercase();
         if !allowlist.contains(&normalized_command) {
             return Err(format!(
@@ -75,17 +78,4 @@ pub(super) fn execute_shell_tool(request: ToolCoreRequest) -> Result<ToolCoreOut
             }),
         })
     }
-}
-
-#[cfg(feature = "tool-shell")]
-fn shell_allowlist() -> BTreeSet<String> {
-    let from_env = std::env::var("LOONGCLAW_SHELL_ALLOWLIST")
-        .ok()
-        .unwrap_or_else(|| "echo,cat,ls,pwd".to_owned());
-    from_env
-        .split([',', ';', ' '])
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_ascii_lowercase)
-        .collect()
 }

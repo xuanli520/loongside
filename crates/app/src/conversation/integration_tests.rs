@@ -1,0 +1,412 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+use loongclaw_contracts::{Capability, ExecutionRoute, HarnessKind};
+use loongclaw_kernel::{
+    FixedClock, InMemoryAuditSink, LoongClawKernel, StaticPolicyEngine, VerticalPackManifest,
+};
+
+use super::turn_engine::{ProviderTurn, ToolIntent, TurnEngine, TurnResult};
+use crate::context::KernelContext;
+use crate::tools::runtime_config::ToolRuntimeConfig;
+use crate::tools::MvpToolAdapter;
+
+/// Monotonic counter for unique harness IDs (avoids temp dir collisions).
+static HARNESS_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Ergonomic builder for constructing fake `ProviderTurn` responses in tests.
+pub(crate) struct FakeProviderBuilder {
+    text: String,
+    tool_calls: Vec<(String, serde_json::Value)>,
+}
+
+impl FakeProviderBuilder {
+    pub fn new() -> Self {
+        Self {
+            text: String::new(),
+            tool_calls: Vec::new(),
+        }
+    }
+
+    pub fn with_text(mut self, text: &str) -> Self {
+        self.text = text.to_owned();
+        self
+    }
+
+    pub fn with_tool_call(mut self, tool_name: &str, args: serde_json::Value) -> Self {
+        self.tool_calls.push((tool_name.to_owned(), args));
+        self
+    }
+
+    pub fn build(self) -> ProviderTurn {
+        let tool_intents = self
+            .tool_calls
+            .into_iter()
+            .enumerate()
+            .map(|(i, (name, args))| ToolIntent {
+                tool_name: name,
+                args_json: args,
+                source: "fake_provider".to_owned(),
+                session_id: "test-session".to_owned(),
+                turn_id: "test-turn".to_owned(),
+                tool_call_id: format!("call-{i}"),
+            })
+            .collect();
+
+        ProviderTurn {
+            assistant_text: self.text,
+            tool_intents,
+            raw_meta: serde_json::Value::Null,
+        }
+    }
+}
+
+/// Integration test harness composing real kernel + real tools + fake provider.
+///
+/// Each harness gets:
+/// - A unique temp dir (no collision between parallel tests)
+/// - An `MvpToolAdapter` with injected `ToolRuntimeConfig` (no OnceLock race)
+/// - A real `InMemoryAuditSink` for audit assertions
+/// - `max_tool_steps = 1`
+#[allow(dead_code)]
+pub(crate) struct TurnTestHarness {
+    pub engine: TurnEngine,
+    pub kernel_ctx: KernelContext,
+    pub audit: Arc<InMemoryAuditSink>,
+    pub temp_dir: PathBuf,
+}
+
+impl TurnTestHarness {
+    pub fn new() -> Self {
+        Self::with_capabilities(BTreeSet::from([Capability::InvokeTool]))
+    }
+
+    pub fn with_capabilities(capabilities: BTreeSet<Capability>) -> Self {
+        let id = HARNESS_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let temp_dir =
+            std::env::temp_dir().join(format!("loongclaw-integ-{}-{id}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+        // Inject config so tests don't race on the global OnceLock
+        let tool_config = ToolRuntimeConfig {
+            shell_allowlist: BTreeSet::from(["echo".to_owned(), "cat".to_owned(), "ls".to_owned()]),
+            file_root: Some(temp_dir.clone()),
+        };
+
+        let audit = Arc::new(InMemoryAuditSink::default());
+        let clock = Arc::new(FixedClock::new(1_700_000_000));
+        let mut kernel =
+            LoongClawKernel::with_runtime(StaticPolicyEngine::default(), clock, audit.clone());
+
+        let pack = VerticalPackManifest {
+            pack_id: "test-pack".to_owned(),
+            domain: "testing".to_owned(),
+            version: "0.1.0".to_owned(),
+            default_route: ExecutionRoute {
+                harness_kind: HarnessKind::EmbeddedPi,
+                adapter: None,
+            },
+            allowed_connectors: BTreeSet::new(),
+            granted_capabilities: capabilities,
+            metadata: BTreeMap::new(),
+        };
+        kernel.register_pack(pack).expect("register pack");
+        kernel.register_core_tool_adapter(MvpToolAdapter::with_config(tool_config));
+        kernel
+            .set_default_core_tool_adapter("mvp-tools")
+            .expect("set default adapter");
+
+        let token = kernel
+            .issue_token("test-pack", "test-agent", 3600)
+            .expect("issue token");
+
+        let ctx = KernelContext {
+            kernel: Arc::new(kernel),
+            token,
+        };
+
+        Self {
+            engine: TurnEngine::new(1),
+            kernel_ctx: ctx,
+            audit,
+            temp_dir,
+        }
+    }
+
+    /// Execute a provider turn through the full TurnEngine path.
+    #[allow(dead_code)]
+    pub async fn execute(&self, turn: &ProviderTurn) -> TurnResult {
+        self.engine.execute_turn(turn, Some(&self.kernel_ctx)).await
+    }
+}
+
+impl Drop for TurnTestHarness {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.temp_dir);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn fake_provider_builder_text_only() {
+        let turn = FakeProviderBuilder::new().with_text("hello world").build();
+        assert_eq!(turn.assistant_text, "hello world");
+        assert!(turn.tool_intents.is_empty());
+    }
+
+    #[test]
+    fn fake_provider_builder_with_tool_call() {
+        let turn = FakeProviderBuilder::new()
+            .with_text("checking file")
+            .with_tool_call("file.read", json!({"path": "test.txt"}))
+            .build();
+        assert_eq!(turn.assistant_text, "checking file");
+        assert_eq!(turn.tool_intents.len(), 1);
+        assert_eq!(turn.tool_intents[0].tool_name, "file.read");
+        assert_eq!(turn.tool_intents[0].args_json, json!({"path": "test.txt"}));
+        assert!(!turn.tool_intents[0].tool_call_id.is_empty());
+    }
+
+    #[test]
+    fn fake_provider_builder_unique_tool_call_ids() {
+        let turn = FakeProviderBuilder::new()
+            .with_tool_call("file.read", json!({"path": "a.txt"}))
+            .with_tool_call("file.read", json!({"path": "b.txt"}))
+            .build();
+        assert_eq!(turn.tool_intents.len(), 2);
+        assert_ne!(
+            turn.tool_intents[0].tool_call_id,
+            turn.tool_intents[1].tool_call_id
+        );
+    }
+
+    #[test]
+    fn harness_builds_with_invoke_tool_capability() {
+        let harness = TurnTestHarness::new();
+        assert!(harness
+            .kernel_ctx
+            .token
+            .allowed_capabilities
+            .contains(&Capability::InvokeTool));
+        assert!(harness.temp_dir.exists());
+    }
+
+    #[test]
+    fn harness_temp_dirs_are_unique() {
+        let h1 = TurnTestHarness::new();
+        let h2 = TurnTestHarness::new();
+        assert_ne!(h1.temp_dir, h2.temp_dir);
+    }
+
+    // ── Real-execution integration tests ──────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn integ_file_read_returns_real_content() {
+        let harness = TurnTestHarness::new();
+        std::fs::write(
+            harness.temp_dir.join("greeting.txt"),
+            "hello from integration test",
+        )
+        .expect("seed file");
+
+        let turn = FakeProviderBuilder::new()
+            .with_tool_call("file.read", json!({"path": "greeting.txt"}))
+            .build();
+        let result = harness.execute(&turn).await;
+
+        match result {
+            TurnResult::FinalText(text) => {
+                assert!(
+                    text.contains("hello from integration test"),
+                    "expected file content in output, got: {text}"
+                );
+            }
+            other => panic!("expected FinalText, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn integ_file_write_then_read_round_trip() {
+        let harness = TurnTestHarness::new();
+
+        // Write
+        let write_turn = FakeProviderBuilder::new()
+            .with_tool_call(
+                "file.write",
+                json!({"path": "round-trip.txt", "content": "written by tool"}),
+            )
+            .build();
+        let write_result = harness.execute(&write_turn).await;
+        match &write_result {
+            TurnResult::FinalText(text) => {
+                assert!(
+                    text.contains("[ok]"),
+                    "expected [ok] in write result, got: {text}"
+                );
+            }
+            other => panic!("expected FinalText for write, got: {other:?}"),
+        }
+
+        // Read back
+        let read_turn = FakeProviderBuilder::new()
+            .with_tool_call("file.read", json!({"path": "round-trip.txt"}))
+            .build();
+        let read_result = harness.execute(&read_turn).await;
+        match read_result {
+            TurnResult::FinalText(text) => {
+                assert!(
+                    text.contains("written by tool"),
+                    "expected written content in read result, got: {text}"
+                );
+            }
+            other => panic!("expected FinalText for read, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn integ_shell_exec_echo() {
+        let harness = TurnTestHarness::new();
+
+        let turn = FakeProviderBuilder::new()
+            .with_tool_call("shell.exec", json!({"command": "echo", "args": ["hello"]}))
+            .build();
+        let result = harness.execute(&turn).await;
+
+        match result {
+            TurnResult::FinalText(text) => {
+                assert!(
+                    text.contains("hello"),
+                    "expected 'hello' in output, got: {text}"
+                );
+                assert!(
+                    text.contains("[ok]"),
+                    "expected '[ok]' in output, got: {text}"
+                );
+            }
+            other => panic!("expected FinalText, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn integ_shell_exec_blocked_command() {
+        let harness = TurnTestHarness::new();
+
+        let turn = FakeProviderBuilder::new()
+            .with_tool_call("shell.exec", json!({"command": "rm", "args": ["-rf", "/"]}))
+            .build();
+        let result = harness.execute(&turn).await;
+
+        match result {
+            TurnResult::ToolError(err) => {
+                assert!(
+                    err.contains("not allowed"),
+                    "expected 'not allowed' in error, got: {err}"
+                );
+            }
+            other => panic!("expected ToolError with 'not allowed', got: {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn integ_file_read_sandbox_rejects_path_escape() {
+        let harness = TurnTestHarness::new();
+
+        let turn = FakeProviderBuilder::new()
+            .with_tool_call("file.read", json!({"path": "../../../etc/passwd"}))
+            .build();
+        let result = harness.execute(&turn).await;
+
+        match result {
+            TurnResult::ToolError(err) => {
+                assert!(
+                    err.contains("escapes"),
+                    "expected 'escapes' in error, got: {err}"
+                );
+            }
+            other => panic!("expected ToolError with 'escapes', got: {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn integ_missing_capability_denies_tool() {
+        let harness = TurnTestHarness::with_capabilities(BTreeSet::from([Capability::MemoryRead]));
+
+        let turn = FakeProviderBuilder::new()
+            .with_tool_call("file.read", json!({"path": "anything.txt"}))
+            .build();
+        let result = harness.execute(&turn).await;
+
+        match result {
+            TurnResult::ToolDenied(reason) => {
+                let lower = reason.to_lowercase();
+                assert!(
+                    lower.contains("capability") || lower.contains("denied"),
+                    "expected capability/denied in reason, got: {reason}"
+                );
+            }
+            other => panic!("expected ToolDenied, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn integ_audit_captures_tool_plane_invocation() {
+        let harness = TurnTestHarness::new();
+
+        let turn = FakeProviderBuilder::new()
+            .with_tool_call("shell.exec", json!({"command": "echo", "args": ["audit"]}))
+            .build();
+        let result = harness.execute(&turn).await;
+        assert!(
+            matches!(result, TurnResult::FinalText(_)),
+            "expected FinalText, got: {result:?}"
+        );
+
+        let events = harness.audit.snapshot();
+        let has_tool_plane = events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                loongclaw_kernel::AuditEventKind::PlaneInvoked {
+                    plane: loongclaw_contracts::ExecutionPlane::Tool,
+                    ..
+                }
+            )
+        });
+        assert!(
+            has_tool_plane,
+            "audit should contain PlaneInvoked{{Tool}} event, got: {:?}",
+            events
+                .iter()
+                .map(|e| format!("{:?}", e.kind))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn integ_malformed_tool_args_returns_error() {
+        let harness = TurnTestHarness::new();
+
+        let turn = FakeProviderBuilder::new()
+            .with_tool_call("file.read", json!("not an object"))
+            .build();
+        let result = harness.execute(&turn).await;
+
+        match result {
+            TurnResult::ToolError(err) => {
+                assert!(
+                    err.contains("payload must be an object"),
+                    "expected 'payload must be an object' in error, got: {err}"
+                );
+            }
+            other => {
+                panic!("expected ToolError with 'payload must be an object', got: {other:?}");
+            }
+        }
+    }
+}

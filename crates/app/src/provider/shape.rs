@@ -1,6 +1,66 @@
 use std::collections::BTreeSet;
 
-use serde_json::Value;
+use serde_json::{json, Value};
+
+use crate::conversation::turn_engine::{ProviderTurn, ToolIntent};
+
+pub fn extract_provider_turn(body: &Value) -> Option<ProviderTurn> {
+    let message = body
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))?;
+
+    let assistant_text = message
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+
+    let tool_intents = message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .map(|calls| {
+            calls
+                .iter()
+                .filter_map(|call| {
+                    let function = call.get("function")?;
+                    let tool_name = function.get("name").and_then(Value::as_str)?.to_owned();
+                    let args_str = function
+                        .get("arguments")
+                        .and_then(Value::as_str)
+                        .unwrap_or("{}");
+                    let args_json = match serde_json::from_str::<Value>(args_str) {
+                        Ok(value) => value,
+                        Err(e) => json!({
+                            "_parse_error": format!("{e}"),
+                            "_raw_arguments": args_str
+                        }),
+                    };
+                    let tool_call_id = call
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_owned();
+                    Some(ToolIntent {
+                        tool_name,
+                        args_json,
+                        source: "provider_tool_call".to_owned(),
+                        session_id: String::new(),
+                        turn_id: String::new(),
+                        tool_call_id,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Some(ProviderTurn {
+        assistant_text,
+        tool_intents,
+        raw_meta: message.clone(),
+    })
+}
 
 pub(super) fn extract_message_content(body: &Value) -> Option<String> {
     let content = body
@@ -149,6 +209,74 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn extract_provider_turn_parses_tool_calls() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "checking",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "file.read",
+                            "arguments": "{\"path\":\"README.md\"}"
+                        }
+                    }]
+                }
+            }]
+        });
+        let turn = extract_provider_turn(&body).expect("turn");
+        assert_eq!(turn.assistant_text, "checking");
+        assert_eq!(turn.tool_intents.len(), 1);
+        assert_eq!(turn.tool_intents[0].tool_name, "file.read");
+        assert_eq!(turn.tool_intents[0].tool_call_id, "call_1");
+    }
+
+    #[test]
+    fn extract_provider_turn_surfaces_malformed_json_args() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "calling",
+                    "tool_calls": [{
+                        "id": "call_bad",
+                        "type": "function",
+                        "function": {
+                            "name": "file.read",
+                            "arguments": "{{not valid json"
+                        }
+                    }]
+                }
+            }]
+        });
+        let turn = extract_provider_turn(&body).expect("turn");
+        assert_eq!(turn.tool_intents.len(), 1);
+        let args = &turn.tool_intents[0].args_json;
+        assert!(
+            args.get("_parse_error").is_some(),
+            "malformed args should surface parse error, got: {args}"
+        );
+        assert_eq!(
+            args.get("_raw_arguments").and_then(|v| v.as_str()),
+            Some("{{not valid json")
+        );
+    }
+
+    #[test]
+    fn extract_provider_turn_handles_text_only() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "hello world"
+                }
+            }]
+        });
+        let turn = extract_provider_turn(&body).expect("turn");
+        assert_eq!(turn.assistant_text, "hello world");
+        assert!(turn.tool_intents.is_empty());
+    }
 
     #[test]
     fn extract_message_content_supports_part_array_shape() {

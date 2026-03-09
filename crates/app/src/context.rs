@@ -79,7 +79,7 @@ pub(crate) fn bootstrap_kernel_context(
             .map_err(|e| format!("set default memory adapter failed: {e}"))?;
     }
 
-    kernel.register_core_tool_adapter(crate::tools::MvpToolAdapter);
+    kernel.register_core_tool_adapter(crate::tools::MvpToolAdapter::new());
     kernel
         .set_default_core_tool_adapter("mvp-tools")
         .map_err(|e| format!("set default tool adapter failed: {e}"))?;

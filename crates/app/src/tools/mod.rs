@@ -7,6 +7,7 @@ use crate::KernelContext;
 
 mod file;
 mod kernel_adapter;
+pub mod runtime_config;
 mod shell;
 
 pub use kernel_adapter::MvpToolAdapter;
@@ -35,19 +36,66 @@ pub async fn execute_tool(
 }
 
 pub fn execute_tool_core(request: ToolCoreRequest) -> Result<ToolCoreOutcome, String> {
+    execute_tool_core_with_config(request, runtime_config::get_tool_runtime_config())
+}
+
+pub fn execute_tool_core_with_config(
+    request: ToolCoreRequest,
+    config: &runtime_config::ToolRuntimeConfig,
+) -> Result<ToolCoreOutcome, String> {
     match request.tool_name.as_str() {
-        "shell.exec" | "shell_exec" | "shell" => shell::execute_shell_tool(request),
-        "file.read" | "file_read" => file::execute_file_read_tool(request),
-        "file.write" | "file_write" => file::execute_file_write_tool(request),
-        _ => Ok(ToolCoreOutcome {
-            status: "ok".to_owned(),
-            payload: json!({
-                "adapter": "core-tools",
-                "tool_name": request.tool_name,
-                "payload": request.payload,
-            }),
-        }),
+        "shell.exec" | "shell_exec" | "shell" => {
+            shell::execute_shell_tool_with_config(request, config)
+        }
+        "file.read" | "file_read" => file::execute_file_read_tool_with_config(request, config),
+        "file.write" | "file_write" => file::execute_file_write_tool_with_config(request, config),
+        _ => Err(format!(
+            "tool_not_found: unknown tool `{}`",
+            request.tool_name
+        )),
     }
+}
+
+/// Tool registry entry for capability snapshot disclosure.
+#[derive(Debug, Clone)]
+pub struct ToolRegistryEntry {
+    pub name: &'static str,
+    pub description: &'static str,
+}
+
+/// Returns a sorted list of all registered tools, gated by feature flags.
+pub fn tool_registry() -> Vec<ToolRegistryEntry> {
+    let mut entries = Vec::new();
+    #[cfg(feature = "tool-file")]
+    {
+        entries.push(ToolRegistryEntry {
+            name: "file.read",
+            description: "Read file contents",
+        });
+        entries.push(ToolRegistryEntry {
+            name: "file.write",
+            description: "Write file contents",
+        });
+    }
+    #[cfg(feature = "tool-shell")]
+    {
+        entries.push(ToolRegistryEntry {
+            name: "shell.exec",
+            description: "Execute shell commands",
+        });
+    }
+    entries
+}
+
+/// Produce a deterministic text block listing available tools,
+/// suitable for appending to the system prompt.
+pub fn capability_snapshot() -> String {
+    let entries = tool_registry();
+    let mut lines = vec!["[available_tools]".to_owned()];
+    for entry in &entries {
+        lines.push(format!("- {}: {}", entry.name, entry.description));
+    }
+    lines.join("\n")
 }
 
 #[allow(dead_code)]
@@ -83,14 +131,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unknown_tool_keeps_backward_compatible_payload_shape() {
-        let outcome = execute_tool_core(ToolCoreRequest {
+    fn capability_snapshot_is_deterministic() {
+        let snapshot = capability_snapshot();
+        assert!(snapshot.starts_with("[available_tools]"));
+
+        // Verify determinism: two calls produce identical output.
+        let snapshot2 = capability_snapshot();
+        assert_eq!(snapshot, snapshot2);
+    }
+
+    #[cfg(all(feature = "tool-file", feature = "tool-shell"))]
+    #[test]
+    fn capability_snapshot_lists_all_tools_when_all_features_enabled() {
+        let snapshot = capability_snapshot();
+        assert!(snapshot.contains("- file.read: Read file contents"));
+        assert!(snapshot.contains("- file.write: Write file contents"));
+        assert!(snapshot.contains("- shell.exec: Execute shell commands"));
+
+        // Verify sorted order: file.read < file.write < shell.exec
+        let lines: Vec<&str> = snapshot.lines().skip(1).collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].starts_with("- file.read"));
+        assert!(lines[1].starts_with("- file.write"));
+        assert!(lines[2].starts_with("- shell.exec"));
+    }
+
+    #[cfg(all(feature = "tool-file", feature = "tool-shell"))]
+    #[test]
+    fn tool_registry_returns_all_known_tools() {
+        let entries = tool_registry();
+        assert_eq!(entries.len(), 3);
+        let names: Vec<&str> = entries.iter().map(|e| e.name).collect();
+        assert!(names.contains(&"shell.exec"));
+        assert!(names.contains(&"file.read"));
+        assert!(names.contains(&"file.write"));
+    }
+
+    #[test]
+    fn unknown_tool_returns_hard_error_code() {
+        let err = execute_tool_core(ToolCoreRequest {
             tool_name: "unknown".to_owned(),
             payload: json!({"hello":"world"}),
         })
-        .expect("unknown tool should fallback to echo behavior");
-        assert_eq!(outcome.status, "ok");
-        assert_eq!(outcome.payload["adapter"], "core-tools");
+        .expect_err("unknown tool should return an error");
+        assert!(
+            err.contains("tool_not_found"),
+            "error should contain tool_not_found, got: {err}"
+        );
     }
 
     // --- Kernel-routed tool tests ---
@@ -227,7 +314,7 @@ mod tests {
             metadata: BTreeMap::new(),
         };
         kernel.register_pack(pack).expect("register pack");
-        kernel.register_core_tool_adapter(MvpToolAdapter);
+        kernel.register_core_tool_adapter(MvpToolAdapter::new());
         kernel
             .set_default_core_tool_adapter("mvp-tools")
             .expect("set default");
@@ -237,29 +324,19 @@ mod tests {
             .expect("issue token");
 
         let caps = BTreeSet::from([Capability::InvokeTool]);
-        // Use an unknown tool name so it hits the fallback path without side effects
+        // Use an unknown tool name — it should propagate as an error through the adapter
         let request = ToolCoreRequest {
             tool_name: "noop".to_owned(),
             payload: json!({"key": "value"}),
         };
-        let outcome = kernel
+        let err = kernel
             .execute_tool_core("test-pack", &token, &caps, None, request)
             .await
-            .expect("tool call via MvpToolAdapter should succeed");
-        assert_eq!(outcome.status, "ok");
-        assert_eq!(outcome.payload["adapter"], "core-tools");
-
-        let events = audit.snapshot();
-        let has_tool_plane = events.iter().any(|event| {
-            matches!(
-                &event.kind,
-                loongclaw_kernel::AuditEventKind::PlaneInvoked {
-                    plane: loongclaw_contracts::ExecutionPlane::Tool,
-                    ..
-                }
-            )
-        });
-        assert!(has_tool_plane, "audit should contain tool plane invocation");
+            .expect_err("unknown tool via MvpToolAdapter should fail");
+        assert!(
+            format!("{err}").contains("tool_not_found"),
+            "error should contain tool_not_found, got: {err}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
