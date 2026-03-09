@@ -79,6 +79,7 @@ fn should_reduce_programmatic_budget(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::indexing_slicing)] // serde_json::Value string-keyed IndexMut is infallible
 pub async fn execute_programmatic_tool_call(
     kernel: &LoongClawKernel<StaticPolicyEngine>,
     pack_id: &str,
@@ -911,7 +912,9 @@ fn pop_next_programmatic_call(
         ProgrammaticFairnessPolicy::StrictRoundRobin => {
             for offset in 0..strict_order.len() {
                 let index = cursor.saturating_add(offset) % strict_order.len();
-                let priority = strict_order[index];
+                let Some(&priority) = strict_order.get(index) else {
+                    continue;
+                };
                 if let Some(call) = grouped.get_mut(&priority).and_then(VecDeque::pop_front) {
                     *cursor = (index + 1) % strict_order.len();
                     return Some(call);
@@ -927,7 +930,9 @@ fn pop_next_programmatic_call(
             }
             for offset in 0..weighted_cycle.len() {
                 let index = cursor.saturating_add(offset) % weighted_cycle.len();
-                let priority = weighted_cycle[index];
+                let Some(&priority) = weighted_cycle.get(index) else {
+                    continue;
+                };
                 if let Some(call) = grouped.get_mut(&priority).and_then(VecDeque::pop_front) {
                     *cursor = (index + 1) % weighted_cycle.len();
                     return Some(call);

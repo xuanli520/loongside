@@ -8,6 +8,7 @@ use super::conversation::{ConversationOrchestrator, ProviderErrorMode};
 #[cfg(feature = "memory-sqlite")]
 use super::memory;
 
+#[allow(clippy::print_stdout)] // CLI REPL output
 pub async fn run_cli_chat(config_path: Option<&str>, session_hint: Option<&str>) -> CliResult<()> {
     let (resolved_path, config) = config::load(config_path)?;
     if !config.cli.enabled {
@@ -100,12 +101,14 @@ fn is_exit_command(config: &LoongClawConfig, input: &str) -> bool {
         .any(|value| !value.is_empty() && value == lower)
 }
 
+#[allow(clippy::print_stdout)] // CLI output
 fn print_help() {
     println!("/help    show this help");
     println!("/history print current session sliding window");
     println!("/exit    quit chat");
 }
 
+#[allow(clippy::print_stdout)] // CLI output
 fn print_history(session_id: &str, limit: usize) -> CliResult<()> {
     #[cfg(feature = "memory-sqlite")]
     {

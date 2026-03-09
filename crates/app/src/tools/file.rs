@@ -41,7 +41,11 @@ pub(super) fn execute_file_read_tool_with_config(
         let bytes = fs::read(&resolved)
             .map_err(|error| format!("failed to read file {}: {error}", resolved.display()))?;
         let clipped = bytes.len() > max_bytes;
-        let content_slice = if clipped { &bytes[..max_bytes] } else { &bytes };
+        let content_slice = if clipped {
+            bytes.get(..max_bytes).unwrap_or(&bytes)
+        } else {
+            &bytes
+        };
 
         Ok(ToolCoreOutcome {
             status: "ok".to_owned(),

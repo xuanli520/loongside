@@ -43,7 +43,7 @@ static TOOL_RUNTIME_CONFIG: OnceLock<ToolRuntimeConfig> = OnceLock::new();
 /// Returns `Ok(())` on the first call.  Subsequent calls return
 /// `Err` because the `OnceLock` rejects duplicate initialisation.
 pub fn init_tool_runtime_config(config: ToolRuntimeConfig) -> Result<(), String> {
-    TOOL_RUNTIME_CONFIG.set(config).map_err(|_| {
+    TOOL_RUNTIME_CONFIG.set(config).map_err(|_err| {
         "tool runtime config already initialised (duplicate init_tool_runtime_config call)"
             .to_owned()
     })

@@ -1108,10 +1108,14 @@ impl HarnessAdapter for EmbeddedPiHarness {
     }
 
     async fn execute(&self, request: HarnessRequest) -> Result<HarnessOutcome, HarnessError> {
-        self.seen
-            .lock()
-            .expect("mutex poisoned")
-            .push(request.task_id.clone());
+        match self.seen.lock() {
+            Ok(mut guard) => guard.push(request.task_id.clone()),
+            Err(_) => {
+                return Err(HarnessError::Execution(
+                    "EmbeddedPiHarness mutex poisoned".to_owned(),
+                ));
+            }
+        }
 
         Ok(HarnessOutcome {
             status: "ok".to_owned(),
@@ -1160,7 +1164,7 @@ impl ConnectorAdapter for WebhookConnector {
                 let attempts_map =
                     WEBHOOK_TEST_RETRY_STATE.get_or_init(|| Mutex::new(BTreeMap::new()));
                 let current_attempt = {
-                    let mut guard = attempts_map.lock().map_err(|_| {
+                    let mut guard = attempts_map.lock().map_err(|_err| {
                         ConnectorError::Execution("retry test state mutex poisoned".to_owned())
                     })?;
                     let entry = guard.entry(request_id.clone()).or_insert(0);
@@ -1207,7 +1211,7 @@ impl ConnectorAdapter for DynamicCatalogConnector {
             .map(std::string::ToString::to_string);
 
         let (provider, chosen_channel) = {
-            let catalog = self.catalog.lock().map_err(|_| {
+            let catalog = self.catalog.lock().map_err(|_err| {
                 ConnectorError::Execution("integration catalog mutex poisoned".to_owned())
             })?;
 
@@ -1454,6 +1458,7 @@ pub async fn maybe_execute_bridge(
 
 include!("spec_bridge_protocol.inc.rs");
 
+#[allow(clippy::indexing_slicing)] // serde_json::Value string-keyed IndexMut is infallible
 pub fn execute_http_json_bridge(
     mut execution: Value,
     provider: &kernel::ProviderConfig,
@@ -1631,6 +1636,7 @@ pub fn execute_http_json_bridge(
     }
 }
 
+#[allow(clippy::indexing_slicing)] // serde_json::Value string-keyed IndexMut is infallible
 pub async fn execute_process_stdio_bridge(
     mut execution: Value,
     provider: &kernel::ProviderConfig,
@@ -1784,7 +1790,7 @@ pub async fn run_process_stdio_json_line_exchange(
 
     if let Err(error) = timeout(Duration::from_millis(timeout_ms), transport.send(frame))
         .await
-        .map_err(|_| format!("process_stdio transport send timed out after {timeout_ms}ms"))?
+        .map_err(|_err| format!("process_stdio transport send timed out after {timeout_ms}ms"))?
     {
         let _ = child.start_kill();
         let _ = child.wait().await;
@@ -1793,7 +1799,7 @@ pub async fn run_process_stdio_json_line_exchange(
     }
     if let Err(error) = timeout(Duration::from_millis(timeout_ms), transport.close())
         .await
-        .map_err(|_| format!("process_stdio transport close timed out after {timeout_ms}ms"))?
+        .map_err(|_err| format!("process_stdio transport close timed out after {timeout_ms}ms"))?
     {
         let _ = child.start_kill();
         let _ = child.wait().await;
@@ -1878,6 +1884,7 @@ pub async fn run_process_stdio_json_line_exchange(
     })
 }
 
+#[allow(clippy::indexing_slicing)] // serde_json::Value string-keyed IndexMut is infallible
 pub fn execute_wasm_component_bridge(
     mut execution: Value,
     provider: &kernel::ProviderConfig,

@@ -101,7 +101,7 @@ impl PolicyEngine for StaticPolicyEngine {
         if self
             .revoked_tokens
             .lock()
-            .map_err(|_| PolicyError::RevokedToken {
+            .map_err(|_err| PolicyError::RevokedToken {
                 token_id: token.token_id.clone(),
             })?
             .contains(&token.token_id)
@@ -148,7 +148,7 @@ impl PolicyEngine for StaticPolicyEngine {
         let mut revoked = self
             .revoked_tokens
             .lock()
-            .map_err(|_| PolicyError::RevokedToken {
+            .map_err(|_err| PolicyError::RevokedToken {
                 token_id: token_id.to_owned(),
             })?;
         revoked.insert(token_id.to_owned());

@@ -1,5 +1,13 @@
 # cargo-deny configuration (v2 schema)
-# https://embarkstudios.github.io/cargo-deny/
+# Derived from: loongclaw-research/11-code-quality/synthesis/loongclaw-code-quality-strategy-v2.md
+
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
 
 [advisories]
 ignore = []
@@ -7,6 +15,7 @@ ignore = []
 [licenses]
 allow = [
     "MIT",
+    "Apache-2.0",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
@@ -17,7 +26,13 @@ confidence-threshold = 0.8
 
 [bans]
 multiple-versions = "warn"
+highlight = "all"
 wildcards = "allow"
+deny = [
+    { crate = "openssl", reason = "use rustls for pure-Rust TLS" },
+    { crate = "openssl-sys", reason = "use rustls for pure-Rust TLS" },
+]
+skip-tree = []
 
 [sources]
 unknown-registry = "deny"

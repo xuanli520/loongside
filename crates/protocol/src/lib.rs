@@ -353,7 +353,7 @@ impl Transport for ChannelTransport {
                 payload: frame.payload,
             })
             .await
-            .map_err(|_| TransportError::Closed)
+            .map_err(|_err| TransportError::Closed)
     }
 
     async fn recv(&self) -> Result<Option<InboundFrame>, TransportError> {

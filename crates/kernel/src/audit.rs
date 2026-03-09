@@ -37,7 +37,7 @@ impl AuditSink for InMemoryAuditSink {
         let mut guard = self
             .events
             .lock()
-            .map_err(|_| AuditError::Sink("audit mutex poisoned".to_owned()))?;
+            .map_err(|_err| AuditError::Sink("audit mutex poisoned".to_owned()))?;
         guard.push(event);
         Ok(())
     }

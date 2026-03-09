@@ -28,7 +28,7 @@ impl VerticalPackManifest {
             return Err(PackError::EmptyDomain);
         }
         Version::parse(&self.version)
-            .map_err(|_| PackError::InvalidVersion(self.version.clone()))?;
+            .map_err(|_err| PackError::InvalidVersion(self.version.clone()))?;
         if self.granted_capabilities.is_empty() {
             return Err(PackError::EmptyCapabilities);
         }

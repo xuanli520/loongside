@@ -1,3 +1,4 @@
+#![allow(clippy::print_stdout, clippy::print_stderr)] // CLI daemon binary
 #[cfg(test)]
 use std::{collections::BTreeMap, time::Duration};
 use std::{collections::BTreeSet, fs, path::Path, sync::Arc};
@@ -217,7 +218,11 @@ async fn main() {
         }
     };
     if let Err(error) = result {
-        eprintln!("error: {error}");
+        // startup error reporting
+        #[allow(clippy::print_stderr)]
+        {
+            eprintln!("error: {error}");
+        }
         std::process::exit(2);
     }
 }

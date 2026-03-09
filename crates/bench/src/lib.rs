@@ -290,6 +290,7 @@ struct SchedulerSnapshot {
     wait_cycles: usize,
 }
 
+#[allow(clippy::print_stdout)] // CLI benchmark report output
 pub async fn run_programmatic_pressure_benchmark_cli(
     matrix_path: &str,
     baseline_path: Option<&str>,
@@ -377,6 +378,7 @@ pub async fn run_programmatic_pressure_benchmark_cli(
     }
 }
 
+#[allow(clippy::print_stdout)] // CLI lint report output
 pub fn run_programmatic_pressure_baseline_lint_cli(
     matrix_path: &str,
     baseline_path: Option<&str>,
@@ -1581,19 +1583,21 @@ fn percentile(sorted_values: &[f64], ratio: f64) -> f64 {
         return 0.0;
     }
     if sorted_values.len() == 1 {
-        return sorted_values[0];
+        return sorted_values.first().copied().unwrap_or(0.0);
     }
 
     let clamped = ratio.clamp(0.0, 1.0);
     let rank = clamped * (sorted_values.len().saturating_sub(1) as f64);
     let lower = rank.floor() as usize;
     let upper = rank.ceil() as usize;
+    let lower_val = sorted_values.get(lower).copied().unwrap_or(0.0);
+    let upper_val = sorted_values.get(upper).copied().unwrap_or(lower_val);
     if lower == upper {
-        return sorted_values[lower];
+        return lower_val;
     }
 
     let weight = rank - lower as f64;
-    sorted_values[lower] + (sorted_values[upper] - sorted_values[lower]) * weight
+    lower_val + (upper_val - lower_val) * weight
 }
 
 fn read_json_file<T: DeserializeOwned>(path: &str) -> CliResult<T> {

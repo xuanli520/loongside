@@ -40,6 +40,7 @@ pub trait ChannelAdapter {
     async fn send_text(&self, target: &str, text: &str) -> CliResult<()>;
 }
 
+#[allow(clippy::print_stdout)] // CLI startup banner
 pub async fn run_telegram_channel(config_path: Option<&str>, once: bool) -> CliResult<()> {
     if !cfg!(feature = "channel-telegram") {
         return Err("telegram channel is disabled (enable feature `channel-telegram`)".to_owned());
@@ -91,6 +92,7 @@ pub async fn run_telegram_channel(config_path: Option<&str>, once: bool) -> CliR
     }
 }
 
+#[allow(clippy::print_stdout)] // CLI output
 pub async fn run_feishu_send(
     config_path: Option<&str>,
     receive_id: &str,

@@ -205,11 +205,10 @@ fn build_turn_request_body(
 ) -> Value {
     let mut body = build_completion_request_body(config, messages, model, payload_mode);
     if include_tool_schema && !tool_definitions.is_empty() {
-        let object = body
-            .as_object_mut()
-            .expect("completion request body must be a JSON object");
-        object.insert("tools".to_owned(), Value::Array(tool_definitions.to_vec()));
-        object.insert("tool_choice".to_owned(), json!("auto"));
+        if let Some(object) = body.as_object_mut() {
+            object.insert("tools".to_owned(), Value::Array(tool_definitions.to_vec()));
+            object.insert("tool_choice".to_owned(), json!("auto"));
+        }
     }
     body
 }

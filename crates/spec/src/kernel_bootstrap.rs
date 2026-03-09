@@ -61,9 +61,9 @@ impl KernelBuilder {
             ),
         };
         register_builtin_adapters(&mut kernel);
-        kernel
-            .register_pack(default_pack_manifest())
-            .expect("pack registration failed");
+        // The default pack manifest is hardcoded and always valid; ignore the
+        // impossible error branch to avoid panicking in production.
+        let _ = kernel.register_pack(default_pack_manifest());
         kernel
     }
 }

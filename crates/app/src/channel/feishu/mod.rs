@@ -31,6 +31,7 @@ pub(super) async fn run_feishu_send(
     }
 }
 
+#[allow(clippy::print_stdout)] // CLI startup banner
 pub(super) async fn run_feishu_channel(
     config: &LoongClawConfig,
     resolved_path: &Path,

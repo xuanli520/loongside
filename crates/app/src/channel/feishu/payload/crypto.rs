@@ -32,8 +32,15 @@ fn decrypt_feishu_event_payload(encrypted_payload: &str, encrypt_key: &str) -> C
         return Err("decode encrypted feishu payload failed: payload too short".to_owned());
     }
 
-    let iv = &raw[..16];
-    let mut cipher_text = raw[16..].to_vec();
+    let iv = raw
+        .get(..16)
+        .ok_or_else(|| "decode encrypted feishu payload failed: cannot extract IV".to_owned())?;
+    let mut cipher_text = raw
+        .get(16..)
+        .ok_or_else(|| {
+            "decode encrypted feishu payload failed: cannot extract ciphertext".to_owned()
+        })?
+        .to_vec();
     if cipher_text.is_empty() {
         return Err("decode encrypted feishu payload failed: ciphertext is empty".to_owned());
     }

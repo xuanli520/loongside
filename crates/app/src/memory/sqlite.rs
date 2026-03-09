@@ -188,7 +188,7 @@ pub(super) fn window_direct(
         }),
     };
     let outcome = super::execute_memory_core(request)?;
-    let turns_raw = outcome.payload["turns"].clone();
+    let turns_raw = outcome.payload.get("turns").cloned().unwrap_or(Value::Null);
     serde_json::from_value(turns_raw)
         .map_err(|error| format!("decode memory turns failed: {error}"))
 }
