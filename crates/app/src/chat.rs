@@ -4,7 +4,7 @@ use crate::context::{bootstrap_kernel_context, DEFAULT_TOKEN_TTL_S};
 use crate::CliResult;
 
 use super::config::{self, LoongClawConfig};
-use super::conversation::{ConversationOrchestrator, ProviderErrorMode};
+use super::conversation::{ConversationTurnLoop, ProviderErrorMode};
 #[cfg(feature = "memory-sqlite")]
 use super::memory;
 
@@ -43,7 +43,7 @@ pub async fn run_cli_chat(config_path: Option<&str>, session_hint: Option<&str>)
         .unwrap_or("default")
         .to_owned();
     println!("session={session_id} (type /help for commands, /exit to quit)");
-    let orchestrator = ConversationOrchestrator::new();
+    let turn_loop = ConversationTurnLoop::new();
 
     loop {
         print!("you> ");
@@ -74,7 +74,7 @@ pub async fn run_cli_chat(config_path: Option<&str>, session_hint: Option<&str>)
             continue;
         }
 
-        let assistant_text = orchestrator
+        let assistant_text = turn_loop
             .handle_turn(
                 &config,
                 &session_id,

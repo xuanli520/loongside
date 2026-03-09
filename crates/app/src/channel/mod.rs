@@ -15,7 +15,7 @@ use crate::KernelContext;
 #[cfg(any(feature = "channel-telegram", feature = "channel-feishu"))]
 use super::config::LoongClawConfig;
 #[cfg(any(feature = "channel-telegram", feature = "channel-feishu"))]
-use super::conversation::{ConversationOrchestrator, ProviderErrorMode};
+use super::conversation::{ConversationTurnLoop, ProviderErrorMode};
 
 #[cfg(feature = "channel-feishu")]
 mod feishu;
@@ -171,7 +171,7 @@ pub(super) async fn process_inbound_with_provider(
     message: &ChannelInboundMessage,
     kernel_ctx: Option<&KernelContext>,
 ) -> CliResult<String> {
-    ConversationOrchestrator::new()
+    ConversationTurnLoop::new()
         .handle_turn(
             config,
             &message.session_id,

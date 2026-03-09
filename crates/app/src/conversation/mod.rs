@@ -1,9 +1,10 @@
-mod orchestrator;
 mod persistence;
 mod runtime;
 pub mod turn_engine;
+mod turn_loop;
 
-pub use orchestrator::ConversationOrchestrator;
+pub use turn_loop::ConversationTurnLoop;
+pub type ConversationOrchestrator = ConversationTurnLoop;
 #[allow(unused_imports)]
 pub use runtime::{ConversationRuntime, DefaultConversationRuntime};
 pub use turn_engine::{

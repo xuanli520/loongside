@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -21,10 +21,12 @@ use crate::KernelContext;
 
 struct FakeRuntime {
     seed_messages: Vec<Value>,
-    completion: Result<String, String>,
-    turn: Result<ProviderTurn, String>,
+    completion_responses: Mutex<VecDeque<Result<String, String>>>,
+    turn_responses: Mutex<VecDeque<Result<ProviderTurn, String>>>,
     persisted: Mutex<Vec<(String, String, String)>>,
     requested_messages: Mutex<Vec<Value>>,
+    turn_requested_messages: Mutex<Vec<Vec<Value>>>,
+    completion_requested_messages: Mutex<Vec<Vec<Value>>>,
     completion_calls: Mutex<usize>,
     turn_calls: Mutex<usize>,
 }
@@ -41,15 +43,7 @@ impl FakeRuntime {
                 })
             },
         );
-        Self {
-            seed_messages,
-            completion,
-            turn,
-            persisted: Mutex::new(Vec::new()),
-            requested_messages: Mutex::new(Vec::new()),
-            completion_calls: Mutex::new(0),
-            turn_calls: Mutex::new(0),
-        }
+        Self::with_turns_and_completions(seed_messages, vec![turn], vec![completion])
     }
 
     fn with_turn_and_completion(
@@ -57,12 +51,26 @@ impl FakeRuntime {
         turn: Result<ProviderTurn, String>,
         completion: Result<String, String>,
     ) -> Self {
+        Self::with_turns_and_completions(seed_messages, vec![turn], vec![completion])
+    }
+
+    fn with_turns(seed_messages: Vec<Value>, turns: Vec<Result<ProviderTurn, String>>) -> Self {
+        Self::with_turns_and_completions(seed_messages, turns, Vec::new())
+    }
+
+    fn with_turns_and_completions(
+        seed_messages: Vec<Value>,
+        turns: Vec<Result<ProviderTurn, String>>,
+        completions: Vec<Result<String, String>>,
+    ) -> Self {
         Self {
             seed_messages,
-            completion,
-            turn,
+            completion_responses: Mutex::new(VecDeque::from(completions)),
+            turn_responses: Mutex::new(VecDeque::from(turns)),
             persisted: Mutex::new(Vec::new()),
             requested_messages: Mutex::new(Vec::new()),
+            turn_requested_messages: Mutex::new(Vec::new()),
+            completion_requested_messages: Mutex::new(Vec::new()),
             completion_calls: Mutex::new(0),
             turn_calls: Mutex::new(0),
         }
@@ -89,7 +97,16 @@ impl ConversationRuntime for FakeRuntime {
         let mut calls = self.completion_calls.lock().expect("completion calls lock");
         *calls += 1;
         *self.requested_messages.lock().expect("request lock") = messages.to_vec();
-        self.completion.clone().map_err(|error| error.to_owned())
+        self.completion_requested_messages
+            .lock()
+            .expect("completion request lock")
+            .push(messages.to_vec());
+        self.completion_responses
+            .lock()
+            .expect("completion response lock")
+            .pop_front()
+            .unwrap_or_else(|| Err("unexpected_completion_call".to_owned()))
+            .map_err(|error| error.to_owned())
     }
 
     async fn request_turn(
@@ -100,7 +117,16 @@ impl ConversationRuntime for FakeRuntime {
         let mut calls = self.turn_calls.lock().expect("turn calls lock");
         *calls += 1;
         *self.requested_messages.lock().expect("request lock") = messages.to_vec();
-        self.turn.clone().map_err(|error| error.to_owned())
+        self.turn_requested_messages
+            .lock()
+            .expect("turn request lock")
+            .push(messages.to_vec());
+        self.turn_responses
+            .lock()
+            .expect("turn response lock")
+            .pop_front()
+            .unwrap_or_else(|| Err("unexpected_turn_call".to_owned()))
+            .map_err(|error| error.to_owned())
     }
 
     async fn persist_turn(
@@ -136,8 +162,8 @@ async fn handle_turn_with_runtime_success_persists_user_and_assistant_turns() {
         vec![json!({"role": "system", "content": "sys"})],
         Ok("assistant-reply".to_owned()),
     );
-    let orchestrator = ConversationOrchestrator::new();
-    let reply = orchestrator
+    let turn_loop = ConversationTurnLoop::new();
+    let reply = turn_loop
         .handle_turn_with_runtime(
             &test_config(),
             "session-1",
@@ -179,8 +205,8 @@ async fn handle_turn_with_runtime_success_persists_user_and_assistant_turns() {
 #[tokio::test]
 async fn handle_turn_with_runtime_propagates_error_without_persisting() {
     let runtime = FakeRuntime::new(vec![], Err("timeout".to_owned()));
-    let orchestrator = ConversationOrchestrator::new();
-    let error = orchestrator
+    let turn_loop = ConversationTurnLoop::new();
+    let error = turn_loop
         .handle_turn_with_runtime(
             &test_config(),
             "session-2",
@@ -199,8 +225,8 @@ async fn handle_turn_with_runtime_propagates_error_without_persisting() {
 #[tokio::test]
 async fn handle_turn_with_runtime_inline_mode_returns_synthetic_reply_and_persists() {
     let runtime = FakeRuntime::new(vec![], Err("timeout".to_owned()));
-    let orchestrator = ConversationOrchestrator::new();
-    let output = orchestrator
+    let turn_loop = ConversationTurnLoop::new();
+    let output = turn_loop
         .handle_turn_with_runtime(
             &test_config(),
             "session-3",
@@ -235,7 +261,7 @@ async fn handle_turn_with_runtime_inline_mode_returns_synthetic_reply_and_persis
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn handle_turn_with_runtime_tool_turn_uses_natural_language_completion_by_default() {
+async fn handle_turn_with_runtime_tool_turn_runs_second_turn_for_natural_language_reply() {
     use super::integration_tests::TurnTestHarness;
 
     let harness = TurnTestHarness::new();
@@ -245,25 +271,31 @@ async fn handle_turn_with_runtime_tool_turn_uses_natural_language_completion_by_
     )
     .expect("seed test note");
 
-    let runtime = FakeRuntime::with_turn_and_completion(
+    let runtime = FakeRuntime::with_turns(
         vec![],
-        Ok(ProviderTurn {
-            assistant_text: "Reading the file now.".to_owned(),
-            tool_intents: vec![ToolIntent {
-                tool_name: "file.read".to_owned(),
-                args_json: json!({"path": "note.md"}),
-                source: "provider_tool_call".to_owned(),
-                session_id: "session-tool".to_owned(),
-                turn_id: "turn-tool".to_owned(),
-                tool_call_id: "call-tool".to_owned(),
-            }],
-            raw_meta: Value::Null,
-        }),
-        Ok("Summary: the note says hello from orchestrator test.".to_owned()),
+        vec![
+            Ok(ProviderTurn {
+                assistant_text: "Reading the file now.".to_owned(),
+                tool_intents: vec![ToolIntent {
+                    tool_name: "file.read".to_owned(),
+                    args_json: json!({"path": "note.md"}),
+                    source: "provider_tool_call".to_owned(),
+                    session_id: "session-tool".to_owned(),
+                    turn_id: "turn-tool".to_owned(),
+                    tool_call_id: "call-tool".to_owned(),
+                }],
+                raw_meta: Value::Null,
+            }),
+            Ok(ProviderTurn {
+                assistant_text: "Summary: the note says hello from orchestrator test.".to_owned(),
+                tool_intents: vec![],
+                raw_meta: Value::Null,
+            }),
+        ],
     );
 
-    let orchestrator = ConversationOrchestrator::new();
-    let reply = orchestrator
+    let turn_loop = ConversationTurnLoop::new();
+    let reply = turn_loop
         .handle_turn_with_runtime(
             &test_config(),
             "session-tool",
@@ -288,9 +320,24 @@ async fn handle_turn_with_runtime_tool_turn_uses_natural_language_completion_by_
             .completion_calls
             .lock()
             .expect("completion calls lock"),
-        1
+        0
     );
-    assert_eq!(*runtime.turn_calls.lock().expect("turn calls lock"), 1);
+    assert_eq!(*runtime.turn_calls.lock().expect("turn calls lock"), 2);
+
+    let requested_turns = runtime
+        .turn_requested_messages
+        .lock()
+        .expect("turn request lock");
+    assert_eq!(requested_turns.len(), 2);
+    let second_turn_payload = serde_json::to_string(&requested_turns[1]).expect("serialize turns");
+    assert!(
+        second_turn_payload.contains("[tool_result]"),
+        "second turn should include tool result context, got: {second_turn_payload}"
+    );
+    assert!(
+        second_turn_payload.contains("Original request"),
+        "second turn should include followup prompt, got: {second_turn_payload}"
+    );
 
     let persisted = runtime.persisted.lock().expect("persisted lock");
     assert_eq!(persisted.len(), 2);
@@ -327,8 +374,8 @@ async fn handle_turn_with_runtime_tool_turn_raw_request_skips_second_pass_comple
         Ok("this must not be used".to_owned()),
     );
 
-    let orchestrator = ConversationOrchestrator::new();
-    let reply = orchestrator
+    let turn_loop = ConversationTurnLoop::new();
+    let reply = turn_loop
         .handle_turn_with_runtime(
             &test_config(),
             "session-tool-raw",
@@ -354,27 +401,116 @@ async fn handle_turn_with_runtime_tool_turn_raw_request_skips_second_pass_comple
     assert_eq!(*runtime.turn_calls.lock().expect("turn calls lock"), 1);
 }
 
-#[tokio::test]
-async fn handle_turn_with_runtime_tool_denial_returns_inline_reply_even_in_propagate_mode() {
-    let runtime = FakeRuntime::with_turn_and_completion(
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handle_turn_with_runtime_supports_multiple_tool_rounds_before_final_answer() {
+    use super::integration_tests::TurnTestHarness;
+
+    let harness = TurnTestHarness::new();
+    std::fs::write(harness.temp_dir.join("note_a.md"), "first note").expect("seed note_a");
+    std::fs::write(harness.temp_dir.join("note_b.md"), "second note").expect("seed note_b");
+
+    let runtime = FakeRuntime::with_turns(
         vec![],
-        Ok(ProviderTurn {
-            assistant_text: "Reading the file now.".to_owned(),
-            tool_intents: vec![ToolIntent {
-                tool_name: "file.read".to_owned(),
-                args_json: json!({"path": "note.md"}),
-                source: "provider_tool_call".to_owned(),
-                session_id: "session-denied".to_owned(),
-                turn_id: "turn-denied".to_owned(),
-                tool_call_id: "call-denied".to_owned(),
-            }],
-            raw_meta: Value::Null,
-        }),
-        Ok("MODEL_DENIED_REPLY".to_owned()),
+        vec![
+            Ok(ProviderTurn {
+                assistant_text: "Reading note_a.md.".to_owned(),
+                tool_intents: vec![ToolIntent {
+                    tool_name: "file.read".to_owned(),
+                    args_json: json!({"path": "note_a.md"}),
+                    source: "provider_tool_call".to_owned(),
+                    session_id: "session-multi-tool".to_owned(),
+                    turn_id: "turn-1".to_owned(),
+                    tool_call_id: "call-1".to_owned(),
+                }],
+                raw_meta: Value::Null,
+            }),
+            Ok(ProviderTurn {
+                assistant_text: "Need note_b.md as well.".to_owned(),
+                tool_intents: vec![ToolIntent {
+                    tool_name: "file.read".to_owned(),
+                    args_json: json!({"path": "note_b.md"}),
+                    source: "provider_tool_call".to_owned(),
+                    session_id: "session-multi-tool".to_owned(),
+                    turn_id: "turn-2".to_owned(),
+                    tool_call_id: "call-2".to_owned(),
+                }],
+                raw_meta: Value::Null,
+            }),
+            Ok(ProviderTurn {
+                assistant_text: "Summary: note_a says first note; note_b says second note."
+                    .to_owned(),
+                tool_intents: vec![],
+                raw_meta: Value::Null,
+            }),
+        ],
     );
 
-    let orchestrator = ConversationOrchestrator::new();
-    let reply = orchestrator
+    let turn_loop = ConversationTurnLoop::new();
+    let reply = turn_loop
+        .handle_turn_with_runtime(
+            &test_config(),
+            "session-multi-tool",
+            "read note_a.md and note_b.md then summarize",
+            ProviderErrorMode::Propagate,
+            &runtime,
+            Some(&harness.kernel_ctx),
+        )
+        .await
+        .expect("multi-tool turn should succeed");
+
+    assert_eq!(
+        reply,
+        "Summary: note_a says first note; note_b says second note."
+    );
+    assert_eq!(*runtime.turn_calls.lock().expect("turn calls lock"), 3);
+    assert_eq!(
+        *runtime
+            .completion_calls
+            .lock()
+            .expect("completion calls lock"),
+        0
+    );
+
+    let requested_turns = runtime
+        .turn_requested_messages
+        .lock()
+        .expect("turn request lock");
+    assert_eq!(requested_turns.len(), 3);
+    let third_turn_payload = serde_json::to_string(&requested_turns[2]).expect("serialize turns");
+    let tool_result_mentions = third_turn_payload.matches("[tool_result]").count();
+    assert!(
+        tool_result_mentions >= 2,
+        "third turn should include at least two tool_result entries, got: {third_turn_payload}"
+    );
+}
+
+#[tokio::test]
+async fn handle_turn_with_runtime_tool_denial_returns_inline_reply_even_in_propagate_mode() {
+    let runtime = FakeRuntime::with_turns(
+        vec![],
+        vec![
+            Ok(ProviderTurn {
+                assistant_text: "Reading the file now.".to_owned(),
+                tool_intents: vec![ToolIntent {
+                    tool_name: "file.read".to_owned(),
+                    args_json: json!({"path": "note.md"}),
+                    source: "provider_tool_call".to_owned(),
+                    session_id: "session-denied".to_owned(),
+                    turn_id: "turn-denied".to_owned(),
+                    tool_call_id: "call-denied".to_owned(),
+                }],
+                raw_meta: Value::Null,
+            }),
+            Ok(ProviderTurn {
+                assistant_text: "MODEL_DENIED_REPLY".to_owned(),
+                tool_intents: vec![],
+                raw_meta: Value::Null,
+            }),
+        ],
+    );
+
+    let turn_loop = ConversationTurnLoop::new();
+    let reply = turn_loop
         .handle_turn_with_runtime(
             &test_config(),
             "session-denied",
@@ -400,9 +536,10 @@ async fn handle_turn_with_runtime_tool_denial_returns_inline_reply_even_in_propa
             .completion_calls
             .lock()
             .expect("completion calls lock"),
-        1,
-        "tool-denied fallback should run a completion pass for language-aware output"
+        0,
+        "tool-denied loop should continue with request_turn without completion fallback"
     );
+    assert_eq!(*runtime.turn_calls.lock().expect("turn calls lock"), 2);
 
     let persisted = runtime.persisted.lock().expect("persisted lock");
     assert_eq!(persisted.len(), 2);
@@ -414,25 +551,31 @@ async fn handle_turn_with_runtime_tool_error_returns_natural_language_fallback()
     use super::integration_tests::TurnTestHarness;
 
     let harness = TurnTestHarness::new();
-    let runtime = FakeRuntime::with_turn_and_completion(
+    let runtime = FakeRuntime::with_turns(
         vec![],
-        Ok(ProviderTurn {
-            assistant_text: "Reading the file now.".to_owned(),
-            tool_intents: vec![ToolIntent {
-                tool_name: "file.read".to_owned(),
-                args_json: json!("not an object"),
-                source: "provider_tool_call".to_owned(),
-                session_id: "session-tool-error".to_owned(),
-                turn_id: "turn-tool-error".to_owned(),
-                tool_call_id: "call-tool-error".to_owned(),
-            }],
-            raw_meta: Value::Null,
-        }),
-        Ok("MODEL_ERROR_REPLY".to_owned()),
+        vec![
+            Ok(ProviderTurn {
+                assistant_text: "Reading the file now.".to_owned(),
+                tool_intents: vec![ToolIntent {
+                    tool_name: "file.read".to_owned(),
+                    args_json: json!("not an object"),
+                    source: "provider_tool_call".to_owned(),
+                    session_id: "session-tool-error".to_owned(),
+                    turn_id: "turn-tool-error".to_owned(),
+                    tool_call_id: "call-tool-error".to_owned(),
+                }],
+                raw_meta: Value::Null,
+            }),
+            Ok(ProviderTurn {
+                assistant_text: "MODEL_ERROR_REPLY".to_owned(),
+                tool_intents: vec![],
+                raw_meta: Value::Null,
+            }),
+        ],
     );
 
-    let orchestrator = ConversationOrchestrator::new();
-    let reply = orchestrator
+    let turn_loop = ConversationTurnLoop::new();
+    let reply = turn_loop
         .handle_turn_with_runtime(
             &test_config(),
             "session-tool-error",
@@ -459,9 +602,10 @@ async fn handle_turn_with_runtime_tool_error_returns_natural_language_fallback()
             .completion_calls
             .lock()
             .expect("completion calls lock"),
-        1,
-        "tool-error fallback should run a completion pass for language-aware output"
+        0,
+        "tool-error loop should continue with request_turn without completion fallback"
     );
+    assert_eq!(*runtime.turn_calls.lock().expect("turn calls lock"), 2);
 
     let persisted = runtime.persisted.lock().expect("persisted lock");
     assert_eq!(persisted.len(), 2);
@@ -470,8 +614,7 @@ async fn handle_turn_with_runtime_tool_error_returns_natural_language_fallback()
 
 #[tokio::test]
 async fn handle_turn_with_runtime_tool_failure_completion_error_uses_raw_reason_without_markers() {
-    let runtime = FakeRuntime::with_turn_and_completion(
-        vec![],
+    let repeated_tool_turn = || {
         Ok(ProviderTurn {
             assistant_text: "Reading the file now.".to_owned(),
             tool_intents: vec![ToolIntent {
@@ -483,12 +626,22 @@ async fn handle_turn_with_runtime_tool_failure_completion_error_uses_raw_reason_
                 tool_call_id: "call-denied-fallback".to_owned(),
             }],
             raw_meta: Value::Null,
-        }),
-        Err("completion_unavailable".to_owned()),
+        })
+    };
+
+    let runtime = FakeRuntime::with_turns_and_completions(
+        vec![],
+        vec![
+            repeated_tool_turn(),
+            repeated_tool_turn(),
+            repeated_tool_turn(),
+            repeated_tool_turn(),
+        ],
+        vec![Err("completion_unavailable".to_owned())],
     );
 
-    let orchestrator = ConversationOrchestrator::new();
-    let reply = orchestrator
+    let turn_loop = ConversationTurnLoop::new();
+    let reply = turn_loop
         .handle_turn_with_runtime(
             &test_config(),
             "session-denied-fallback",
@@ -523,6 +676,7 @@ async fn handle_turn_with_runtime_tool_failure_completion_error_uses_raw_reason_
             .expect("completion calls lock"),
         1
     );
+    assert_eq!(*runtime.turn_calls.lock().expect("turn calls lock"), 4);
 }
 
 #[test]
