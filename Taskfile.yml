@@ -39,9 +39,14 @@ tasks:
       - ./scripts/benchmark_programmatic_pressure.sh
 
   check:docs:
-    desc: Validate doc governance (mirror, dead links, release-trace linkage)
+    desc: Validate doc governance (dev mode: warn on missing local .docs release traces)
     cmds:
       - scripts/check-docs.sh
+
+  check:docs:strict:
+    desc: Validate doc governance in strict release mode (missing .docs artifacts fail)
+    cmds:
+      - LOONGCLAW_RELEASE_DOCS_STRICT=1 scripts/check-docs.sh
 
   check:deny:
     desc: Run cargo-deny (advisories, bans, sources)

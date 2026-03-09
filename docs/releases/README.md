@@ -31,3 +31,9 @@ Canonical public repository links in release docs and issue templates must point
 - `https://github.com/loongclaw-ai/loongclaw`
 
 This is enforced by `scripts/check-docs.sh`.
+
+Release artifact strictness modes:
+
+- Local development default: release debug/trace artifacts under `.docs/` are warned but not blocking.
+- CI/release default: strict mode is enabled automatically (`CI=true` / `GITHUB_ACTIONS=true`), and missing `.docs/` artifacts fail the check.
+- Manual override: set `LOONGCLAW_RELEASE_DOCS_STRICT=1` for strict mode or `LOONGCLAW_RELEASE_DOCS_STRICT=0` for warn-only mode.

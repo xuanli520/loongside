@@ -6,8 +6,35 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ERRORS=0
+WARNINGS=0
 PUBLIC_GITHUB_REPO="${LOONGCLAW_PUBLIC_REPO:-loongclaw-ai/loongclaw}"
 PUBLIC_GITHUB_BASE="https://github.com/${PUBLIC_GITHUB_REPO}"
+
+if [ -n "${LOONGCLAW_RELEASE_DOCS_STRICT:-}" ]; then
+    case "${LOONGCLAW_RELEASE_DOCS_STRICT}" in
+        1|true|TRUE|yes|YES) STRICT_RELEASE_DOCS=1 ;;
+        0|false|FALSE|no|NO) STRICT_RELEASE_DOCS=0 ;;
+        *)
+            echo "FAIL: invalid LOONGCLAW_RELEASE_DOCS_STRICT value '${LOONGCLAW_RELEASE_DOCS_STRICT}' (expected 0/1)"
+            exit 1
+            ;;
+    esac
+elif [ "${CI:-}" = "true" ] || [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+    STRICT_RELEASE_DOCS=1
+else
+    STRICT_RELEASE_DOCS=0
+fi
+
+artifact_gate_fail_or_warn() {
+    local message="$1"
+    if [ "$STRICT_RELEASE_DOCS" -eq 1 ]; then
+        echo "FAIL: ${message}"
+        ERRORS=$((ERRORS + 1))
+    else
+        echo "WARN: ${message}"
+        WARNINGS=$((WARNINGS + 1))
+    fi
+}
 
 # --- 1. CLAUDE.md / AGENTS.md mirror check ---
 if ! diff -q "$REPO_ROOT/CLAUDE.md" "$REPO_ROOT/AGENTS.md" > /dev/null 2>&1; then
@@ -104,8 +131,7 @@ else
 
         debug_doc_path="$REPO_ROOT/.docs/releases/${tag}-debug.md"
         if [ ! -f "$debug_doc_path" ]; then
-            echo "FAIL: missing local debug doc for ${tag}: .docs/releases/${tag}-debug.md"
-            ERRORS=$((ERRORS + 1))
+            artifact_gate_fail_or_warn "missing local debug doc for ${tag}: .docs/releases/${tag}-debug.md"
         else
             if ! grep -Fq "Trace path:" "$debug_doc_path"; then
                 echo "FAIL: ${debug_doc_path} missing trace field 'Trace path:'"
@@ -122,26 +148,22 @@ if [ -s "$RELEASE_TAGS_FILE" ]; then
     TRACE_INDEX="$REPO_ROOT/.docs/traces/index.jsonl"
     TRACE_LATEST="$REPO_ROOT/.docs/traces/latest"
     if [ ! -f "$TRACE_INDEX" ]; then
-        echo "FAIL: missing trace index for released versions: .docs/traces/index.jsonl"
-        ERRORS=$((ERRORS + 1))
+        artifact_gate_fail_or_warn "missing trace index for released versions: .docs/traces/index.jsonl"
     fi
     if [ ! -f "$TRACE_LATEST" ]; then
-        echo "FAIL: missing latest trace pointer: .docs/traces/latest"
-        ERRORS=$((ERRORS + 1))
+        artifact_gate_fail_or_warn "missing latest trace pointer: .docs/traces/latest"
     fi
 
     while IFS= read -r tag; do
         [ -z "$tag" ] && continue
         by_tag_latest="$REPO_ROOT/.docs/traces/by-tag/${tag}/latest"
         if [ ! -f "$by_tag_latest" ]; then
-            echo "FAIL: missing by-tag latest pointer for ${tag}: .docs/traces/by-tag/${tag}/latest"
-            ERRORS=$((ERRORS + 1))
+            artifact_gate_fail_or_warn "missing by-tag latest pointer for ${tag}: .docs/traces/by-tag/${tag}/latest"
         fi
 
         if [ -f "$TRACE_INDEX" ]; then
             if ! grep -F "\"tag\":\"${tag}\"" "$TRACE_INDEX" | grep -F "\"command\":\"post-release\"" | grep -F "\"status\":\"success\"" > /dev/null; then
-                echo "FAIL: trace index missing successful post-release record for ${tag}"
-                ERRORS=$((ERRORS + 1))
+                artifact_gate_fail_or_warn "trace index missing successful post-release record for ${tag}"
             fi
         fi
     done < "$RELEASE_TAGS_FILE"
@@ -192,6 +214,11 @@ if [ "$ERRORS" -gt 0 ]; then
     echo ""
     echo "FAILED: $ERRORS doc governance error(s)"
     exit 1
+fi
+
+if [ "$WARNINGS" -gt 0 ]; then
+    echo ""
+    echo "PASSED with warnings: $WARNINGS non-blocking release-artifact warning(s)"
 fi
 
 echo ""
