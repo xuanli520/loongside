@@ -51,7 +51,8 @@ pub(crate) async fn run_onboard_cli(options: OnboardCommandOptions) -> CliResult
         .as_deref()
         .map(mvp::config::expand_path)
         .unwrap_or_else(mvp::config::default_config_path);
-    if output_path.exists() && !options.force {
+    let mut force_write = options.force;
+    if output_path.exists() && !force_write {
         if options.non_interactive {
             return Err(format!(
                 "config {} already exists (use --force to overwrite)",
@@ -68,6 +69,7 @@ pub(crate) async fn run_onboard_cli(options: OnboardCommandOptions) -> CliResult
             let choice = prompt_with_default("Your choice", "c")?;
             match choice.trim().to_ascii_lowercase().as_str() {
                 "o" | "overwrite" => {
+                    force_write = true;
                     break;
                 }
                 "b" | "backup" => {
@@ -159,7 +161,7 @@ pub(crate) async fn run_onboard_cli(options: OnboardCommandOptions) -> CliResult
         return Err("onboarding cancelled: unresolved preflight warnings".to_owned());
     }
 
-    let path = mvp::config::write(options.output.as_deref(), &config, options.force)?;
+    let path = mvp::config::write(options.output.as_deref(), &config, force_write)?;
     #[cfg(feature = "memory-sqlite")]
     let memory_path =
         mvp::memory::ensure_memory_db_ready(Some(config.memory.resolved_sqlite_path()))
@@ -542,7 +544,11 @@ fn resolve_backup_path(original: &Path) -> CliResult<PathBuf> {
         }
         n += 1;
         if n > 100 {
-            return Err("too many backup files exist".to_owned());
+            return Err(format!(
+                "too many backup files exist for config path '{}' (last attempted backup path: '{}')",
+                original.display(),
+                numbered_path.display()
+            ));
         }
     }
 }
