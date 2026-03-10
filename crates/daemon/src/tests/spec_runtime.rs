@@ -1790,6 +1790,20 @@ async fn execute_spec_wasm_component_bridge_executes_when_runtime_enabled() {
         report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]["cache_miss"],
         true
     );
+    assert_eq!(
+        report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]["cache_inserted"],
+        true
+    );
+    let first_cache_total = report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]
+        ["cache_total_module_bytes"]
+        .as_u64()
+        .expect("cache total bytes should be numeric");
+    let first_cache_max = report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]
+        ["cache_max_bytes"]
+        .as_u64()
+        .expect("cache max bytes should be numeric");
+    assert!(first_cache_total > 0);
+    assert!(first_cache_total <= first_cache_max);
 
     let provider = report
         .integration_catalog
@@ -1805,6 +1819,11 @@ async fn execute_spec_wasm_component_bridge_executes_when_runtime_enabled() {
     );
     assert_eq!(
         cached_report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]["cache_miss"],
+        false
+    );
+    assert_eq!(
+        cached_report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]
+            ["cache_inserted"],
         false
     );
 }

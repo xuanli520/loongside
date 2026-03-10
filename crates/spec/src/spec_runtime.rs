@@ -43,8 +43,12 @@ use crate::WEBHOOK_TEST_RETRY_STATE;
 
 const DEFAULT_WASM_MODULE_CACHE_CAPACITY: usize = 32;
 const MAX_WASM_MODULE_CACHE_CAPACITY: usize = 4096;
+const DEFAULT_WASM_MODULE_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
+const MIN_WASM_MODULE_CACHE_MAX_BYTES: usize = 64 * 1024;
+const MAX_WASM_MODULE_CACHE_MAX_BYTES: usize = 512 * 1024 * 1024;
 static WASM_MODULE_CACHE: OnceLock<Mutex<WasmModuleCache>> = OnceLock::new();
 static WASM_MODULE_CACHE_CAPACITY: OnceLock<usize> = OnceLock::new();
+static WASM_MODULE_CACHE_MAX_BYTES: OnceLock<usize> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct WasmModuleCacheKey {
@@ -72,20 +76,40 @@ struct CachedWasmModule {
 #[derive(Debug, Clone, Copy)]
 struct WasmModuleCacheLookup {
     hit: bool,
+    inserted: bool,
     evicted_entries: usize,
     cache_len: usize,
     cache_capacity: usize,
+    cache_total_module_bytes: usize,
+    cache_max_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WasmModuleCacheInsertOutcome {
+    inserted: bool,
+    evicted_entries: usize,
+}
+
+#[derive(Debug, Clone)]
+struct WasmModuleCacheEntry {
+    module: Arc<CachedWasmModule>,
+    module_size_bytes: usize,
 }
 
 #[derive(Debug, Default)]
 struct WasmModuleCache {
     order: VecDeque<WasmModuleCacheKey>,
-    entries: HashMap<WasmModuleCacheKey, Arc<CachedWasmModule>>,
+    entries: HashMap<WasmModuleCacheKey, WasmModuleCacheEntry>,
+    total_module_bytes: usize,
 }
 
 impl WasmModuleCache {
     fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    fn total_module_bytes(&self) -> usize {
+        self.total_module_bytes
     }
 
     fn touch(&mut self, key: &WasmModuleCacheKey) {
@@ -95,8 +119,37 @@ impl WasmModuleCache {
         self.order.push_back(key.clone());
     }
 
+    fn remove_by_key(&mut self, key: &WasmModuleCacheKey) -> bool {
+        self.order.retain(|candidate| candidate != key);
+        let Some(removed) = self.entries.remove(key) else {
+            return false;
+        };
+        self.total_module_bytes = self
+            .total_module_bytes
+            .saturating_sub(removed.module_size_bytes);
+        true
+    }
+
+    fn evict_oldest(&mut self) -> bool {
+        while let Some(oldest) = self.order.pop_front() {
+            if let Some(removed) = self.entries.remove(&oldest) {
+                self.total_module_bytes = self
+                    .total_module_bytes
+                    .saturating_sub(removed.module_size_bytes);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn clear(&mut self) {
+        self.order.clear();
+        self.entries.clear();
+        self.total_module_bytes = 0;
+    }
+
     fn get(&mut self, key: &WasmModuleCacheKey) -> Option<Arc<CachedWasmModule>> {
-        let entry = self.entries.get(key).cloned()?;
+        let entry = self.entries.get(key)?.module.clone();
         self.touch(key);
         Some(entry)
     }
@@ -105,32 +158,57 @@ impl WasmModuleCache {
         &mut self,
         key: WasmModuleCacheKey,
         value: Arc<CachedWasmModule>,
+        module_size_bytes: usize,
         max_entries: usize,
-    ) -> usize {
-        if max_entries == 0 {
-            self.entries.clear();
-            self.order.clear();
-            return 0;
-        }
-
-        if self.entries.contains_key(&key) {
-            self.entries.insert(key.clone(), value);
-            self.touch(&key);
-            return 0;
-        }
-
-        let mut evicted_entries = 0usize;
-        while self.entries.len() >= max_entries {
-            let Some(oldest) = self.order.pop_front() else {
-                break;
+        max_total_bytes: usize,
+    ) -> WasmModuleCacheInsertOutcome {
+        if max_entries == 0 || max_total_bytes == 0 {
+            self.clear();
+            return WasmModuleCacheInsertOutcome {
+                inserted: false,
+                evicted_entries: 0,
             };
-            if self.entries.remove(&oldest).is_some() {
-                evicted_entries = evicted_entries.saturating_add(1);
+        }
+
+        if module_size_bytes > max_total_bytes {
+            return WasmModuleCacheInsertOutcome {
+                inserted: false,
+                evicted_entries: 0,
+            };
+        }
+
+        let _ = self.remove_by_key(&key);
+        let mut evicted_entries = 0usize;
+        while self.entries.len() >= max_entries
+            || self.total_module_bytes.saturating_add(module_size_bytes) > max_total_bytes
+        {
+            if !self.evict_oldest() {
+                break;
             }
+            evicted_entries = evicted_entries.saturating_add(1);
+        }
+
+        if self.entries.len() >= max_entries
+            || self.total_module_bytes.saturating_add(module_size_bytes) > max_total_bytes
+        {
+            return WasmModuleCacheInsertOutcome {
+                inserted: false,
+                evicted_entries,
+            };
         }
         self.order.push_back(key.clone());
-        self.entries.insert(key, value);
-        evicted_entries
+        self.total_module_bytes = self.total_module_bytes.saturating_add(module_size_bytes);
+        self.entries.insert(
+            key,
+            WasmModuleCacheEntry {
+                module: value,
+                module_size_bytes,
+            },
+        );
+        WasmModuleCacheInsertOutcome {
+            inserted: true,
+            evicted_entries,
+        }
     }
 }
 
@@ -1999,6 +2077,28 @@ fn wasm_module_cache_capacity() -> usize {
     })
 }
 
+fn parse_wasm_module_cache_max_bytes(raw: Option<&str>) -> usize {
+    raw.and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .map(|value| {
+            value.clamp(
+                MIN_WASM_MODULE_CACHE_MAX_BYTES,
+                MAX_WASM_MODULE_CACHE_MAX_BYTES,
+            )
+        })
+        .unwrap_or(DEFAULT_WASM_MODULE_CACHE_MAX_BYTES)
+}
+
+fn wasm_module_cache_max_bytes() -> usize {
+    *WASM_MODULE_CACHE_MAX_BYTES.get_or_init(|| {
+        parse_wasm_module_cache_max_bytes(
+            std::env::var("LOONGCLAW_WASM_CACHE_MAX_BYTES")
+                .ok()
+                .as_deref(),
+        )
+    })
+}
+
 fn modified_unix_nanos(metadata: &fs::Metadata) -> Option<u128> {
     metadata
         .modified()
@@ -2096,6 +2196,7 @@ fn lookup_cached_wasm_module(
     cache_key: &WasmModuleCacheKey,
 ) -> Result<Option<(Arc<CachedWasmModule>, WasmModuleCacheLookup)>, String> {
     let cache_capacity = wasm_module_cache_capacity();
+    let cache_max_bytes = wasm_module_cache_max_bytes();
     let cache_lock = wasm_module_cache();
     let mut cache = cache_lock
         .lock()
@@ -2107,9 +2208,12 @@ fn lookup_cached_wasm_module(
         cached,
         WasmModuleCacheLookup {
             hit: true,
+            inserted: false,
             evicted_entries: 0,
             cache_len: cache.len(),
             cache_capacity,
+            cache_total_module_bytes: cache.total_module_bytes(),
+            cache_max_bytes,
         },
     )))
 }
@@ -2117,18 +2221,29 @@ fn lookup_cached_wasm_module(
 fn insert_cached_wasm_module(
     cache_key: WasmModuleCacheKey,
     module: Arc<CachedWasmModule>,
+    module_size_bytes: usize,
 ) -> Result<WasmModuleCacheLookup, String> {
     let cache_capacity = wasm_module_cache_capacity();
+    let cache_max_bytes = wasm_module_cache_max_bytes();
     let cache_lock = wasm_module_cache();
     let mut cache = cache_lock
         .lock()
         .map_err(|error| format!("failed to lock wasm module cache: {error}"))?;
-    let evicted_entries = cache.insert(cache_key, module, cache_capacity);
+    let insert_outcome = cache.insert(
+        cache_key,
+        module,
+        module_size_bytes,
+        cache_capacity,
+        cache_max_bytes,
+    );
     Ok(WasmModuleCacheLookup {
         hit: false,
-        evicted_entries,
+        inserted: insert_outcome.inserted,
+        evicted_entries: insert_outcome.evicted_entries,
         cache_len: cache.len(),
         cache_capacity,
+        cache_total_module_bytes: cache.total_module_bytes(),
+        cache_max_bytes,
     })
 }
 
@@ -2231,6 +2346,7 @@ pub fn execute_wasm_component_bridge(
     let export_name = resolve_wasm_export_name(provider);
     let fuel_enabled = runtime_policy.wasm_fuel_limit.is_some();
     let cache_capacity = wasm_module_cache_capacity();
+    let cache_max_bytes = wasm_module_cache_max_bytes();
 
     let initial_cache_key = build_wasm_module_cache_key(
         &artifact_path,
@@ -2260,6 +2376,9 @@ pub fn execute_wasm_component_bridge(
                         "cache_evicted_entries": 0,
                         "cache_entries": 0,
                         "cache_capacity": cache_capacity,
+                        "cache_total_module_bytes": 0,
+                        "cache_max_bytes": cache_max_bytes,
+                        "cache_inserted": false,
                     });
                     return execution;
                 }
@@ -2315,33 +2434,42 @@ pub fn execute_wasm_component_bridge(
                                 "cache_evicted_entries": 0,
                                 "cache_entries": 0,
                                 "cache_capacity": cache_capacity,
+                                "cache_total_module_bytes": 0,
+                                "cache_max_bytes": cache_max_bytes,
+                                "cache_inserted": false,
                             });
                             return execution;
                         }
                     };
-                    let cache_lookup =
-                        match insert_cached_wasm_module(refreshed_cache_key, compiled.clone()) {
-                            Ok(lookup) => lookup,
-                            Err(reason) => {
-                                execution["status"] = Value::String("failed".to_owned());
-                                execution["reason"] = Value::String(reason);
-                                execution["runtime"] = json!({
-                                    "executor": "wasmtime_module",
-                                    "artifact_path": artifact_path.display().to_string(),
-                                    "export": export_name,
-                                    "operation": command.operation,
-                                    "payload": command.payload,
-                                    "module_size_bytes": module_size_bytes,
-                                    "fuel_limit": runtime_policy.wasm_fuel_limit,
-                                    "cache_hit": false,
-                                    "cache_miss": true,
-                                    "cache_evicted_entries": 0,
-                                    "cache_entries": 0,
-                                    "cache_capacity": cache_capacity,
-                                });
-                                return execution;
-                            }
-                        };
+                    let cache_lookup = match insert_cached_wasm_module(
+                        refreshed_cache_key,
+                        compiled.clone(),
+                        module_size_bytes,
+                    ) {
+                        Ok(lookup) => lookup,
+                        Err(reason) => {
+                            execution["status"] = Value::String("failed".to_owned());
+                            execution["reason"] = Value::String(reason);
+                            execution["runtime"] = json!({
+                                "executor": "wasmtime_module",
+                                "artifact_path": artifact_path.display().to_string(),
+                                "export": export_name,
+                                "operation": command.operation,
+                                "payload": command.payload,
+                                "module_size_bytes": module_size_bytes,
+                                "fuel_limit": runtime_policy.wasm_fuel_limit,
+                                "cache_hit": false,
+                                "cache_miss": true,
+                                "cache_evicted_entries": 0,
+                                "cache_entries": 0,
+                                "cache_capacity": cache_capacity,
+                                "cache_total_module_bytes": 0,
+                                "cache_max_bytes": cache_max_bytes,
+                                "cache_inserted": false,
+                            });
+                            return execution;
+                        }
+                    };
                     (compiled, cache_lookup)
                 }
                 Err(reason) => {
@@ -2360,6 +2488,9 @@ pub fn execute_wasm_component_bridge(
                         "cache_evicted_entries": 0,
                         "cache_entries": 0,
                         "cache_capacity": cache_capacity,
+                        "cache_total_module_bytes": 0,
+                        "cache_max_bytes": cache_max_bytes,
+                        "cache_inserted": false,
                     });
                     return execution;
                 }
@@ -2381,6 +2512,9 @@ pub fn execute_wasm_component_bridge(
                 "cache_evicted_entries": 0,
                 "cache_entries": 0,
                 "cache_capacity": cache_capacity,
+                "cache_total_module_bytes": 0,
+                "cache_max_bytes": cache_max_bytes,
+                "cache_inserted": false,
             });
             return execution;
         }
@@ -2433,6 +2567,9 @@ pub fn execute_wasm_component_bridge(
                 "cache_evicted_entries": cache_lookup.evicted_entries,
                 "cache_entries": cache_lookup.cache_len,
                 "cache_capacity": cache_lookup.cache_capacity,
+                "cache_total_module_bytes": cache_lookup.cache_total_module_bytes,
+                "cache_max_bytes": cache_lookup.cache_max_bytes,
+                "cache_inserted": cache_lookup.inserted,
             });
             execution
         }
@@ -2452,6 +2589,9 @@ pub fn execute_wasm_component_bridge(
                 "cache_evicted_entries": cache_lookup.evicted_entries,
                 "cache_entries": cache_lookup.cache_len,
                 "cache_capacity": cache_lookup.cache_capacity,
+                "cache_total_module_bytes": cache_lookup.cache_total_module_bytes,
+                "cache_max_bytes": cache_lookup.cache_max_bytes,
+                "cache_inserted": cache_lookup.inserted,
             });
             execution
         }
@@ -2913,13 +3053,20 @@ impl MemoryExtensionAdapter for VectorIndexMemoryExtension {
 mod tests {
     use std::{
         fs,
+        path::Path,
+        sync::Arc,
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::{
-        parse_wasm_module_cache_capacity, wasm_artifact_file_identity,
-        DEFAULT_WASM_MODULE_CACHE_CAPACITY, MAX_WASM_MODULE_CACHE_CAPACITY,
+        build_wasm_module_cache_key, compile_wasm_module, parse_wasm_module_cache_capacity,
+        parse_wasm_module_cache_max_bytes, wasm_artifact_file_identity, WasmModuleCache,
+        DEFAULT_WASM_MODULE_CACHE_CAPACITY, DEFAULT_WASM_MODULE_CACHE_MAX_BYTES,
+        MAX_WASM_MODULE_CACHE_CAPACITY, MAX_WASM_MODULE_CACHE_MAX_BYTES,
+        MIN_WASM_MODULE_CACHE_MAX_BYTES,
     };
+
+    const EMPTY_WASM_MODULE: [u8; 8] = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
 
     #[test]
     fn parse_wasm_module_cache_capacity_defaults_for_missing_or_invalid_values() {
@@ -2951,6 +3098,93 @@ mod tests {
             parse_wasm_module_cache_capacity(Some(over_limit.as_str())),
             MAX_WASM_MODULE_CACHE_CAPACITY
         );
+    }
+
+    #[test]
+    fn parse_wasm_module_cache_max_bytes_defaults_for_missing_or_invalid_values() {
+        assert_eq!(
+            parse_wasm_module_cache_max_bytes(None),
+            DEFAULT_WASM_MODULE_CACHE_MAX_BYTES
+        );
+        assert_eq!(
+            parse_wasm_module_cache_max_bytes(Some("")),
+            DEFAULT_WASM_MODULE_CACHE_MAX_BYTES
+        );
+        assert_eq!(
+            parse_wasm_module_cache_max_bytes(Some("invalid")),
+            DEFAULT_WASM_MODULE_CACHE_MAX_BYTES
+        );
+        assert_eq!(
+            parse_wasm_module_cache_max_bytes(Some("0")),
+            DEFAULT_WASM_MODULE_CACHE_MAX_BYTES
+        );
+    }
+
+    #[test]
+    fn parse_wasm_module_cache_max_bytes_respects_bounds() {
+        assert_eq!(
+            parse_wasm_module_cache_max_bytes(Some("1")),
+            MIN_WASM_MODULE_CACHE_MAX_BYTES
+        );
+        assert_eq!(
+            parse_wasm_module_cache_max_bytes(Some("1048576")),
+            1_048_576
+        );
+
+        let over_limit = format!("{}", MAX_WASM_MODULE_CACHE_MAX_BYTES + 1);
+        assert_eq!(
+            parse_wasm_module_cache_max_bytes(Some(over_limit.as_str())),
+            MAX_WASM_MODULE_CACHE_MAX_BYTES
+        );
+    }
+
+    #[test]
+    fn wasm_module_cache_evicts_lru_entries_when_byte_budget_exceeded() {
+        let compiled = Arc::new(
+            compile_wasm_module(&EMPTY_WASM_MODULE, false)
+                .expect("empty wasm module should compile"),
+        );
+        let mut cache = WasmModuleCache::default();
+        let key_a = build_wasm_module_cache_key(Path::new("/tmp/a.wasm"), 6, Some(1), None, false);
+        let key_b = build_wasm_module_cache_key(Path::new("/tmp/b.wasm"), 6, Some(2), None, false);
+
+        let first = cache.insert(key_a.clone(), compiled.clone(), 6, 8, 10);
+        assert!(first.inserted);
+        assert_eq!(first.evicted_entries, 0);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.total_module_bytes(), 6);
+
+        let second = cache.insert(key_b.clone(), compiled.clone(), 6, 8, 10);
+        assert!(second.inserted);
+        assert_eq!(second.evicted_entries, 1);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.total_module_bytes(), 6);
+        assert!(cache.get(&key_a).is_none());
+        assert!(cache.get(&key_b).is_some());
+    }
+
+    #[test]
+    fn wasm_module_cache_skips_single_module_larger_than_byte_budget() {
+        let compiled = Arc::new(
+            compile_wasm_module(&EMPTY_WASM_MODULE, false)
+                .expect("empty wasm module should compile"),
+        );
+        let mut cache = WasmModuleCache::default();
+        let baseline =
+            build_wasm_module_cache_key(Path::new("/tmp/base.wasm"), 4, Some(1), None, false);
+        let oversized =
+            build_wasm_module_cache_key(Path::new("/tmp/oversized.wasm"), 11, Some(2), None, false);
+
+        let baseline_insert = cache.insert(baseline.clone(), compiled.clone(), 4, 8, 10);
+        assert!(baseline_insert.inserted);
+
+        let oversized_insert = cache.insert(oversized.clone(), compiled, 11, 8, 10);
+        assert!(!oversized_insert.inserted);
+        assert_eq!(oversized_insert.evicted_entries, 0);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.total_module_bytes(), 4);
+        assert!(cache.get(&baseline).is_some());
+        assert!(cache.get(&oversized).is_none());
     }
 
     #[cfg(unix)]
