@@ -3,6 +3,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use chrono::Local;
 use loongclaw_app as mvp;
 use loongclaw_spec::CliResult;
 
@@ -504,7 +505,7 @@ fn resolve_force_write(output_path: &Path, options: &OnboardCommandOptions) -> C
     println!("Config file already exists: {}", existing_path);
     println!("Options:");
     println!("  [o] Overwrite (replace existing)");
-    println!("  [b] Backup (rename existing to .bak)");
+    println!("  [b] Backup (rename existing to .bak-YYYYMMDD-HHMMSS)");
     println!("  [c] Cancel");
     loop {
         let choice = prompt_with_default("Your choice", "c")?;
@@ -533,29 +534,11 @@ fn resolve_force_write(output_path: &Path, options: &OnboardCommandOptions) -> C
 
 fn resolve_backup_path(original: &Path) -> CliResult<PathBuf> {
     let parent = original.parent().unwrap_or(Path::new("."));
-    let file_name = original
-        .file_name()
+    let file_stem = original
+        .file_stem()
         .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| "config.toml".to_owned());
+        .unwrap_or_else(|| "config".to_owned());
 
-    let bak_path = parent.join(format!("{}.bak", file_name));
-    if !bak_path.exists() {
-        return Ok(bak_path);
-    }
-
-    let mut n = 1;
-    loop {
-        let numbered_path = parent.join(format!("{}.bak{}", file_name, n));
-        if !numbered_path.exists() {
-            return Ok(numbered_path);
-        }
-        n += 1;
-        if n > 100 {
-            return Err(format!(
-                "too many backup files exist for config path '{}' (last attempted backup path: '{}')",
-                original.display(),
-                numbered_path.display()
-            ));
-        }
-    }
+    let timestamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
+    Ok(parent.join(format!("{}.bak-{}", file_stem, timestamp)))
 }
