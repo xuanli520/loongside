@@ -2181,36 +2181,59 @@ fn resolve_expected_wasm_sha256(
         .cloned()
         .unwrap_or_else(|| provider.provider_id.clone());
 
+    let mut metadata_pins = Vec::new();
     for key in [
         "component_sha256",
         "component_sha256_pin",
         "component_sha256_hex",
     ] {
         if let Some(raw_pin) = provider.metadata.get(key) {
-            return normalize_sha256_pin(raw_pin)
-                .map(Some)
-                .map_err(|reason| format!("provider metadata `{key}` invalid: {reason}"));
+            let pin = normalize_sha256_pin(raw_pin)
+                .map_err(|reason| format!("provider metadata `{key}` invalid: {reason}"))?;
+            metadata_pins.push((format!("metadata.{key}"), pin));
         }
     }
+    let metadata_pin = if let Some((first_source, first_pin)) = metadata_pins.first() {
+        if let Some((source, _)) = metadata_pins.iter().find(|(_, pin)| pin != first_pin) {
+            return Err(format!(
+                "conflicting wasm sha256 pins for plugin `{plugin_id}`: {first_source} and {source} differ"
+            ));
+        }
+        Some(first_pin.clone())
+    } else {
+        None
+    };
 
-    if let Some(raw_pin) = runtime_policy
+    let policy_pin = if let Some(raw_pin) = runtime_policy
         .wasm_required_sha256_by_plugin
         .get(&plugin_id)
     {
-        return normalize_sha256_pin(raw_pin).map(Some).map_err(|reason| {
+        Some(normalize_sha256_pin(raw_pin).map_err(|reason| {
             format!(
                 "security_scan.wasm.required_sha256_by_plugin pin invalid for plugin `{plugin_id}`: {reason}"
             )
-        });
+        })?)
+    } else {
+        None
+    };
+
+    if let (Some(metadata_pin), Some(policy_pin)) = (metadata_pin.as_ref(), policy_pin.as_ref()) {
+        if metadata_pin != policy_pin {
+            return Err(format!(
+                "conflicting wasm sha256 pins for plugin `{plugin_id}` between provider metadata and security_scan.wasm.required_sha256_by_plugin"
+            ));
+        }
     }
 
-    if runtime_policy.wasm_require_hash_pin {
+    let resolved_pin = policy_pin.or(metadata_pin);
+
+    if runtime_policy.wasm_require_hash_pin && resolved_pin.is_none() {
         return Err(format!(
             "wasm sha256 pin is required for plugin `{plugin_id}` but no pin was provided"
         ));
     }
 
-    Ok(None)
+    Ok(resolved_pin)
 }
 
 fn wasm_artifact_sha256_hex(bytes: &[u8]) -> String {
@@ -3193,6 +3216,7 @@ impl MemoryExtensionAdapter for VectorIndexMemoryExtension {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeMap,
         fs,
         path::Path,
         sync::Arc,
@@ -3202,9 +3226,10 @@ mod tests {
     use super::{
         build_wasm_module_cache_key, compile_wasm_module, normalize_sha256_pin,
         parse_wasm_module_cache_capacity, parse_wasm_module_cache_max_bytes,
-        wasm_artifact_file_identity, WasmModuleCache, DEFAULT_WASM_MODULE_CACHE_CAPACITY,
-        DEFAULT_WASM_MODULE_CACHE_MAX_BYTES, MAX_WASM_MODULE_CACHE_CAPACITY,
-        MAX_WASM_MODULE_CACHE_MAX_BYTES, MIN_WASM_MODULE_CACHE_MAX_BYTES,
+        resolve_expected_wasm_sha256, wasm_artifact_file_identity, BridgeRuntimePolicy,
+        WasmModuleCache, DEFAULT_WASM_MODULE_CACHE_CAPACITY, DEFAULT_WASM_MODULE_CACHE_MAX_BYTES,
+        MAX_WASM_MODULE_CACHE_CAPACITY, MAX_WASM_MODULE_CACHE_MAX_BYTES,
+        MIN_WASM_MODULE_CACHE_MAX_BYTES,
     };
 
     const EMPTY_WASM_MODULE: [u8; 8] = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
@@ -3304,6 +3329,44 @@ mod tests {
         assert!(normalize_sha256_pin("sha256:").is_err());
         assert!(normalize_sha256_pin("deadbeef").is_err());
         assert!(normalize_sha256_pin(&"z".repeat(64)).is_err());
+    }
+
+    fn provider_with_metadata(metadata: BTreeMap<String, String>) -> kernel::ProviderConfig {
+        kernel::ProviderConfig {
+            provider_id: "provider-x".to_owned(),
+            connector_name: "connector-x".to_owned(),
+            version: "1.0.0".to_owned(),
+            metadata,
+        }
+    }
+
+    #[test]
+    fn resolve_expected_wasm_sha256_rejects_conflicting_metadata_pins() {
+        let provider = provider_with_metadata(BTreeMap::from([
+            ("plugin_id".to_owned(), "plugin-a".to_owned()),
+            ("component_sha256".to_owned(), "aa".repeat(32)),
+            ("component_sha256_pin".to_owned(), "bb".repeat(32)),
+        ]));
+        let policy = BridgeRuntimePolicy::default();
+        let error = resolve_expected_wasm_sha256(&provider, &policy)
+            .expect_err("conflicting metadata pins should be rejected");
+        assert!(error.contains("conflicting wasm sha256 pins"));
+    }
+
+    #[test]
+    fn resolve_expected_wasm_sha256_rejects_metadata_and_policy_conflict() {
+        let provider = provider_with_metadata(BTreeMap::from([
+            ("plugin_id".to_owned(), "plugin-a".to_owned()),
+            ("component_sha256".to_owned(), "aa".repeat(32)),
+        ]));
+        let mut policy = BridgeRuntimePolicy::default();
+        policy
+            .wasm_required_sha256_by_plugin
+            .insert("plugin-a".to_owned(), "bb".repeat(32));
+
+        let error = resolve_expected_wasm_sha256(&provider, &policy)
+            .expect_err("metadata/policy conflict should be rejected");
+        assert!(error.contains("between provider metadata"));
     }
 
     #[test]

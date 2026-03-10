@@ -1283,33 +1283,62 @@ fn scan_wasm_plugin_security(
     let digest_hex = hex_lower(&digest);
 
     let expected_sha256 = {
-        let metadata_pin = [
+        let mut metadata_pins = Vec::new();
+        for key in [
             "component_sha256",
             "component_sha256_pin",
             "component_sha256_hex",
-        ]
-        .iter()
-        .find_map(|key| {
-            descriptor
-                .manifest
-                .metadata
-                .get(*key)
-                .map(|value| (format!("metadata.{key}"), value.clone()))
-        });
-        let configured_pin = metadata_pin.or_else(|| {
-            policy
-                .required_sha256_by_plugin
-                .get(&descriptor.manifest.plugin_id)
-                .map(|value| {
-                    (
-                        "security_scan.wasm.required_sha256_by_plugin".to_owned(),
-                        value.clone(),
-                    )
-                })
-        });
+        ] {
+            let Some(raw_pin) = descriptor.manifest.metadata.get(key) else {
+                continue;
+            };
+            match normalize_wasm_sha256_pin(raw_pin) {
+                Ok(pin) => metadata_pins.push((format!("metadata.{key}"), pin)),
+                Err(reason) => findings.push(build_security_finding(
+                    SecurityFindingSeverity::High,
+                    "wasm_sha256_pin_invalid",
+                    descriptor.manifest.plugin_id.clone(),
+                    descriptor.path.clone(),
+                    "wasm sha256 pin format is invalid",
+                    json!({
+                        "source": format!("metadata.{key}"),
+                        "pin": raw_pin,
+                        "reason": reason,
+                    }),
+                )),
+            }
+        }
 
-        match configured_pin {
-            Some((source, raw_pin)) => match normalize_wasm_sha256_pin(&raw_pin) {
+        let metadata_pin = if let Some((source, pin)) = metadata_pins.first() {
+            if let Some((conflict_source, conflict_pin)) =
+                metadata_pins.iter().find(|(_, candidate)| candidate != pin)
+            {
+                findings.push(build_security_finding(
+                    SecurityFindingSeverity::High,
+                    "wasm_sha256_pin_conflict",
+                    descriptor.manifest.plugin_id.clone(),
+                    descriptor.path.clone(),
+                    "multiple metadata wasm sha256 pins conflict with each other",
+                    json!({
+                        "first_source": source,
+                        "first_sha256": pin,
+                        "conflict_source": conflict_source,
+                        "conflict_sha256": conflict_pin,
+                    }),
+                ));
+                None
+            } else {
+                Some(pin.clone())
+            }
+        } else {
+            None
+        };
+
+        let policy_pin = if let Some(raw_pin) = policy
+            .required_sha256_by_plugin
+            .get(&descriptor.manifest.plugin_id)
+        {
+            match normalize_wasm_sha256_pin(raw_pin) {
                 Ok(pin) => Some(pin),
                 Err(reason) => {
                     findings.push(build_security_finding(
@@ -1319,15 +1348,40 @@ fn scan_wasm_plugin_security(
                         descriptor.path.clone(),
                         "wasm sha256 pin format is invalid",
                         json!({
-                            "source": source,
+                            "source": "security_scan.wasm.required_sha256_by_plugin",
                             "pin": raw_pin,
                             "reason": reason,
                         }),
                     ));
                     None
                 }
-            },
-            None => {
+            }
+        } else {
+            None
+        };
+
+        match (metadata_pin, policy_pin) {
+            (Some(metadata_pin), Some(policy_pin)) => {
+                if metadata_pin != policy_pin {
+                    findings.push(build_security_finding(
+                        SecurityFindingSeverity::High,
+                        "wasm_sha256_pin_conflict",
+                        descriptor.manifest.plugin_id.clone(),
+                        descriptor.path.clone(),
+                        "metadata wasm sha256 pin conflicts with required_sha256_by_plugin pin",
+                        json!({
+                            "metadata_sha256": metadata_pin,
+                            "policy_sha256": policy_pin,
+                        }),
+                    ));
+                    None
+                } else {
+                    Some(policy_pin)
+                }
+            }
+            (Some(metadata_pin), None) => Some(metadata_pin),
+            (None, Some(policy_pin)) => Some(policy_pin),
+            (None, None) => {
                 if policy.require_hash_pin {
                     findings.push(build_security_finding(
                         SecurityFindingSeverity::High,
