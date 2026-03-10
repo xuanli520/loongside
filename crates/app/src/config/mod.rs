@@ -10,7 +10,9 @@ pub use channels::{CliChannelConfig, FeishuChannelConfig, TelegramChannelConfig}
 pub use provider::{ProviderConfig, ProviderKind, ReasoningEffort};
 #[allow(unused_imports)]
 pub use runtime::{
-    default_loongclaw_home, load, write_template, ConversationConfig, ConversationTurnLoopConfig,
+    default_loongclaw_home, load, normalize_validation_locale, supported_validation_locales,
+    validate_file, validate_file_with_locale, write_template, ConfigValidationDiagnostic,
+    ConversationConfig, ConversationTurnLoopConfig,
     LoongClawConfig,
 };
 #[allow(unused_imports)]
@@ -124,6 +126,29 @@ mod tests {
     }
 
     #[test]
+    fn provider_kind_default_api_key_env_mapping_is_stable() {
+        let cases = vec![
+            (ProviderKind::Kimi, Some("MOONSHOT_API_KEY")),
+            (ProviderKind::Minimax, Some("MINIMAX_API_KEY")),
+            (ProviderKind::Openai, Some("OPENAI_API_KEY")),
+        ];
+        for (kind, expected) in cases {
+            let config = ProviderConfig {
+                kind,
+                ..ProviderConfig::default()
+            };
+            assert_eq!(config.default_api_key_env().as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn provider_kind_api_key_aliases_include_kimi_alias() {
+        assert!(ProviderKind::Kimi
+            .api_key_env_aliases()
+            .contains(&"KIMI_API_KEY"));
+    }
+
+    #[test]
     fn switching_provider_kind_uses_profile_defaults() {
         let config = ProviderConfig {
             kind: ProviderKind::Openrouter,
@@ -233,6 +258,229 @@ model = "model-example"
             ..TelegramChannelConfig::default()
         };
         assert_eq!(config.bot_token().as_deref(), Some("inline-token"));
+    }
+
+    #[test]
+    fn config_validation_rejects_secret_literal_in_provider_api_key_env() {
+        let mut config = LoongClawConfig::default();
+        config.provider.api_key_env = Some("sk-live-direct-secret-value".to_owned());
+        config.provider.api_key = None;
+
+        let error = config
+            .validate()
+            .expect_err("secret literal in provider.api_key_env should be rejected");
+        assert!(error.contains("config.env_pointer.secret_literal"));
+        assert!(error.contains("provider.api_key_env"));
+        assert!(error.contains("provider.api_key"));
+    }
+
+    #[test]
+    fn config_validation_message_does_not_echo_secret_literal() {
+        let secret = "sk-live-direct-secret-value";
+        let mut config = LoongClawConfig::default();
+        config.provider.api_key_env = Some(secret.to_owned());
+        config.provider.api_key = None;
+
+        let error = config
+            .validate()
+            .expect_err("secret literal in provider.api_key_env should be rejected");
+        assert!(
+            !error.contains(secret),
+            "validation error should not leak secret"
+        );
+    }
+
+    #[test]
+    fn config_validation_uses_provider_specific_example_env_name() {
+        let mut config = LoongClawConfig::default();
+        config.provider.kind = ProviderKind::Minimax;
+        config.provider.api_key_env = Some("sk-minimax-inline-secret".to_owned());
+
+        let error = config
+            .validate()
+            .expect_err("secret literal in minimax env pointer should be rejected");
+        assert!(error.contains("MINIMAX_API_KEY"));
+    }
+
+    #[test]
+    fn config_validation_rejects_secret_literal_in_telegram_bot_token_env() {
+        let mut config = LoongClawConfig::default();
+        config.telegram.bot_token_env = Some("123456789:telegram-secret-token-literal".to_owned());
+        config.telegram.bot_token = None;
+
+        let error = config
+            .validate()
+            .expect_err("secret literal in telegram.bot_token_env should be rejected");
+        assert!(error.contains("config.env_pointer.secret_literal"));
+        assert!(error.contains("telegram.bot_token_env"));
+        assert!(error.contains("telegram.bot_token"));
+    }
+
+    #[test]
+    fn config_validation_accepts_shell_style_env_names() {
+        let mut config = LoongClawConfig::default();
+        config.provider.api_key_env = Some("KIMI_API_KEY".to_owned());
+        config.telegram.bot_token_env = Some("TELEGRAM_BOT_TOKEN".to_owned());
+
+        config
+            .validate()
+            .expect("valid shell-style env names should pass");
+    }
+
+    #[test]
+    fn config_validation_accepts_non_shell_env_names_for_compatibility() {
+        let mut config = LoongClawConfig::default();
+        config.provider.api_key_env = Some("OPENAI-API-KEY".to_owned());
+
+        config
+            .validate()
+            .expect("non-shell env names stay compatible as env pointers");
+    }
+
+    #[test]
+    fn config_validation_accepts_long_compatible_env_names() {
+        let mut config = LoongClawConfig::default();
+        config.provider.api_key_env = Some("VERY-LONG-ENV-NAME-WITH-DASHES-AND-DOTS.v2".to_owned());
+
+        config
+            .validate()
+            .expect("long compatible env names should not be mistaken for secret literals");
+    }
+
+    #[test]
+    fn config_validation_rejects_assignment_style_env_pointer() {
+        let mut config = LoongClawConfig::default();
+        config.provider.api_key_env = Some("OPENAI_API_KEY=sk-1234567890".to_owned());
+
+        let error = config
+            .validate()
+            .expect_err("assignment-style value should be rejected");
+        assert!(error.contains("provider.api_key_env"));
+        assert!(error.contains("KEY=VALUE"));
+    }
+
+    #[test]
+    fn config_validation_rejects_export_assignment_style_env_pointer() {
+        let mut config = LoongClawConfig::default();
+        config.provider.api_key_env = Some("export OPENAI_API_KEY=sk-1234567890".to_owned());
+
+        let error = config
+            .validate()
+            .expect_err("export assignment-style value should be rejected");
+        assert!(error.contains("provider.api_key_env"));
+        assert!(error.contains("OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn config_validation_rejects_set_assignment_style_env_pointer() {
+        let mut config = LoongClawConfig::default();
+        config.provider.api_key_env = Some("set OPENAI_API_KEY=sk-1234567890".to_owned());
+
+        let error = config
+            .validate()
+            .expect_err("set assignment-style value should be rejected");
+        assert!(error.contains("provider.api_key_env"));
+        assert!(error.contains("OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn config_validation_rejects_dollar_prefixed_env_pointer() {
+        let mut config = LoongClawConfig::default();
+        config.provider.api_key_env = Some("$OPENAI_API_KEY".to_owned());
+
+        let error = config
+            .validate()
+            .expect_err("dollar-prefixed env pointer should be rejected");
+        assert!(error.contains("provider.api_key_env"));
+        assert!(error.contains("without `$`"));
+    }
+
+    #[test]
+    fn config_validation_rejects_braced_dollar_prefixed_env_pointer() {
+        let mut config = LoongClawConfig::default();
+        config.provider.api_key_env = Some("${OPENAI_API_KEY}".to_owned());
+
+        let error = config
+            .validate()
+            .expect_err("braced dollar-prefixed env pointer should be rejected");
+        assert!(error.contains("provider.api_key_env"));
+        assert!(error.contains("without `$`"));
+        assert!(error.contains("OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn config_validation_rejects_percent_wrapped_env_pointer() {
+        let mut config = LoongClawConfig::default();
+        config.provider.api_key_env = Some("%OPENAI_API_KEY%".to_owned());
+
+        let error = config
+            .validate()
+            .expect_err("percent-wrapped env pointer should be rejected");
+        assert!(error.contains("provider.api_key_env"));
+        assert!(error.contains("%VAR%"));
+        assert!(error.contains("OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn config_validation_rejects_bare_dollar_env_pointer() {
+        let mut config = LoongClawConfig::default();
+        config.provider.api_key_env = Some("$".to_owned());
+
+        let error = config
+            .validate()
+            .expect_err("bare dollar env pointer should be rejected");
+        assert!(error.contains("provider.api_key_env"));
+        assert!(error.contains("without `$`"));
+        assert!(error.contains("OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn config_validation_rejects_invalid_env_pointer_name() {
+        let mut config = LoongClawConfig::default();
+        config.provider.api_key_env = Some("OPENAI API KEY".to_owned());
+
+        let error = config
+            .validate()
+            .expect_err("whitespace in env pointer should be rejected");
+        assert!(error.contains("config.env_pointer.invalid_name"));
+        assert!(error.contains("provider.api_key_env"));
+    }
+
+    #[test]
+    fn config_validation_rejects_bearer_prefixed_secret_in_env_pointer() {
+        let mut config = LoongClawConfig::default();
+        config.provider.api_key_env = Some("Bearer sk-live-token-value".to_owned());
+
+        let error = config
+            .validate()
+            .expect_err("bearer-prefixed secret should be rejected");
+        assert!(error.contains("provider.api_key_env"));
+        assert!(error.contains("secret literal"));
+    }
+
+    #[test]
+    fn config_validation_rejects_telegram_like_token_in_env_pointer() {
+        let mut config = LoongClawConfig::default();
+        config.telegram.bot_token_env = Some("123456789:AAEZZ_exampleTokenValue".to_owned());
+
+        let error = config
+            .validate()
+            .expect_err("telegram-like token should be rejected");
+        assert!(error.contains("telegram.bot_token_env"));
+        assert!(error.contains("secret literal"));
+    }
+
+    #[test]
+    fn config_validation_reports_multiple_env_pointer_issues_in_one_pass() {
+        let mut config = LoongClawConfig::default();
+        config.provider.api_key_env = Some("OPENAI_API_KEY=sk-inline".to_owned());
+        config.telegram.bot_token_env = Some("123456789:telegram-inline-secret-literal".to_owned());
+
+        let error = config
+            .validate()
+            .expect_err("multiple config issues should be aggregated");
+        assert!(error.contains("provider.api_key_env"));
+        assert!(error.contains("telegram.bot_token_env"));
     }
 
     #[test]

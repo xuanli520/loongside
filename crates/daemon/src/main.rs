@@ -5,7 +5,7 @@ use std::{collections::BTreeSet, fs, path::Path, sync::Arc};
 
 #[cfg(test)]
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 #[cfg(test)]
 use kernel::{AuditEventKind, ExecutionRoute, HarnessKind, PluginBridgeKind, VerticalPackManifest};
 use kernel::{Capability, ConnectorCommand, FixedClock, InMemoryAuditSink, TaskIntent};
@@ -142,6 +142,19 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         force: bool,
     },
+    /// Validate config semantics and report structured diagnostics
+    ValidateConfig {
+        #[arg(long)]
+        config: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        #[arg(long, value_enum)]
+        output: Option<ValidateConfigOutput>,
+        #[arg(long, default_value = "en")]
+        locale: String,
+        #[arg(long, default_value_t = false)]
+        fail_on_diagnostics: bool,
+    },
     /// Fetch and print currently available provider model list
     ListModels {
         #[arg(long)]
@@ -183,6 +196,13 @@ enum Commands {
         #[arg(long)]
         path: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ValidateConfigOutput {
+    Text,
+    Json,
+    ProblemJson,
 }
 
 #[tokio::main]
@@ -244,6 +264,19 @@ async fn main() {
             min_speedup_ratio,
         ),
         Commands::Setup { output, force } => run_setup_cli(output.as_deref(), force),
+        Commands::ValidateConfig {
+            config,
+            json,
+            output,
+            locale,
+            fail_on_diagnostics,
+        } => run_validate_config_cli(
+            config.as_deref(),
+            json,
+            output,
+            &locale,
+            fail_on_diagnostics,
+        ),
         Commands::ListModels { config, json } => run_list_models_cli(config.as_deref(), json).await,
         Commands::Chat { config, session } => {
             run_chat_cli(config.as_deref(), session.as_deref()).await
@@ -463,6 +496,103 @@ fn run_setup_cli(output: Option<&str>, force: bool) -> CliResult<()> {
     }
     println!("next step: loongclawd chat --config {}", path.display());
     Ok(())
+}
+
+fn run_validate_config_cli(
+    config_path: Option<&str>,
+    as_json: bool,
+    output: Option<ValidateConfigOutput>,
+    locale: &str,
+    fail_on_diagnostics: bool,
+) -> CliResult<()> {
+    let output = resolve_validate_output(as_json, output)?;
+    let normalized_locale = mvp::config::normalize_validation_locale(locale);
+    let supported_locales = mvp::config::supported_validation_locales();
+    let (resolved_path, diagnostics) =
+        mvp::config::validate_file_with_locale(config_path, &normalized_locale)?;
+    let diagnostics_count = diagnostics.len();
+
+    match output {
+        ValidateConfigOutput::Text => {
+            if diagnostics.is_empty() {
+                println!("config={} valid=true", resolved_path.display());
+            } else {
+                println!(
+                    "config={} valid=false diagnostics={}",
+                    resolved_path.display(),
+                    diagnostics_count
+                );
+                for diagnostic in &diagnostics {
+                    println!("{}", diagnostic.message);
+                }
+            }
+        }
+        ValidateConfigOutput::Json => {
+            let payload = json!({
+                "diagnostics_schema_version": 1,
+                "config": resolved_path.display().to_string(),
+                "valid": diagnostics.is_empty(),
+                "locale": normalized_locale,
+                "supported_locales": supported_locales.clone(),
+                "diagnostics": diagnostics,
+            });
+            let pretty = serde_json::to_string_pretty(&payload)
+                .map_err(|error| format!("serialize config validation output failed: {error}"))?;
+            println!("{pretty}");
+        }
+        ValidateConfigOutput::ProblemJson => {
+            let payload = if diagnostics.is_empty() {
+                json!({
+                    "type": "urn:loongclaw:problem:none",
+                    "title": "Configuration Valid",
+                    "detail": "No configuration diagnostics were reported.",
+                    "instance": resolved_path.display().to_string(),
+                    "locale": normalized_locale,
+                    "supported_locales": supported_locales.clone(),
+                    "diagnostics_schema_version": 1,
+                    "errors": [],
+                })
+            } else {
+                json!({
+                    "type": "urn:loongclaw:problem:config.validation_failed",
+                    "title": "Configuration Validation Failed",
+                    "detail": format!("{} configuration diagnostic(s) were reported.", diagnostics_count),
+                    "instance": resolved_path.display().to_string(),
+                    "locale": normalized_locale,
+                    "supported_locales": supported_locales.clone(),
+                    "diagnostics_schema_version": 1,
+                    "errors": diagnostics,
+                })
+            };
+            let pretty = serde_json::to_string_pretty(&payload).map_err(|error| {
+                format!("serialize config validation problem output failed: {error}")
+            })?;
+            println!("{pretty}");
+        }
+    }
+
+    if fail_on_diagnostics && diagnostics_count > 0 {
+        return Err(format!(
+            "config validation failed with {diagnostics_count} diagnostic(s)"
+        ));
+    }
+
+    Ok(())
+}
+
+fn resolve_validate_output(
+    as_json: bool,
+    output: Option<ValidateConfigOutput>,
+) -> CliResult<ValidateConfigOutput> {
+    if as_json && output.is_some() {
+        return Err(
+            "validate-config: `--json` conflicts with `--output`; use one of them".to_owned(),
+        );
+    }
+    if as_json {
+        return Ok(ValidateConfigOutput::Json);
+    }
+    Ok(output.unwrap_or(ValidateConfigOutput::Text))
 }
 
 async fn run_list_models_cli(config_path: Option<&str>, as_json: bool) -> CliResult<()> {

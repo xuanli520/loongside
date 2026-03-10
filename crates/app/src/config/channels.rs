@@ -5,6 +5,13 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "channel-feishu")]
 use super::shared::read_secret_prefer_inline;
+use super::shared::{validate_env_pointer_field, ConfigValidationIssue, EnvPointerValidationHint};
+
+const TELEGRAM_BOT_TOKEN_ENV: &str = "TELEGRAM_BOT_TOKEN";
+const FEISHU_APP_ID_ENV: &str = "FEISHU_APP_ID";
+const FEISHU_APP_SECRET_ENV: &str = "FEISHU_APP_SECRET";
+const FEISHU_VERIFICATION_TOKEN_ENV: &str = "FEISHU_VERIFICATION_TOKEN";
+const FEISHU_ENCRYPT_KEY_ENV: &str = "FEISHU_ENCRYPT_KEY";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CliChannelConfig {
@@ -81,7 +88,7 @@ impl Default for TelegramChannelConfig {
         Self {
             enabled: false,
             bot_token: None,
-            bot_token_env: Some("TELEGRAM_BOT_TOKEN".to_owned()),
+            bot_token_env: Some(TELEGRAM_BOT_TOKEN_ENV.to_owned()),
             base_url: default_telegram_base_url(),
             polling_timeout_s: default_telegram_timeout_seconds(),
             allowed_chat_ids: Vec::new(),
@@ -90,6 +97,22 @@ impl Default for TelegramChannelConfig {
 }
 
 impl TelegramChannelConfig {
+    pub(super) fn validate(&self) -> Vec<ConfigValidationIssue> {
+        let mut issues = Vec::new();
+        if let Err(issue) = validate_env_pointer_field(
+            "telegram.bot_token_env",
+            self.bot_token_env.as_deref(),
+            EnvPointerValidationHint {
+                inline_field_path: "telegram.bot_token",
+                example_env_name: TELEGRAM_BOT_TOKEN_ENV,
+                detect_telegram_token_shape: true,
+            },
+        ) {
+            issues.push(issue);
+        }
+        issues
+    }
+
     #[cfg(feature = "channel-telegram")]
     pub fn bot_token(&self) -> Option<String> {
         if let Some(raw) = self.bot_token.as_deref() {
@@ -115,16 +138,16 @@ impl Default for FeishuChannelConfig {
             enabled: false,
             app_id: None,
             app_secret: None,
-            app_id_env: Some("FEISHU_APP_ID".to_owned()),
-            app_secret_env: Some("FEISHU_APP_SECRET".to_owned()),
+            app_id_env: Some(FEISHU_APP_ID_ENV.to_owned()),
+            app_secret_env: Some(FEISHU_APP_SECRET_ENV.to_owned()),
             base_url: default_feishu_base_url(),
             receive_id_type: default_feishu_receive_id_type(),
             webhook_bind: default_feishu_webhook_bind(),
             webhook_path: default_feishu_webhook_path(),
             verification_token: None,
-            verification_token_env: Some("FEISHU_VERIFICATION_TOKEN".to_owned()),
+            verification_token_env: Some(FEISHU_VERIFICATION_TOKEN_ENV.to_owned()),
             encrypt_key: None,
-            encrypt_key_env: Some("FEISHU_ENCRYPT_KEY".to_owned()),
+            encrypt_key_env: Some(FEISHU_ENCRYPT_KEY_ENV.to_owned()),
             allowed_chat_ids: Vec::new(),
             ignore_bot_messages: true,
         }
@@ -132,6 +155,55 @@ impl Default for FeishuChannelConfig {
 }
 
 impl FeishuChannelConfig {
+    pub(super) fn validate(&self) -> Vec<ConfigValidationIssue> {
+        let mut issues = Vec::new();
+        if let Err(issue) = validate_env_pointer_field(
+            "feishu.app_id_env",
+            self.app_id_env.as_deref(),
+            EnvPointerValidationHint {
+                inline_field_path: "feishu.app_id",
+                example_env_name: FEISHU_APP_ID_ENV,
+                detect_telegram_token_shape: false,
+            },
+        ) {
+            issues.push(issue);
+        }
+        if let Err(issue) = validate_env_pointer_field(
+            "feishu.app_secret_env",
+            self.app_secret_env.as_deref(),
+            EnvPointerValidationHint {
+                inline_field_path: "feishu.app_secret",
+                example_env_name: FEISHU_APP_SECRET_ENV,
+                detect_telegram_token_shape: false,
+            },
+        ) {
+            issues.push(issue);
+        }
+        if let Err(issue) = validate_env_pointer_field(
+            "feishu.verification_token_env",
+            self.verification_token_env.as_deref(),
+            EnvPointerValidationHint {
+                inline_field_path: "feishu.verification_token",
+                example_env_name: FEISHU_VERIFICATION_TOKEN_ENV,
+                detect_telegram_token_shape: false,
+            },
+        ) {
+            issues.push(issue);
+        }
+        if let Err(issue) = validate_env_pointer_field(
+            "feishu.encrypt_key_env",
+            self.encrypt_key_env.as_deref(),
+            EnvPointerValidationHint {
+                inline_field_path: "feishu.encrypt_key",
+                example_env_name: FEISHU_ENCRYPT_KEY_ENV,
+                detect_telegram_token_shape: false,
+            },
+        ) {
+            issues.push(issue);
+        }
+        issues
+    }
+
     #[cfg(feature = "channel-feishu")]
     pub fn app_id(&self) -> Option<String> {
         read_secret_prefer_inline(self.app_id.as_deref(), self.app_id_env.as_deref())

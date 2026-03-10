@@ -81,6 +81,59 @@ PowerShell:
 pwsh ./scripts/install.ps1 -Setup
 ```
 
+## Secret Config Quick Guide
+
+`setup` defaults to environment-pointer mode:
+
+- `provider.api_key_env` stores an env var name (for example `PROVIDER_API_KEY`).
+- `telegram.bot_token_env` stores an env var name (for example `TELEGRAM_BOT_TOKEN`).
+
+Do not place raw secrets in `*_env` fields.
+Do not use shell wrappers in `*_env` fields (`$VAR`, `${VAR}`, or `%VAR%`).
+
+If you need direct values in config, use the non-`_env` fields:
+
+- `provider.api_key = "sk-..."`
+- `telegram.bot_token = "..."`
+
+Provider examples:
+
+```toml
+[provider]
+kind = "kimi"
+api_key_env = "MOONSHOT_API_KEY"
+```
+
+```toml
+[provider]
+kind = "minimax"
+api_key_env = "MINIMAX_API_KEY"
+```
+
+Validate config before runtime startup:
+
+```bash
+loongclawd validate-config --config ~/.loongclaw/config.toml --json --locale en
+```
+
+`--json` returns stable diagnostic codes and machine-readable message variables
+for downstream localization workflows.
+Current builds ship an English diagnostic catalog (`en`) and normalize locale
+aliases (for example `en-US`) to `en`.
+JSON output includes:
+
+- `diagnostics_schema_version` for contract evolution.
+- `title_key` and `message_key` for i18n-friendly client rendering.
+- `supported_locales` to advertise available catalogs.
+
+CI gate example:
+
+```bash
+loongclawd validate-config --config ~/.loongclaw/config.toml --output problem-json --fail-on-diagnostics
+```
+
+`--fail-on-diagnostics` exits non-zero when diagnostics are present.
+
 ## Documentation Index
 
 - [Core Beliefs](docs/design-docs/core-beliefs.md)

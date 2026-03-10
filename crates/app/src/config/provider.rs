@@ -2,6 +2,8 @@ use std::{collections::BTreeMap, env};
 
 use serde::{Deserialize, Serialize};
 
+use super::shared::{validate_env_pointer_field, ConfigValidationIssue, EnvPointerValidationHint};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderProfile {
     pub id: &'static str,
@@ -128,6 +130,41 @@ impl Default for ProviderConfig {
 }
 
 impl ProviderConfig {
+    pub(super) fn validate(&self) -> Vec<ConfigValidationIssue> {
+        let mut issues = Vec::new();
+        let api_key_example = self
+            .kind
+            .default_api_key_env()
+            .unwrap_or("PROVIDER_API_KEY");
+        if let Err(issue) = validate_env_pointer_field(
+            "provider.api_key_env",
+            self.api_key_env.as_deref(),
+            EnvPointerValidationHint {
+                inline_field_path: "provider.api_key",
+                example_env_name: api_key_example,
+                detect_telegram_token_shape: false,
+            },
+        ) {
+            issues.push(issue);
+        }
+        let oauth_example = self
+            .kind
+            .default_oauth_access_token_env()
+            .unwrap_or("PROVIDER_OAUTH_ACCESS_TOKEN");
+        if let Err(issue) = validate_env_pointer_field(
+            "provider.oauth_access_token_env",
+            self.oauth_access_token_env.as_deref(),
+            EnvPointerValidationHint {
+                inline_field_path: "provider.oauth_access_token",
+                example_env_name: oauth_example,
+                detect_telegram_token_shape: false,
+            },
+        ) {
+            issues.push(issue);
+        }
+        issues
+    }
+
     pub fn endpoint(&self) -> String {
         if let Some(endpoint) = non_empty(self.endpoint.as_deref()) {
             return endpoint.to_owned();

@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -8,10 +8,48 @@ use super::{
     channels::{CliChannelConfig, FeishuChannelConfig, TelegramChannelConfig},
     provider::ProviderConfig,
     shared::{
-        default_loongclaw_home as shared_default_loongclaw_home, expand_path, DEFAULT_CONFIG_FILE,
+        default_loongclaw_home as shared_default_loongclaw_home, expand_path,
+        format_config_validation_issues, ConfigValidationIssue, ConfigValidationLocale,
+        DEFAULT_CONFIG_FILE,
     },
     tools_memory::{MemoryConfig, ToolConfig},
 };
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConfigValidationDiagnostic {
+    pub code: String,
+    pub problem_type: String,
+    pub title_key: String,
+    pub title: String,
+    pub message_key: String,
+    pub message_locale: String,
+    pub message_variables: BTreeMap<String, String>,
+    pub field_path: String,
+    pub inline_field_path: String,
+    pub example_env_name: String,
+    pub suggested_env_name: Option<String>,
+    pub message: String,
+}
+
+impl ConfigValidationDiagnostic {
+    fn from_issue(issue: &ConfigValidationIssue, locale: ConfigValidationLocale) -> Self {
+        let message_variables = issue.message_variables();
+        Self {
+            code: issue.code.as_str().to_owned(),
+            problem_type: issue.code.problem_type_uri().to_owned(),
+            title_key: issue.title_key().to_owned(),
+            title: issue.title(locale),
+            message_key: issue.message_key().to_owned(),
+            message_locale: locale.as_str().to_owned(),
+            message_variables: message_variables.clone(),
+            field_path: issue.field_path.clone(),
+            inline_field_path: issue.inline_field_path.clone(),
+            example_env_name: issue.example_env_name.clone(),
+            suggested_env_name: issue.suggested_env_name.clone(),
+            message: issue.render_with_variables(locale, &message_variables),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LoongClawConfig {
@@ -70,6 +108,38 @@ impl Default for ConversationTurnLoopConfig {
     }
 }
 
+impl LoongClawConfig {
+    fn collect_validation_issues(&self) -> Vec<ConfigValidationIssue> {
+        let mut issues = Vec::new();
+        issues.extend(self.provider.validate());
+        issues.extend(self.telegram.validate());
+        issues.extend(self.feishu.validate());
+        issues
+    }
+
+    pub fn validate(&self) -> CliResult<()> {
+        let issues = self.collect_validation_issues();
+        if issues.is_empty() {
+            return Ok(());
+        }
+        Err(format_config_validation_issues(&issues))
+    }
+
+    pub fn validation_diagnostics(&self) -> Vec<ConfigValidationDiagnostic> {
+        self.validation_diagnostics_with_locale(ConfigValidationLocale::En)
+    }
+
+    fn validation_diagnostics_with_locale(
+        &self,
+        locale: ConfigValidationLocale,
+    ) -> Vec<ConfigValidationDiagnostic> {
+        self.collect_validation_issues()
+            .iter()
+            .map(|issue| ConfigValidationDiagnostic::from_issue(issue, locale))
+            .collect()
+    }
+}
+
 pub fn load(path: Option<&str>) -> CliResult<(PathBuf, LoongClawConfig)> {
     let config_path = path.map(expand_path).unwrap_or_else(default_config_path);
     let raw = fs::read_to_string(&config_path).map_err(|error| {
@@ -79,6 +149,39 @@ pub fn load(path: Option<&str>) -> CliResult<(PathBuf, LoongClawConfig)> {
         )
     })?;
     parse_toml_config(&raw).map(|config| (config_path, config))
+}
+
+pub fn validate_file(path: Option<&str>) -> CliResult<(PathBuf, Vec<ConfigValidationDiagnostic>)> {
+    validate_file_with_locale(path, ConfigValidationLocale::En.as_str())
+}
+
+pub fn normalize_validation_locale(locale_tag: &str) -> String {
+    ConfigValidationLocale::from_tag(locale_tag)
+        .as_str()
+        .to_owned()
+}
+
+pub fn supported_validation_locales() -> Vec<&'static str> {
+    ConfigValidationLocale::supported_tags().to_vec()
+}
+
+pub fn validate_file_with_locale(
+    path: Option<&str>,
+    locale_tag: &str,
+) -> CliResult<(PathBuf, Vec<ConfigValidationDiagnostic>)> {
+    let config_path = path.map(expand_path).unwrap_or_else(default_config_path);
+    let raw = fs::read_to_string(&config_path).map_err(|error| {
+        format!(
+            "failed to read config {}: {error}. run `loongclawd setup` first",
+            config_path.display()
+        )
+    })?;
+    let config = parse_toml_config_without_validation(&raw)?;
+    let locale = ConfigValidationLocale::from_tag(locale_tag);
+    Ok((
+        config_path,
+        config.validation_diagnostics_with_locale(locale),
+    ))
 }
 
 pub fn write_template(path: Option<&str>, force: bool) -> CliResult<PathBuf> {
@@ -97,7 +200,11 @@ pub fn write_template(path: Option<&str>, force: bool) -> CliResult<PathBuf> {
         }
     }
 
-    let encoded = encode_toml_config(&LoongClawConfig::default())?;
+    let encoded = format!(
+        "{}{}",
+        template_secret_usage_comment(),
+        encode_toml_config(&LoongClawConfig::default())?
+    );
     fs::write(&output_path, encoded).map_err(|error| {
         format!(
             "failed to write config file {}: {error}",
@@ -117,11 +224,24 @@ pub fn default_loongclaw_home() -> PathBuf {
 
 #[cfg(feature = "config-toml")]
 fn parse_toml_config(raw: &str) -> CliResult<LoongClawConfig> {
-    toml::from_str(raw).map_err(|error| format!("failed to parse TOML config: {error}"))
+    let config = parse_toml_config_without_validation(raw)?;
+    config.validate()?;
+    Ok(config)
+}
+
+#[cfg(feature = "config-toml")]
+fn parse_toml_config_without_validation(raw: &str) -> CliResult<LoongClawConfig> {
+    toml::from_str::<LoongClawConfig>(raw)
+        .map_err(|error| format!("failed to parse TOML config: {error}"))
 }
 
 #[cfg(not(feature = "config-toml"))]
 fn parse_toml_config(_raw: &str) -> CliResult<LoongClawConfig> {
+    Err("config-toml feature is disabled for this build".to_owned())
+}
+
+#[cfg(not(feature = "config-toml"))]
+fn parse_toml_config_without_validation(_raw: &str) -> CliResult<LoongClawConfig> {
     Err("config-toml feature is disabled for this build".to_owned())
 }
 
@@ -161,4 +281,216 @@ const fn default_turn_loop_max_followup_tool_payload_chars() -> usize {
 
 const fn default_turn_loop_max_followup_tool_payload_chars_total() -> usize {
     20_000
+}
+
+fn template_secret_usage_comment() -> &'static str {
+    "# Secret configuration notes:\n\
+# - `*_env` fields store environment variable names, not secret values.\n\
+# - Example: `provider.api_key_env = \"PROVIDER_API_KEY\"`.\n\
+# - To write direct literals in config, use fields without `_env` (for example `provider.api_key`).\n\
+\n"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    #[cfg(feature = "config-toml")]
+    fn load_rejects_secret_literal_in_env_pointer_fields() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("loongclaw-config-validate-{unique}"));
+        std::fs::create_dir_all(&temp_dir).expect("create temp directory");
+        let config_path = temp_dir.join("config.toml");
+        let raw = r#"
+[provider]
+api_key_env = "sk-inline-secret-literal"
+
+[telegram]
+bot_token_env = "123456789:telegram-inline-secret-literal"
+"#;
+        std::fs::write(&config_path, raw).expect("write test config");
+
+        let error = load(Some(config_path.to_string_lossy().as_ref()))
+            .expect_err("load should fail for misplaced secret literals");
+        assert!(error.contains("provider.api_key_env"));
+        assert!(error.contains("telegram.bot_token_env"));
+
+        std::fs::remove_file(&config_path).ok();
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    #[cfg(feature = "config-toml")]
+    fn write_template_includes_secret_usage_comment() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("loongclaw-template-comment-{unique}"));
+        std::fs::create_dir_all(&temp_dir).expect("create temp directory");
+        let config_path = temp_dir.join("config.toml");
+
+        write_template(Some(config_path.to_string_lossy().as_ref()), true)
+            .expect("write template should succeed");
+
+        let raw = std::fs::read_to_string(&config_path).expect("read template");
+        assert!(raw.contains("# Secret configuration notes:"));
+        assert!(raw.contains("`*_env` fields store environment variable names"));
+
+        std::fs::remove_file(&config_path).ok();
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    #[cfg(feature = "config-toml")]
+    fn validate_file_returns_structured_diagnostics() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("loongclaw-config-diagnostics-{unique}"));
+        std::fs::create_dir_all(&temp_dir).expect("create temp directory");
+        let config_path = temp_dir.join("config.toml");
+        let raw = r#"
+[provider]
+api_key_env = "$OPENAI_API_KEY"
+"#;
+        std::fs::write(&config_path, raw).expect("write test config");
+
+        let (_, diagnostics) = validate_file(Some(config_path.to_string_lossy().as_ref()))
+            .expect("validate_file should parse and return diagnostics");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "config.env_pointer.dollar_prefix");
+        assert_eq!(
+            diagnostics[0].problem_type,
+            "urn:loongclaw:problem:config.env_pointer.dollar_prefix"
+        );
+        assert_eq!(
+            diagnostics[0].title_key,
+            "config.env_pointer.dollar_prefix.title"
+        );
+        assert_eq!(diagnostics[0].title, "Dollar Prefix Used In Env Pointer");
+        assert_eq!(
+            diagnostics[0].message_key,
+            "config.env_pointer.dollar_prefix"
+        );
+        assert_eq!(diagnostics[0].message_locale, "en");
+        assert_eq!(diagnostics[0].field_path, "provider.api_key_env");
+        assert_eq!(
+            diagnostics[0].message_variables.get("field_path"),
+            Some(&"provider.api_key_env".to_owned())
+        );
+        assert_eq!(
+            diagnostics[0].message_variables.get("code"),
+            Some(&"config.env_pointer.dollar_prefix".to_owned())
+        );
+        assert!(diagnostics[0].message.contains("without `$`"));
+
+        std::fs::remove_file(&config_path).ok();
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    #[cfg(feature = "config-toml")]
+    fn validate_file_locale_tag_aliases_normalize_to_en() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("loongclaw-config-locale-{unique}"));
+        std::fs::create_dir_all(&temp_dir).expect("create temp directory");
+        let config_path = temp_dir.join("config.toml");
+        let raw = r#"
+[provider]
+api_key_env = "$OPENAI_API_KEY"
+"#;
+        std::fs::write(&config_path, raw).expect("write test config");
+
+        let (_, diagnostics) =
+            validate_file_with_locale(Some(config_path.to_string_lossy().as_ref()), "en-US")
+                .expect("validate_file_with_locale should parse and return diagnostics");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].message_locale, "en");
+
+        std::fs::remove_file(&config_path).ok();
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn normalize_validation_locale_falls_back_to_en() {
+        assert_eq!(normalize_validation_locale("en-US"), "en");
+        assert_eq!(normalize_validation_locale("zh-CN"), "en");
+        assert_eq!(normalize_validation_locale(""), "en");
+    }
+
+    #[test]
+    fn supported_validation_locales_stays_stable() {
+        assert_eq!(supported_validation_locales(), vec!["en"]);
+    }
+
+    #[test]
+    #[cfg(feature = "config-toml")]
+    fn validate_file_reports_percent_wrapped_pointer_code() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("loongclaw-config-percent-{unique}"));
+        std::fs::create_dir_all(&temp_dir).expect("create temp directory");
+        let config_path = temp_dir.join("config.toml");
+        let raw = r#"
+[provider]
+api_key_env = "%OPENAI_API_KEY%"
+"#;
+        std::fs::write(&config_path, raw).expect("write test config");
+
+        let (_, diagnostics) = validate_file(Some(config_path.to_string_lossy().as_ref()))
+            .expect("validate_file should parse and return diagnostics");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "config.env_pointer.percent_wrapped");
+        assert_eq!(
+            diagnostics[0].problem_type,
+            "urn:loongclaw:problem:config.env_pointer.percent_wrapped"
+        );
+
+        std::fs::remove_file(&config_path).ok();
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    #[cfg(feature = "config-toml")]
+    fn validate_file_diagnostic_does_not_echo_secret_literal() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let temp_dir =
+            std::env::temp_dir().join(format!("loongclaw-config-no-secret-echo-{unique}"));
+        std::fs::create_dir_all(&temp_dir).expect("create temp directory");
+        let config_path = temp_dir.join("config.toml");
+        let secret = "sk-inline-super-secret-token";
+        let raw = format!(
+            r#"
+[provider]
+api_key_env = "{secret}"
+"#
+        );
+        std::fs::write(&config_path, raw).expect("write test config");
+
+        let (_, diagnostics) = validate_file(Some(config_path.to_string_lossy().as_ref()))
+            .expect("validate_file should parse and return diagnostics");
+        assert_eq!(diagnostics.len(), 1);
+        assert!(!diagnostics[0].message.contains(secret));
+        for value in diagnostics[0].message_variables.values() {
+            assert!(!value.contains(secret));
+        }
+
+        std::fs::remove_file(&config_path).ok();
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
 }
