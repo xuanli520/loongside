@@ -540,5 +540,5 @@ fn resolve_backup_path(original: &Path) -> CliResult<PathBuf> {
         .unwrap_or_else(|| "config".to_owned());
 
     let timestamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
-    Ok(parent.join(format!("{}.bak-{}", file_stem, timestamp)))
+    Ok(parent.join(format!("{}.toml.bak-{}", file_stem, timestamp)))
 }
