@@ -41,39 +41,39 @@ impl ConfigValidationLocale {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ConfigValidationCode {
-    EnvPointerAssignment,
-    EnvPointerDollarPrefix,
-    EnvPointerPercentWrapped,
-    EnvPointerSecretLiteral,
-    EnvPointerInvalidName,
+    Assignment,
+    DollarPrefix,
+    PercentWrapped,
+    SecretLiteral,
+    InvalidName,
 }
 
 impl ConfigValidationCode {
     pub const fn as_str(self) -> &'static str {
         match self {
-            ConfigValidationCode::EnvPointerAssignment => "config.env_pointer.assignment",
-            ConfigValidationCode::EnvPointerDollarPrefix => "config.env_pointer.dollar_prefix",
-            ConfigValidationCode::EnvPointerPercentWrapped => "config.env_pointer.percent_wrapped",
-            ConfigValidationCode::EnvPointerSecretLiteral => "config.env_pointer.secret_literal",
-            ConfigValidationCode::EnvPointerInvalidName => "config.env_pointer.invalid_name",
+            ConfigValidationCode::Assignment => "config.env_pointer.assignment",
+            ConfigValidationCode::DollarPrefix => "config.env_pointer.dollar_prefix",
+            ConfigValidationCode::PercentWrapped => "config.env_pointer.percent_wrapped",
+            ConfigValidationCode::SecretLiteral => "config.env_pointer.secret_literal",
+            ConfigValidationCode::InvalidName => "config.env_pointer.invalid_name",
         }
     }
 
     pub const fn problem_type_uri(self) -> &'static str {
         match self {
-            ConfigValidationCode::EnvPointerAssignment => {
+            ConfigValidationCode::Assignment => {
                 "urn:loongclaw:problem:config.env_pointer.assignment"
             }
-            ConfigValidationCode::EnvPointerDollarPrefix => {
+            ConfigValidationCode::DollarPrefix => {
                 "urn:loongclaw:problem:config.env_pointer.dollar_prefix"
             }
-            ConfigValidationCode::EnvPointerPercentWrapped => {
+            ConfigValidationCode::PercentWrapped => {
                 "urn:loongclaw:problem:config.env_pointer.percent_wrapped"
             }
-            ConfigValidationCode::EnvPointerSecretLiteral => {
+            ConfigValidationCode::SecretLiteral => {
                 "urn:loongclaw:problem:config.env_pointer.secret_literal"
             }
-            ConfigValidationCode::EnvPointerInvalidName => {
+            ConfigValidationCode::InvalidName => {
                 "urn:loongclaw:problem:config.env_pointer.invalid_name"
             }
         }
@@ -81,17 +81,11 @@ impl ConfigValidationCode {
 
     pub const fn title_key(self) -> &'static str {
         match self {
-            ConfigValidationCode::EnvPointerAssignment => "config.env_pointer.assignment.title",
-            ConfigValidationCode::EnvPointerDollarPrefix => {
-                "config.env_pointer.dollar_prefix.title"
-            }
-            ConfigValidationCode::EnvPointerPercentWrapped => {
-                "config.env_pointer.percent_wrapped.title"
-            }
-            ConfigValidationCode::EnvPointerSecretLiteral => {
-                "config.env_pointer.secret_literal.title"
-            }
-            ConfigValidationCode::EnvPointerInvalidName => "config.env_pointer.invalid_name.title",
+            ConfigValidationCode::Assignment => "config.env_pointer.assignment.title",
+            ConfigValidationCode::DollarPrefix => "config.env_pointer.dollar_prefix.title",
+            ConfigValidationCode::PercentWrapped => "config.env_pointer.percent_wrapped.title",
+            ConfigValidationCode::SecretLiteral => "config.env_pointer.secret_literal.title",
+            ConfigValidationCode::InvalidName => "config.env_pointer.invalid_name.title",
         }
     }
 
@@ -107,31 +101,29 @@ impl ConfigValidationCode {
 
     const fn fallback_title_en(self) -> &'static str {
         match self {
-            ConfigValidationCode::EnvPointerAssignment => "Assignment Used In Env Pointer",
-            ConfigValidationCode::EnvPointerDollarPrefix => "Dollar Prefix Used In Env Pointer",
-            ConfigValidationCode::EnvPointerPercentWrapped => {
-                "Percent-Wrapped Env Pointer Notation"
-            }
-            ConfigValidationCode::EnvPointerSecretLiteral => "Secret Literal Used In Env Pointer",
-            ConfigValidationCode::EnvPointerInvalidName => "Invalid Env Pointer Name",
+            ConfigValidationCode::Assignment => "Assignment Used In Env Pointer",
+            ConfigValidationCode::DollarPrefix => "Dollar Prefix Used In Env Pointer",
+            ConfigValidationCode::PercentWrapped => "Percent-Wrapped Env Pointer Notation",
+            ConfigValidationCode::SecretLiteral => "Secret Literal Used In Env Pointer",
+            ConfigValidationCode::InvalidName => "Invalid Env Pointer Name",
         }
     }
 
     const fn fallback_detail_template_en(self) -> &'static str {
         match self {
-            ConfigValidationCode::EnvPointerAssignment => {
+            ConfigValidationCode::Assignment => {
                 "[{code}] {field_path} expects an environment variable name, not `KEY=VALUE`. use `{field_path} = \"{suggested_env_name}\"` and place the secret value in that env var"
             }
-            ConfigValidationCode::EnvPointerDollarPrefix => {
+            ConfigValidationCode::DollarPrefix => {
                 "[{code}] {field_path} expects an environment variable name without `$`. use `{field_path} = \"{suggested_env_name}\"`"
             }
-            ConfigValidationCode::EnvPointerPercentWrapped => {
+            ConfigValidationCode::PercentWrapped => {
                 "[{code}] {field_path} expects an environment variable name, not `%VAR%` notation. use `{field_path} = \"{suggested_env_name}\"`"
             }
-            ConfigValidationCode::EnvPointerSecretLiteral => {
+            ConfigValidationCode::SecretLiteral => {
                 "[{code}] {field_path} expects an environment variable name, not a secret literal. move the value to `{inline_field_path}` or set `{field_path}` to a name like `{example_env_name}`"
             }
-            ConfigValidationCode::EnvPointerInvalidName => {
+            ConfigValidationCode::InvalidName => {
                 "[{code}] {field_path} is not a valid environment variable name reference. use `{field_path}` with a name like `{example_env_name}`"
             }
         }
@@ -329,7 +321,7 @@ pub(super) fn validate_env_pointer_field(
 
     if let Some((name, _value)) = parse_env_assignment(trimmed) {
         return Err(ConfigValidationIssue {
-            code: ConfigValidationCode::EnvPointerAssignment,
+            code: ConfigValidationCode::Assignment,
             field_path: field_path.to_owned(),
             inline_field_path: hint.inline_field_path.to_owned(),
             example_env_name: hint.example_env_name.to_owned(),
@@ -340,7 +332,7 @@ pub(super) fn validate_env_pointer_field(
     if let Some(raw_name) = trimmed.strip_prefix('$') {
         let suggested = normalize_dollar_prefixed_env_name(raw_name, hint.example_env_name);
         return Err(ConfigValidationIssue {
-            code: ConfigValidationCode::EnvPointerDollarPrefix,
+            code: ConfigValidationCode::DollarPrefix,
             field_path: field_path.to_owned(),
             inline_field_path: hint.inline_field_path.to_owned(),
             example_env_name: hint.example_env_name.to_owned(),
@@ -355,7 +347,7 @@ pub(super) fn validate_env_pointer_field(
             raw_name.to_owned()
         };
         return Err(ConfigValidationIssue {
-            code: ConfigValidationCode::EnvPointerPercentWrapped,
+            code: ConfigValidationCode::PercentWrapped,
             field_path: field_path.to_owned(),
             inline_field_path: hint.inline_field_path.to_owned(),
             example_env_name: hint.example_env_name.to_owned(),
@@ -365,7 +357,7 @@ pub(super) fn validate_env_pointer_field(
 
     if looks_like_secret_literal(trimmed, hint.detect_telegram_token_shape) {
         return Err(ConfigValidationIssue {
-            code: ConfigValidationCode::EnvPointerSecretLiteral,
+            code: ConfigValidationCode::SecretLiteral,
             field_path: field_path.to_owned(),
             inline_field_path: hint.inline_field_path.to_owned(),
             example_env_name: hint.example_env_name.to_owned(),
@@ -375,7 +367,7 @@ pub(super) fn validate_env_pointer_field(
 
     if !looks_like_compatible_env_name(trimmed) {
         return Err(ConfigValidationIssue {
-            code: ConfigValidationCode::EnvPointerInvalidName,
+            code: ConfigValidationCode::InvalidName,
             field_path: field_path.to_owned(),
             inline_field_path: hint.inline_field_path.to_owned(),
             example_env_name: hint.example_env_name.to_owned(),
@@ -538,7 +530,7 @@ mod tests {
     #[test]
     fn env_pointer_issue_render_uses_catalog_title_and_template() {
         let issue = ConfigValidationIssue {
-            code: ConfigValidationCode::EnvPointerDollarPrefix,
+            code: ConfigValidationCode::DollarPrefix,
             field_path: "provider.api_key_env".to_owned(),
             inline_field_path: "provider.api_key".to_owned(),
             example_env_name: "OPENAI_API_KEY".to_owned(),
