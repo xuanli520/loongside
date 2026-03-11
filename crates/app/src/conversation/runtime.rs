@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use async_trait::async_trait;
 use loongclaw_contracts::{Capability, MemoryCoreRequest};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::CliResult;
 use crate::KernelContext;

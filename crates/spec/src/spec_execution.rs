@@ -7,7 +7,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ed25519_dalek::{Signature as Ed25519Signature, Verifier, VerifyingKey};
 use kernel::{
     ArchitectureBoundaryPolicy, AuditEventKind, AutoProvisionAgent, AutoProvisionRequest,
@@ -19,13 +19,13 @@ use kernel::{
     RuntimeExtensionRequest, StaticPolicyEngine, SystemClock, TaskIntent, ToolCoreRequest,
     ToolExtensionRequest,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use wasmparser::{Parser as WasmParser, Payload as WasmPayload};
 
 use crate::programmatic::execute_programmatic_tool_call;
 use crate::spec_runtime::*;
-use crate::{CliResult, BUNDLED_APPROVAL_RISK_PROFILE, BUNDLED_SECURITY_SCAN_PROFILE};
+use crate::{BUNDLED_APPROVAL_RISK_PROFILE, BUNDLED_SECURITY_SCAN_PROFILE, CliResult};
 
 pub async fn execute_spec(spec: RunnerSpec, include_audit: bool) -> SpecRunReport {
     let mut spec = spec;
@@ -68,75 +68,73 @@ pub async fn execute_spec(spec: RunnerSpec, include_audit: bool) -> SpecRunRepor
         blocked_reason = Some(approval_guard.reason.clone());
     }
 
-    if let Some(bridge) = &spec.bridge_support {
-        if bridge.enabled {
-            let checksum = bridge_support_policy_checksum(bridge);
-            let sha256 = bridge_support_policy_sha256(bridge);
-            bridge_support_checksum = Some(checksum.clone());
-            bridge_support_sha256 = Some(sha256.clone());
+    if let Some(bridge) = &spec.bridge_support
+        && bridge.enabled
+    {
+        let checksum = bridge_support_policy_checksum(bridge);
+        let sha256 = bridge_support_policy_sha256(bridge);
+        bridge_support_checksum = Some(checksum.clone());
+        bridge_support_sha256 = Some(sha256.clone());
 
-            let version = bridge.policy_version.as_deref().unwrap_or("unknown");
-            let mut mismatch_reasons = Vec::new();
-            if let Some(expected) = &bridge.expected_checksum {
-                if !expected.eq_ignore_ascii_case(&checksum) {
-                    mismatch_reasons.push(format!(
-                        "bridge support policy checksum mismatch (version {version})"
-                    ));
-                }
-            }
-            if let Some(expected_sha256) = &bridge.expected_sha256 {
-                if !expected_sha256.eq_ignore_ascii_case(&sha256) {
-                    mismatch_reasons.push(format!(
-                        "bridge support policy sha256 mismatch (version {version})"
-                    ));
-                }
-            }
-            if !mismatch_reasons.is_empty() {
-                blocked_reason = Some(mismatch_reasons.join("; "));
-            }
+        let version = bridge.policy_version.as_deref().unwrap_or("unknown");
+        let mut mismatch_reasons = Vec::new();
+        if let Some(expected) = &bridge.expected_checksum
+            && !expected.eq_ignore_ascii_case(&checksum)
+        {
+            mismatch_reasons.push(format!(
+                "bridge support policy checksum mismatch (version {version})"
+            ));
+        }
+        if let Some(expected_sha256) = &bridge.expected_sha256
+            && !expected_sha256.eq_ignore_ascii_case(&sha256)
+        {
+            mismatch_reasons.push(format!(
+                "bridge support policy sha256 mismatch (version {version})"
+            ));
+        }
+        if !mismatch_reasons.is_empty() {
+            blocked_reason = Some(mismatch_reasons.join("; "));
         }
     }
 
-    if let Some(self_awareness_spec) = &spec.self_awareness {
-        if self_awareness_spec.enabled {
-            let mut architecture_policy = ArchitectureBoundaryPolicy::default();
-            if !self_awareness_spec.immutable_core_paths.is_empty() {
-                architecture_policy.immutable_prefixes = self_awareness_spec
-                    .immutable_core_paths
-                    .iter()
-                    .cloned()
-                    .collect();
-            }
-            if !self_awareness_spec.mutable_extension_paths.is_empty() {
-                architecture_policy.mutable_prefixes = self_awareness_spec
-                    .mutable_extension_paths
-                    .iter()
-                    .cloned()
-                    .collect();
-            }
+    if let Some(self_awareness_spec) = &spec.self_awareness
+        && self_awareness_spec.enabled
+    {
+        let mut architecture_policy = ArchitectureBoundaryPolicy::default();
+        if !self_awareness_spec.immutable_core_paths.is_empty() {
+            architecture_policy.immutable_prefixes = self_awareness_spec
+                .immutable_core_paths
+                .iter()
+                .cloned()
+                .collect();
+        }
+        if !self_awareness_spec.mutable_extension_paths.is_empty() {
+            architecture_policy.mutable_prefixes = self_awareness_spec
+                .mutable_extension_paths
+                .iter()
+                .cloned()
+                .collect();
+        }
 
-            let engine = CodebaseAwarenessEngine::new();
-            match engine.snapshot(&CodebaseAwarenessConfig {
-                roots: self_awareness_spec.roots.clone(),
-                plugin_roots: self_awareness_spec.plugin_roots.clone(),
-                proposed_mutations: self_awareness_spec.proposed_mutations.clone(),
-                architecture_policy,
-            }) {
-                Ok(snapshot) => {
-                    architecture_guard = Some(snapshot.architecture_guard.clone());
-                    if self_awareness_spec.enforce_guard
-                        && snapshot.architecture_guard.has_denials()
-                    {
-                        blocked_reason = Some(
-                            "architecture guard blocked proposed mutations outside mutable boundaries"
-                                .to_owned(),
-                        );
-                    }
-                    self_awareness = Some(snapshot);
+        let engine = CodebaseAwarenessEngine::new();
+        match engine.snapshot(&CodebaseAwarenessConfig {
+            roots: self_awareness_spec.roots.clone(),
+            plugin_roots: self_awareness_spec.plugin_roots.clone(),
+            proposed_mutations: self_awareness_spec.proposed_mutations.clone(),
+            architecture_policy,
+        }) {
+            Ok(snapshot) => {
+                architecture_guard = Some(snapshot.architecture_guard.clone());
+                if self_awareness_spec.enforce_guard && snapshot.architecture_guard.has_denials() {
+                    blocked_reason = Some(
+                        "architecture guard blocked proposed mutations outside mutable boundaries"
+                            .to_owned(),
+                    );
                 }
-                Err(error) => {
-                    blocked_reason = Some(format!("self-awareness snapshot failed: {error}"));
-                }
+                self_awareness = Some(snapshot);
+            }
+            Err(error) => {
+                blocked_reason = Some(format!("self-awareness snapshot failed: {error}"));
             }
         }
     }
@@ -173,153 +171,148 @@ pub async fn execute_spec(spec: RunnerSpec, include_audit: bool) -> SpecRunRepor
         };
     }
 
-    if let Some(plugin_scan) = &spec.plugin_scan {
-        if plugin_scan.enabled {
-            let scanner = PluginScanner::new();
-            let translator = PluginTranslator::new();
-            let bootstrap_executor = PluginBootstrapExecutor::new();
-            let bootstrap_policy = bootstrap_policy(&spec);
-            let (bridge_matrix, enforce_bridge_support) = bridge_support_matrix(&spec);
-            let mut pending_absorb_inputs = Vec::new();
-            let mut remaining_bootstrap_budget =
-                bootstrap_policy.as_ref().map(|policy| policy.max_tasks);
-            for root in &plugin_scan.roots {
-                let report = match scanner.scan_path(root) {
-                    Ok(report) => report,
-                    Err(error) => {
-                        blocked_reason =
-                            Some(format!("plugin scan failed for root {root}: {error}"));
-                        break;
-                    }
-                };
-                let translation = translator.translate_scan_report(&report);
-                let activation = translator.plan_activation(&translation, &bridge_matrix);
-
-                if enforce_bridge_support && activation.has_blockers() {
-                    blocked_reason = Some(format!(
-                        "bridge support enforcement blocked {} plugin(s)",
-                        activation.blocked_plugins
-                    ));
-                }
-
-                let ready_report = filter_scan_report_by_activation(&report, &activation);
-                let mut filtered_report = ready_report.clone();
-                if let Some(policy) = bootstrap_policy.as_ref() {
-                    let mut effective_policy = policy.clone();
-                    if let Some(remaining) = remaining_bootstrap_budget {
-                        effective_policy.max_tasks = remaining;
-                    }
-                    let bootstrap_report =
-                        bootstrap_executor.execute(&activation, &effective_policy);
-                    if blocked_reason.is_none() && bootstrap_report.blocked {
-                        blocked_reason =
-                            Some(bootstrap_report.block_reason.clone().unwrap_or_else(|| {
-                                "bootstrap policy blocked ready plugins".to_owned()
-                            }));
-                    }
-
-                    if let Some(remaining) = remaining_bootstrap_budget.as_mut() {
-                        *remaining = remaining.saturating_sub(bootstrap_report.applied_tasks);
-                    }
-
-                    plugin_bootstrap_queue.extend(
-                        bootstrap_report
-                            .tasks
-                            .iter()
-                            .filter(|task| matches!(task.status, BootstrapTaskStatus::Applied))
-                            .map(|task| task.bootstrap_hint.clone()),
-                    );
-                    filtered_report =
-                        filter_scan_report_by_keys(&report, &bootstrap_report.applied_plugin_keys);
-                    plugin_bootstrap_reports.push(bootstrap_report);
-                } else {
-                    plugin_bootstrap_queue.extend(
-                        activation
-                            .candidates
-                            .iter()
-                            .filter(|candidate| {
-                                matches!(candidate.status, PluginActivationStatus::Ready)
-                            })
-                            .map(|candidate| candidate.bootstrap_hint.clone()),
-                    );
-                }
-
-                let enriched_ready_report =
-                    enrich_scan_report_with_translation(&ready_report, &translation);
-                let enriched_filtered_report =
-                    enrich_scan_report_with_translation(&filtered_report, &translation);
-
-                if let (Some(policy), Some(report)) =
-                    (security_scan_policy.as_ref(), security_scan_report.as_mut())
-                {
-                    let delta = evaluate_plugin_security_scan(
-                        &enriched_ready_report,
-                        policy,
-                        &security_process_allowlist,
-                    );
-                    apply_security_scan_delta(report, delta);
-
-                    if blocked_reason.is_none() && report.blocked {
-                        blocked_reason = report.block_reason.clone();
-                    }
-                }
-
-                plugin_translation_reports.push(translation);
-                plugin_activation_plans.push(activation);
-                plugin_scan_reports.push(report);
-                pending_absorb_inputs.push(enriched_filtered_report);
-
-                if blocked_reason.is_some() {
+    if let Some(plugin_scan) = &spec.plugin_scan
+        && plugin_scan.enabled
+    {
+        let scanner = PluginScanner::new();
+        let translator = PluginTranslator::new();
+        let bootstrap_executor = PluginBootstrapExecutor::new();
+        let bootstrap_policy = bootstrap_policy(&spec);
+        let (bridge_matrix, enforce_bridge_support) = bridge_support_matrix(&spec);
+        let mut pending_absorb_inputs = Vec::new();
+        let mut remaining_bootstrap_budget =
+            bootstrap_policy.as_ref().map(|policy| policy.max_tasks);
+        for root in &plugin_scan.roots {
+            let report = match scanner.scan_path(root) {
+                Ok(report) => report,
+                Err(error) => {
+                    blocked_reason = Some(format!("plugin scan failed for root {root}: {error}"));
                     break;
+                }
+            };
+            let translation = translator.translate_scan_report(&report);
+            let activation = translator.plan_activation(&translation, &bridge_matrix);
+
+            if enforce_bridge_support && activation.has_blockers() {
+                blocked_reason = Some(format!(
+                    "bridge support enforcement blocked {} plugin(s)",
+                    activation.blocked_plugins
+                ));
+            }
+
+            let ready_report = filter_scan_report_by_activation(&report, &activation);
+            let mut filtered_report = ready_report.clone();
+            if let Some(policy) = bootstrap_policy.as_ref() {
+                let mut effective_policy = policy.clone();
+                if let Some(remaining) = remaining_bootstrap_budget {
+                    effective_policy.max_tasks = remaining;
+                }
+                let bootstrap_report = bootstrap_executor.execute(&activation, &effective_policy);
+                if blocked_reason.is_none() && bootstrap_report.blocked {
+                    blocked_reason =
+                        Some(bootstrap_report.block_reason.clone().unwrap_or_else(|| {
+                            "bootstrap policy blocked ready plugins".to_owned()
+                        }));
+                }
+
+                if let Some(remaining) = remaining_bootstrap_budget.as_mut() {
+                    *remaining = remaining.saturating_sub(bootstrap_report.applied_tasks);
+                }
+
+                plugin_bootstrap_queue.extend(
+                    bootstrap_report
+                        .tasks
+                        .iter()
+                        .filter(|task| matches!(task.status, BootstrapTaskStatus::Applied))
+                        .map(|task| task.bootstrap_hint.clone()),
+                );
+                filtered_report =
+                    filter_scan_report_by_keys(&report, &bootstrap_report.applied_plugin_keys);
+                plugin_bootstrap_reports.push(bootstrap_report);
+            } else {
+                plugin_bootstrap_queue.extend(
+                    activation
+                        .candidates
+                        .iter()
+                        .filter(|candidate| {
+                            matches!(candidate.status, PluginActivationStatus::Ready)
+                        })
+                        .map(|candidate| candidate.bootstrap_hint.clone()),
+                );
+            }
+
+            let enriched_ready_report =
+                enrich_scan_report_with_translation(&ready_report, &translation);
+            let enriched_filtered_report =
+                enrich_scan_report_with_translation(&filtered_report, &translation);
+
+            if let (Some(policy), Some(report)) =
+                (security_scan_policy.as_ref(), security_scan_report.as_mut())
+            {
+                let delta = evaluate_plugin_security_scan(
+                    &enriched_ready_report,
+                    policy,
+                    &security_process_allowlist,
+                );
+                apply_security_scan_delta(report, delta);
+
+                if blocked_reason.is_none() && report.blocked {
+                    blocked_reason = report.block_reason.clone();
                 }
             }
 
-            if blocked_reason.is_none() {
-                for pending in pending_absorb_inputs {
-                    let absorb = scanner.absorb(&mut integration_catalog, &mut spec.pack, &pending);
-                    plugin_absorb_reports.push(absorb);
-                }
+            plugin_translation_reports.push(translation);
+            plugin_activation_plans.push(activation);
+            plugin_scan_reports.push(report);
+            pending_absorb_inputs.push(enriched_filtered_report);
+
+            if blocked_reason.is_some() {
+                break;
+            }
+        }
+
+        if blocked_reason.is_none() {
+            for pending in pending_absorb_inputs {
+                let absorb = scanner.absorb(&mut integration_catalog, &mut spec.pack, &pending);
+                plugin_absorb_reports.push(absorb);
             }
         }
     }
 
     if let (Some(policy), Some(report)) =
         (security_scan_policy.as_ref(), security_scan_report.as_mut())
+        && let Some(export_spec) = policy.siem_export.as_ref().filter(|value| value.enabled)
     {
-        if let Some(export_spec) = policy.siem_export.as_ref().filter(|value| value.enabled) {
-            match emit_security_scan_siem_record(
-                &spec.pack.pack_id,
-                &spec.agent_id,
-                report,
-                export_spec,
-            ) {
-                Ok(export_report) => report.siem_export = Some(export_report),
-                Err(error) => {
-                    report.siem_export = Some(SecuritySiemExportReport {
-                        enabled: true,
-                        path: export_spec.path.clone(),
-                        success: false,
-                        exported_records: 0,
-                        exported_findings: 0,
-                        truncated_findings: 0,
-                        error: Some(error.clone()),
-                    });
-                    if export_spec.fail_on_error && blocked_reason.is_none() {
-                        blocked_reason = Some(format!("security scan siem export failed: {error}"));
-                    }
+        match emit_security_scan_siem_record(
+            &spec.pack.pack_id,
+            &spec.agent_id,
+            report,
+            export_spec,
+        ) {
+            Ok(export_report) => report.siem_export = Some(export_report),
+            Err(error) => {
+                report.siem_export = Some(SecuritySiemExportReport {
+                    enabled: true,
+                    path: export_spec.path.clone(),
+                    success: false,
+                    exported_records: 0,
+                    exported_findings: 0,
+                    truncated_findings: 0,
+                    error: Some(error.clone()),
+                });
+                if export_spec.fail_on_error && blocked_reason.is_none() {
+                    blocked_reason = Some(format!("security scan siem export failed: {error}"));
                 }
             }
         }
     }
 
-    if let Some(report) = security_scan_report.as_ref() {
-        if let Err(error) =
+    if let Some(report) = security_scan_report.as_ref()
+        && let Err(error) =
             emit_security_scan_audit_event(&kernel, &spec.pack.pack_id, &spec.agent_id, report)
-        {
-            if blocked_reason.is_none() {
-                blocked_reason = Some(error);
-            }
-        }
+        && blocked_reason.is_none()
+    {
+        blocked_reason = Some(error);
     }
 
     if let Some(reason) = blocked_reason.clone() {
@@ -354,35 +347,35 @@ pub async fn execute_spec(spec: RunnerSpec, include_audit: bool) -> SpecRunRepor
         };
     }
 
-    if let Some(auto) = &spec.auto_provision {
-        if auto.enabled {
-            let agent = AutoProvisionAgent::new();
-            let connector_name = auto
-                .connector_name
-                .clone()
-                .or_else(|| operation_connector_name(&spec.operation));
-            let request = AutoProvisionRequest {
-                provider_id: auto.provider_id.clone(),
-                channel_id: auto.channel_id.clone(),
-                connector_name,
-                endpoint: auto.endpoint.clone(),
-                required_capabilities: auto.required_capabilities.clone(),
-            };
+    if let Some(auto) = &spec.auto_provision
+        && auto.enabled
+    {
+        let agent = AutoProvisionAgent::new();
+        let connector_name = auto
+            .connector_name
+            .clone()
+            .or_else(|| operation_connector_name(&spec.operation));
+        let request = AutoProvisionRequest {
+            provider_id: auto.provider_id.clone(),
+            channel_id: auto.channel_id.clone(),
+            connector_name,
+            endpoint: auto.endpoint.clone(),
+            required_capabilities: auto.required_capabilities.clone(),
+        };
 
-            match agent.plan(&integration_catalog, &spec.pack, &request) {
-                Ok(plan) => {
-                    if !plan.is_noop() {
-                        if let Err(error) = integration_catalog.apply_plan(&mut spec.pack, &plan) {
-                            blocked_reason =
-                                Some(format!("applying auto-provision plan failed: {error}"));
-                        } else {
-                            auto_provision_plan = Some(plan);
-                        }
+        match agent.plan(&integration_catalog, &spec.pack, &request) {
+            Ok(plan) => {
+                if !plan.is_noop() {
+                    if let Err(error) = integration_catalog.apply_plan(&mut spec.pack, &plan) {
+                        blocked_reason =
+                            Some(format!("applying auto-provision plan failed: {error}"));
+                    } else {
+                        auto_provision_plan = Some(plan);
                     }
                 }
-                Err(error) => {
-                    blocked_reason = Some(format!("auto-provision planning failed: {error}"));
-                }
+            }
+            Err(error) => {
+                blocked_reason = Some(format!("auto-provision planning failed: {error}"));
             }
         }
     }
@@ -680,10 +673,10 @@ fn validate_security_scan_policy(policy: &SecurityScanSpec) -> Result<(), String
             );
         }
     }
-    if let Some(export) = policy.siem_export.as_ref().filter(|value| value.enabled) {
-        if export.path.trim().is_empty() {
-            return Err("security scan siem_export.path cannot be empty when enabled".to_owned());
-        }
+    if let Some(export) = policy.siem_export.as_ref().filter(|value| value.enabled)
+        && export.path.trim().is_empty()
+    {
+        return Err("security scan siem_export.path cannot be empty when enabled".to_owned());
     }
     if policy.runtime.execute_wasm_component && policy.runtime.allowed_path_prefixes.is_empty() {
         return Err(
@@ -871,11 +864,11 @@ fn emit_security_scan_siem_record(
     let mut truncated_findings = 0usize;
 
     if export.include_findings {
-        if let Some(limit) = export.max_findings_per_record {
-            if findings.len() > limit {
-                truncated_findings = findings.len().saturating_sub(limit);
-                findings.truncate(limit);
-            }
+        if let Some(limit) = export.max_findings_per_record
+            && findings.len() > limit
+        {
+            truncated_findings = findings.len().saturating_sub(limit);
+            findings.truncate(limit);
         }
     } else {
         truncated_findings = report.findings.len();
@@ -918,11 +911,11 @@ fn emit_security_scan_siem_record(
     });
 
     let path = Path::new(&export.path);
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("create siem export directory failed: {error}"))?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create siem export directory failed: {error}"))?;
     }
 
     let mut file = fs::OpenOptions::new()
@@ -1399,20 +1392,20 @@ fn scan_wasm_plugin_security(
         }
     };
 
-    if let Some(expected) = expected_sha256 {
-        if !expected.eq_ignore_ascii_case(&digest_hex) {
-            findings.push(build_security_finding(
-                SecurityFindingSeverity::High,
-                "wasm_sha256_mismatch",
-                descriptor.manifest.plugin_id.clone(),
-                descriptor.path.clone(),
-                "wasm sha256 does not match required pin",
-                json!({
-                    "expected_sha256": expected,
-                    "actual_sha256": digest_hex,
-                }),
-            ));
-        }
+    if let Some(expected) = expected_sha256
+        && !expected.eq_ignore_ascii_case(&digest_hex)
+    {
+        findings.push(build_security_finding(
+            SecurityFindingSeverity::High,
+            "wasm_sha256_mismatch",
+            descriptor.manifest.plugin_id.clone(),
+            descriptor.path.clone(),
+            "wasm sha256 does not match required pin",
+            json!({
+                "expected_sha256": expected,
+                "actual_sha256": digest_hex,
+            }),
+        ));
     }
 
     let imports = match parse_wasm_import_modules(&bytes) {
@@ -1550,10 +1543,10 @@ pub fn normalize_path_for_policy(path: &Path) -> PathBuf {
 }
 
 fn descriptor_bridge_kind(descriptor: &PluginDescriptor) -> PluginBridgeKind {
-    if let Some(raw) = descriptor.manifest.metadata.get("bridge_kind") {
-        if let Some(kind) = parse_bridge_kind_label(raw) {
-            return kind;
-        }
+    if let Some(raw) = descriptor.manifest.metadata.get("bridge_kind")
+        && let Some(kind) = parse_bridge_kind_label(raw)
+    {
+        return kind;
     }
 
     let language = descriptor.language.trim().to_ascii_lowercase();
@@ -2541,36 +2534,34 @@ fn enrich_scan_report_with_translation(
                     .entry("summary".to_owned())
                     .or_insert(summary);
             }
-            if !descriptor.manifest.tags.is_empty() {
-                if let Ok(tags_json) = serde_json::to_string(&descriptor.manifest.tags) {
-                    descriptor
-                        .manifest
-                        .metadata
-                        .entry("tags_json".to_owned())
-                        .or_insert(tags_json);
-                }
+            if !descriptor.manifest.tags.is_empty()
+                && let Ok(tags_json) = serde_json::to_string(&descriptor.manifest.tags)
+            {
+                descriptor
+                    .manifest
+                    .metadata
+                    .entry("tags_json".to_owned())
+                    .or_insert(tags_json);
             }
-            if !descriptor.manifest.input_examples.is_empty() {
-                if let Ok(input_examples_json) =
+            if !descriptor.manifest.input_examples.is_empty()
+                && let Ok(input_examples_json) =
                     serde_json::to_string(&descriptor.manifest.input_examples)
-                {
-                    descriptor
-                        .manifest
-                        .metadata
-                        .entry("input_examples_json".to_owned())
-                        .or_insert(input_examples_json);
-                }
+            {
+                descriptor
+                    .manifest
+                    .metadata
+                    .entry("input_examples_json".to_owned())
+                    .or_insert(input_examples_json);
             }
-            if !descriptor.manifest.output_examples.is_empty() {
-                if let Ok(output_examples_json) =
+            if !descriptor.manifest.output_examples.is_empty()
+                && let Ok(output_examples_json) =
                     serde_json::to_string(&descriptor.manifest.output_examples)
-                {
-                    descriptor
-                        .manifest
-                        .metadata
-                        .entry("output_examples_json".to_owned())
-                        .or_insert(output_examples_json);
-                }
+            {
+                descriptor
+                    .manifest
+                    .metadata
+                    .entry("output_examples_json".to_owned())
+                    .or_insert(output_examples_json);
             }
             if let Some(component) = descriptor.manifest.metadata.get("component").cloned() {
                 let resolved = resolve_plugin_relative_path(&descriptor.path, &component);
@@ -3238,15 +3229,13 @@ fn execute_tool_search(
         if let (Some(source_path), Some(plugin_id)) = (
             provider.metadata.get("plugin_source_path"),
             provider.metadata.get("plugin_id"),
-        ) {
-            if let Some((bridge, adapter, entrypoint, language)) =
-                translation_by_key.get(&(source_path.clone(), plugin_id.clone()))
-            {
-                resolved_bridge_kind = *bridge;
-                adapter_family = Some(adapter.clone());
-                entrypoint_hint = Some(entrypoint.clone());
-                source_language = Some(language.clone());
-            }
+        ) && let Some((bridge, adapter, entrypoint, language)) =
+            translation_by_key.get(&(source_path.clone(), plugin_id.clone()))
+        {
+            resolved_bridge_kind = *bridge;
+            adapter_family = Some(adapter.clone());
+            entrypoint_hint = Some(entrypoint.clone());
+            source_language = Some(language.clone());
         }
 
         entries.insert(
@@ -3402,10 +3391,10 @@ fn execute_tool_search(
 }
 
 fn metadata_tags(metadata: &BTreeMap<String, String>) -> Vec<String> {
-    if let Some(raw_json) = metadata.get("tags_json") {
-        if let Ok(values) = serde_json::from_str::<Vec<String>>(raw_json) {
-            return values;
-        }
+    if let Some(raw_json) = metadata.get("tags_json")
+        && let Ok(values) = serde_json::from_str::<Vec<String>>(raw_json)
+    {
+        return values;
     }
 
     metadata

@@ -14,10 +14,10 @@ async fn execute_spec_http_json_bridge_executes_against_local_server() {
             let _ = stream.read(&mut request_buf);
             let body = r#"{"status":"ok","reply":"pong"}"#;
             let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
             let _ = stream.write_all(response.as_bytes());
         }
     });

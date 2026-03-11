@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "channel-feishu")]
 use super::shared::read_secret_prefer_inline;
-use super::shared::{validate_env_pointer_field, ConfigValidationIssue, EnvPointerValidationHint};
+use super::shared::{ConfigValidationIssue, EnvPointerValidationHint, validate_env_pointer_field};
 
 const TELEGRAM_BOT_TOKEN_ENV: &str = "TELEGRAM_BOT_TOKEN";
 const FEISHU_APP_ID_ENV: &str = "FEISHU_APP_ID";

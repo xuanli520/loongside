@@ -92,7 +92,7 @@ impl ToolPlane {
             .ok_or(ToolPlaneError::CoreAdapterNotFound(resolved_name))?
             .clone();
 
-        adapter.execute_core_tool(request).await
+        return adapter.execute_core_tool(request).await;
     }
 
     pub async fn execute_extension(
@@ -121,8 +121,8 @@ impl ToolPlane {
             .ok_or(ToolPlaneError::CoreAdapterNotFound(resolved_core_name))?
             .clone();
 
-        extension
+        return extension
             .execute_tool_extension(request, core.as_ref())
-            .await
+            .await;
     }
 }

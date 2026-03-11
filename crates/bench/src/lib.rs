@@ -9,17 +9,17 @@ use std::{
 use kernel::{ChannelConfig, ConnectorCommand, ProviderConfig};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
-use tokio::time::{sleep, Instant as TokioInstant};
+use tokio::time::{Instant as TokioInstant, sleep};
 
 use loongclaw_spec::programmatic::{
     acquire_programmatic_circuit_slot, record_programmatic_circuit_outcome,
 };
 use loongclaw_spec::{
-    execute_spec, execute_wasm_component_bridge, BridgeRuntimePolicy, CliResult,
-    ProgrammaticCircuitBreakerPolicy, ProgrammaticCircuitRuntimeState, RunnerSpec,
+    BridgeRuntimePolicy, CliResult, ProgrammaticCircuitBreakerPolicy,
+    ProgrammaticCircuitRuntimeState, RunnerSpec, execute_spec, execute_wasm_component_bridge,
 };
 
 const DEFAULT_PRESSURE_ITERATIONS: usize = 12;
@@ -361,19 +361,18 @@ pub async fn run_programmatic_pressure_benchmark_cli(
     let preflight = baseline_lint
         .as_ref()
         .map(|lint| build_baseline_preflight(lint, enforce_gate, preflight_fail_on_warnings));
-    if enforce_gate {
-        if let Some(preflight_summary) = preflight.as_ref() {
-            if !preflight_summary.gate_passed {
-                let gate_issues = preflight_gate_issues(
-                    &preflight_summary.issues,
-                    preflight_summary.fail_on_warnings,
-                );
-                return Err(format!(
-                    "programmatic pressure strict preflight failed: {}",
-                    format_baseline_issue_list(&gate_issues)
-                ));
-            }
-        }
+    if enforce_gate
+        && let Some(preflight_summary) = preflight.as_ref()
+        && !preflight_summary.gate_passed
+    {
+        let gate_issues = preflight_gate_issues(
+            &preflight_summary.issues,
+            preflight_summary.fail_on_warnings,
+        );
+        return Err(format!(
+            "programmatic pressure strict preflight failed: {}",
+            format_baseline_issue_list(&gate_issues)
+        ));
     }
 
     let report = run_programmatic_pressure_matrix(
@@ -1923,11 +1922,11 @@ fn read_json_file<T: DeserializeOwned>(path: &str) -> CliResult<T> {
 fn write_json_file<T: Serialize>(path: &str, value: &T) -> CliResult<()> {
     let serialized = serde_json::to_string_pretty(value)
         .map_err(|error| format!("serialize JSON value for output file failed: {error}"))?;
-    if let Some(parent) = Path::new(path).parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("create output directory failed: {error}"))?;
-        }
+    if let Some(parent) = Path::new(path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create output directory failed: {error}"))?;
     }
     fs::write(path, serialized)
         .map_err(|error| format!("write JSON output file failed: {error}"))?;
@@ -2330,10 +2329,11 @@ mod tests {
 
         let gate = evaluate_scenario_gate(&report, Some(&thresholds), true);
         assert!(!gate.passed);
-        assert!(gate
-            .checks
-            .iter()
-            .any(|check| { check.metric == "error_rate" && !check.passed }));
+        assert!(
+            gate.checks
+                .iter()
+                .any(|check| { check.metric == "error_rate" && !check.passed })
+        );
     }
 
     #[test]
@@ -2391,11 +2391,13 @@ mod tests {
             .find(|check| check.metric == "schema_fingerprint")
             .expect("schema check should be present");
         assert!(!schema_check.passed);
-        assert!(schema_check
-            .detail
-            .as_deref()
-            .unwrap_or_default()
-            .contains("expected=expected-schema"));
+        assert!(
+            schema_check
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("expected=expected-schema")
+        );
     }
 
     #[test]
@@ -2505,10 +2507,11 @@ mod tests {
 
         let gate = evaluate_scenario_gate(&report, Some(&thresholds), false);
         assert!(gate.passed);
-        assert!(gate
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("expected_schema_fingerprint missing")));
+        assert!(
+            gate.warnings
+                .iter()
+                .any(|warning| warning.contains("expected_schema_fingerprint missing"))
+        );
     }
 
     #[test]

@@ -227,10 +227,7 @@ const EN_VALIDATION_MESSAGE_CATALOG: &[ConfigValidationCatalogEntry] = &[
         "config.env_pointer.invalid_name.title",
         "Invalid Env Pointer Name",
     ),
-    ConfigValidationCatalogEntry::new(
-        "config.numeric_range.title",
-        "Config Value Out Of Range",
-    ),
+    ConfigValidationCatalogEntry::new("config.numeric_range.title", "Config Value Out Of Range"),
     ConfigValidationCatalogEntry::new(
         "config.env_pointer.assignment",
         "[{code}] {field_path} expects an environment variable name, not `KEY=VALUE`. use `{field_path} = \"{suggested_env_name}\"` and place the secret value in that env var",
@@ -302,8 +299,17 @@ pub(super) fn format_config_validation_issues_with_locale(
 }
 
 fn get_user_home() -> PathBuf {
-    env::var_os("HOME")
-        .or_else(|| env::var_os("USERPROFILE"))
+    resolve_user_home(
+        env::var_os("HOME").as_deref(),
+        env::var_os("USERPROFILE").as_deref(),
+    )
+}
+
+fn resolve_user_home(
+    home: Option<&std::ffi::OsStr>,
+    userprofile: Option<&std::ffi::OsStr>,
+) -> PathBuf {
+    home.or(userprofile)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
 }
@@ -616,53 +622,31 @@ mod tests {
         assert!(rendered.contains("129"));
     }
 
-    /// Deterministic regression test for `get_user_home()` covering three
-    /// scenarios sequentially in a single test to avoid env-var races with
-    /// parallel test threads:
-    ///
-    /// 1. Real OS — at least one of HOME/USERPROFILE is set → not "."
-    /// 2. Only USERPROFILE set → should return USERPROFILE value
-    /// 3. Neither HOME nor USERPROFILE set → should return "."
+    /// Deterministic regression test for the user-home fallback logic without
+    /// mutating process-global environment variables.
     #[test]
     fn get_user_home_deterministic_fallback_scenarios() {
-        // Scenario 1: real OS should have at least one var set
-        let home_on_real_os = get_user_home();
-        assert_ne!(
-            home_on_real_os,
-            PathBuf::from("."),
-            "get_user_home() should resolve to a real directory, not \".\""
-        );
-
-        let original_home = env::var_os("HOME");
-        let original_userprofile = env::var_os("USERPROFILE");
-
-        let synthetic = PathBuf::from(if cfg!(windows) {
+        let home = if cfg!(windows) {
+            PathBuf::from(r"C:\Users\loongclaw-test-home")
+        } else {
+            PathBuf::from("/tmp/loongclaw-test-home")
+        };
+        let userprofile = PathBuf::from(if cfg!(windows) {
             r"C:\Users\loongclaw-test-synthetic"
         } else {
             "/tmp/loongclaw-test-synthetic"
         });
 
-        // Scenario 2: HOME absent, USERPROFILE present → returns USERPROFILE
-        env::remove_var("HOME");
-        env::set_var("USERPROFILE", &synthetic);
-        let result_userprofile = get_user_home();
-
-        // Scenario 3: both absent → returns "."
-        env::remove_var("USERPROFILE");
-        let result_dot = get_user_home();
-
-        // Restore original env before assertions (panic-safe ordering)
-        match original_home {
-            Some(v) => env::set_var("HOME", v),
-            None => env::remove_var("HOME"),
-        }
-        match original_userprofile {
-            Some(v) => env::set_var("USERPROFILE", v),
-            None => env::remove_var("USERPROFILE"),
-        }
+        let result_home = resolve_user_home(Some(home.as_os_str()), Some(userprofile.as_os_str()));
+        let result_userprofile = resolve_user_home(None, Some(userprofile.as_os_str()));
+        let result_dot = resolve_user_home(None, None);
 
         assert_eq!(
-            result_userprofile, synthetic,
+            result_home, home,
+            "resolve_user_home() should prefer HOME when both values are present"
+        );
+        assert_eq!(
+            result_userprofile, userprofile,
             "get_user_home() should fall back to USERPROFILE when HOME is absent"
         );
         assert_eq!(

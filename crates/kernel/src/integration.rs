@@ -294,11 +294,11 @@ impl AutoProvisionAgent {
                     patched.enabled = true;
                     changed = true;
                 }
-                if let Some(endpoint) = request.endpoint.as_deref() {
-                    if patched.endpoint != endpoint {
-                        patched.endpoint = endpoint.to_owned();
-                        changed = true;
-                    }
+                if let Some(endpoint) = request.endpoint.as_deref()
+                    && patched.endpoint != endpoint
+                {
+                    patched.endpoint = endpoint.to_owned();
+                    changed = true;
                 }
 
                 if changed {
@@ -437,12 +437,14 @@ mod tests {
             .expect("plan should succeed");
         assert!(!plan.is_noop());
         assert!(plan.pack_connector_additions.contains("openai"));
-        assert!(plan
-            .pack_capability_additions
-            .contains(&Capability::InvokeConnector));
-        assert!(plan
-            .pack_capability_additions
-            .contains(&Capability::ObserveTelemetry));
+        assert!(
+            plan.pack_capability_additions
+                .contains(&Capability::InvokeConnector)
+        );
+        assert!(
+            plan.pack_capability_additions
+                .contains(&Capability::ObserveTelemetry)
+        );
 
         catalog
             .apply_plan(&mut pack, &plan)
@@ -451,12 +453,14 @@ mod tests {
         assert!(catalog.provider("openai").is_some());
         assert!(catalog.channel("chat-main").is_some());
         assert!(pack.allowed_connectors.contains("openai"));
-        assert!(pack
-            .granted_capabilities
-            .contains(&Capability::InvokeConnector));
-        assert!(pack
-            .granted_capabilities
-            .contains(&Capability::ObserveTelemetry));
+        assert!(
+            pack.granted_capabilities
+                .contains(&Capability::InvokeConnector)
+        );
+        assert!(
+            pack.granted_capabilities
+                .contains(&Capability::ObserveTelemetry)
+        );
     }
 
     #[test]
@@ -520,9 +524,10 @@ mod tests {
             )
             .expect("plan should succeed");
 
-        assert!(plan
-            .actions
-            .iter()
-            .any(|action| matches!(action, ProvisionAction::PatchChannel { .. })));
+        assert!(
+            plan.actions
+                .iter()
+                .any(|action| matches!(action, ProvisionAction::PatchChannel { .. }))
+        );
     }
 }

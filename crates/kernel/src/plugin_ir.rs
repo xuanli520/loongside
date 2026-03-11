@@ -296,10 +296,10 @@ fn default_bridge_kind(language: &str, endpoint: Option<&str>) -> PluginBridgeKi
         "python" | "javascript" | "typescript" | "java" => PluginBridgeKind::ProcessStdio,
         "wasm" | "wat" => PluginBridgeKind::WasmComponent,
         _ => {
-            if let Some(endpoint) = endpoint {
-                if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
-                    return PluginBridgeKind::HttpJson;
-                }
+            if let Some(endpoint) = endpoint
+                && (endpoint.starts_with("http://") || endpoint.starts_with("https://"))
+            {
+                return PluginBridgeKind::HttpJson;
             }
             PluginBridgeKind::Unknown
         }

@@ -7,7 +7,7 @@ use std::{
 
 use loongclaw_contracts::{ToolCoreOutcome, ToolCoreRequest};
 #[cfg(feature = "tool-file")]
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub(super) fn execute_file_read_tool_with_config(
     request: ToolCoreRequest,
@@ -94,15 +94,13 @@ pub(super) fn execute_file_write_tool_with_config(
             .unwrap_or(true);
 
         let resolved = resolve_safe_file_path_with_config(target, config)?;
-        if create_dirs {
-            if let Some(parent) = resolved.parent() {
-                fs::create_dir_all(parent).map_err(|error| {
-                    format!(
-                        "failed to create parent directory {}: {error}",
-                        parent.display()
-                    )
-                })?;
-            }
+        if create_dirs && let Some(parent) = resolved.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create parent directory {}: {error}",
+                    parent.display()
+                )
+            })?;
         }
         fs::write(&resolved, content)
             .map_err(|error| format!("failed to write file {}: {error}", resolved.display()))?;

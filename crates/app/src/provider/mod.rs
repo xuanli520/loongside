@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::time::sleep;
 
 use crate::CliResult;
@@ -39,6 +39,7 @@ pub fn build_messages_for_session(
     {
         let mem_config = super::memory::runtime_config::MemoryRuntimeConfig {
             sqlite_path: Some(config.memory.resolved_sqlite_path()),
+            sliding_window: Some(config.memory.sliding_window),
         };
         let turns = memory::window_direct(session_id, config.memory.sliding_window, &mem_config)
             .map_err(|error| format!("load memory window failed: {error}"))?;
@@ -142,7 +143,7 @@ pub async fn fetch_available_models(config: &LoongClawConfig) -> CliResult<Vec<S
     validate_provider_feature_gate(config)?;
     let headers = transport::build_request_headers(&config.provider)?;
     let request_policy = policy::ProviderRequestPolicy::from_config(&config.provider);
-    fetch_available_models_with_policy(config, &headers, &request_policy).await
+    return fetch_available_models_with_policy(config, &headers, &request_policy).await;
 }
 
 fn build_http_client(request_policy: &policy::ProviderRequestPolicy) -> CliResult<reqwest::Client> {
@@ -199,10 +200,10 @@ fn build_completion_request_body(
         }
     }
 
-    if transport_mode == ProviderTransportMode::KimiApi {
-        if let Some(extra_body) = kimi_extra_body(config.provider.reasoning_effort) {
-            body.insert("extra_body".to_owned(), extra_body);
-        }
+    if transport_mode == ProviderTransportMode::KimiApi
+        && let Some(extra_body) = kimi_extra_body(config.provider.reasoning_effort)
+    {
+        body.insert("extra_body".to_owned(), extra_body);
     }
 
     Value::Object(body)
@@ -217,11 +218,12 @@ fn build_turn_request_body(
     tool_definitions: &[Value],
 ) -> Value {
     let mut body = build_completion_request_body(config, messages, model, payload_mode);
-    if include_tool_schema && !tool_definitions.is_empty() {
-        if let Some(object) = body.as_object_mut() {
-            object.insert("tools".to_owned(), Value::Array(tool_definitions.to_vec()));
-            object.insert("tool_choice".to_owned(), json!("auto"));
-        }
+    if include_tool_schema
+        && !tool_definitions.is_empty()
+        && let Some(object) = body.as_object_mut()
+    {
+        object.insert("tools".to_owned(), Value::Array(tool_definitions.to_vec()));
+        object.insert("tool_choice".to_owned(), json!("auto"));
     }
     body
 }
@@ -468,13 +470,13 @@ fn should_disable_tool_schema_for_error(error: &ProviderApiError) -> bool {
 }
 
 fn should_try_next_model_on_error(error: &ProviderApiError) -> bool {
-    if let Some(code) = error.code.as_deref() {
-        if matches!(
+    if let Some(code) = error.code.as_deref()
+        && matches!(
             code,
             "model_not_found" | "unsupported_model" | "invalid_model" | "not_found_error"
-        ) {
-            return true;
-        }
+        )
+    {
+        return true;
     }
     if error.param.as_deref() == Some("model") {
         return true;
@@ -626,12 +628,11 @@ async fn request_completion_with_model(
                 let api_error = parse_provider_api_error(&response_body);
                 if let Some(next_mode) =
                     adapt_payload_mode_for_error(payload_mode, &config.provider, &api_error)
+                    && !tried_payload_modes.contains(&next_mode)
                 {
-                    if !tried_payload_modes.contains(&next_mode) {
-                        payload_mode = next_mode;
-                        tried_payload_modes.push(next_mode);
-                        continue;
-                    }
+                    payload_mode = next_mode;
+                    tried_payload_modes.push(next_mode);
+                    continue;
                 }
 
                 let status_code = status.as_u16();
@@ -743,12 +744,11 @@ async fn request_turn_with_model(
                 }
                 if let Some(next_mode) =
                     adapt_payload_mode_for_error(payload_mode, &config.provider, &api_error)
+                    && !tried_payload_modes.contains(&next_mode)
                 {
-                    if !tried_payload_modes.contains(&next_mode) {
-                        payload_mode = next_mode;
-                        tried_payload_modes.push(next_mode);
-                        continue;
-                    }
+                    payload_mode = next_mode;
+                    tried_payload_modes.push(next_mode);
+                    continue;
                 }
 
                 let status_code = status.as_u16();
@@ -826,14 +826,13 @@ fn validate_provider_configuration(config: &LoongClawConfig) -> CliResult<()> {
         );
     }
 
-    if config.provider.kind == ProviderKind::KimiCoding {
-        if let Some(user_agent) = config.provider.header_value("user-agent") {
-            if !is_kimi_cli_user_agent(user_agent) {
-                return Err(format!(
-                    "kimi_coding provider requires a `User-Agent` header starting with `KimiCLI/`; got `{user_agent}`"
-                ));
-            }
-        }
+    if config.provider.kind == ProviderKind::KimiCoding
+        && let Some(user_agent) = config.provider.header_value("user-agent")
+        && !is_kimi_cli_user_agent(user_agent)
+    {
+        return Err(format!(
+            "kimi_coding provider requires a `User-Agent` header starting with `KimiCLI/`; got `{user_agent}`"
+        ));
     }
 
     Ok(())

@@ -1,9 +1,9 @@
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
+use crate::CliResult;
 use crate::channel::{ChannelAdapter, ChannelInboundMessage};
 use crate::config::LoongClawConfig;
-use crate::CliResult;
 
 use super::payload::{
     build_feishu_reply_payload, build_feishu_send_payload, ensure_feishu_response_ok,

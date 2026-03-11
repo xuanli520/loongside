@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use super::shared::{
-    default_loongclaw_home, expand_path, validate_numeric_range, ConfigValidationIssue,
-    DEFAULT_SQLITE_FILE,
+    ConfigValidationIssue, DEFAULT_SQLITE_FILE, default_loongclaw_home, expand_path,
+    validate_numeric_range,
 };
 
 pub(crate) const MIN_MEMORY_SLIDING_WINDOW: usize = 1;

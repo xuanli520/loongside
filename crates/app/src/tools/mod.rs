@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use loongclaw_contracts::{Capability, ToolCoreOutcome, ToolCoreRequest};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::KernelContext;
 

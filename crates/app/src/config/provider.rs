@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, env};
 
 use serde::{Deserialize, Serialize};
 
-use super::shared::{validate_env_pointer_field, ConfigValidationIssue, EnvPointerValidationHint};
+use super::shared::{ConfigValidationIssue, EnvPointerValidationHint, validate_env_pointer_field};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderProfile {

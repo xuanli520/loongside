@@ -153,11 +153,13 @@ async fn execute_spec_programmatic_tool_call_enforces_max_call_budget() {
         "blocked_reason={:?}, outcome={}",
         report.blocked_reason, report.outcome
     );
-    assert!(report
-        .blocked_reason
-        .as_deref()
-        .expect("blocked reason should exist")
-        .contains("budget exceeded"));
+    assert!(
+        report
+            .blocked_reason
+            .as_deref()
+            .expect("blocked reason should exist")
+            .contains("budget exceeded")
+    );
 }
 
 #[tokio::test]
@@ -262,11 +264,13 @@ async fn execute_spec_programmatic_tool_call_blocks_when_caller_not_allowlisted(
         "blocked_reason={:?}, outcome={}",
         report.blocked_reason, report.outcome
     );
-    assert!(report
-        .blocked_reason
-        .as_deref()
-        .expect("blocked reason should exist")
-        .contains("is not allowed"));
+    assert!(
+        report
+            .blocked_reason
+            .as_deref()
+            .expect("blocked reason should exist")
+            .contains("is not allowed")
+    );
 }
 
 #[tokio::test]
@@ -350,8 +354,7 @@ async fn execute_spec_programmatic_tool_call_connector_batch_parallel_succeeds()
     assert_eq!(report.outcome["result"]["total_calls"], 2);
     assert_eq!(report.outcome["result"]["failed_calls"], 0);
     assert_eq!(
-        report.outcome["result"]["by_call"]["a"]["outcome"]["payload"]["payload"]["_loongclaw"]
-            ["call_id"],
+        report.outcome["result"]["by_call"]["a"]["outcome"]["payload"]["payload"]["_loongclaw"]["call_id"],
         "a"
     );
     assert_eq!(
@@ -459,10 +462,12 @@ async fn execute_spec_programmatic_tool_call_connector_batch_continue_on_error()
         report.outcome["result"]["by_call"]["bad"]["status"],
         Value::String("error".to_owned())
     );
-    assert!(report.outcome["result"]["by_call"]["bad"]["error"]
-        .as_str()
-        .expect("error string should exist")
-        .contains("connector not found"));
+    assert!(
+        report.outcome["result"]["by_call"]["bad"]["error"]
+            .as_str()
+            .expect("error string should exist")
+            .contains("connector not found")
+    );
     assert_eq!(
         report.outcome["result"]["by_call"]["bad"]["error_code"],
         Value::String("connector_not_found".to_owned())
@@ -627,11 +632,13 @@ async fn execute_spec_programmatic_tool_call_connector_batch_budget_checks_total
         "blocked_reason={:?}, outcome={}",
         report.blocked_reason, report.outcome
     );
-    assert!(report
-        .blocked_reason
-        .as_deref()
-        .expect("blocked reason should exist")
-        .contains("budget exceeded"));
+    assert!(
+        report
+            .blocked_reason
+            .as_deref()
+            .expect("blocked reason should exist")
+            .contains("budget exceeded")
+    );
 }
 
 #[tokio::test]
@@ -974,10 +981,12 @@ async fn execute_spec_programmatic_tool_call_circuit_breaker_blocks_followup_bat
         report.outcome["result"]["by_call"]["followup"]["error_code"],
         Value::String("circuit_open".to_owned())
     );
-    assert!(report.outcome["result"]["by_call"]["followup"]["error"]
-        .as_str()
-        .expect("followup error should exist")
-        .contains("programmatic_error[circuit_open]"));
+    assert!(
+        report.outcome["result"]["by_call"]["followup"]["error"]
+            .as_str()
+            .expect("followup error should exist")
+            .contains("programmatic_error[circuit_open]")
+    );
 }
 
 #[tokio::test]

@@ -131,6 +131,7 @@ pub(crate) async fn run_onboard_cli(options: OnboardCommandOptions) -> CliResult
     let memory_path = {
         let mem_config = mvp::memory::runtime_config::MemoryRuntimeConfig {
             sqlite_path: Some(config.memory.resolved_sqlite_path()),
+            sliding_window: Some(config.memory.sliding_window),
         };
         mvp::memory::ensure_memory_db_ready(Some(config.memory.resolved_sqlite_path()), &mem_config)
             .map_err(|error| format!("failed to bootstrap sqlite memory: {error}"))?

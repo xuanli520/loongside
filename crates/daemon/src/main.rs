@@ -4,13 +4,13 @@ use std::{collections::BTreeMap, time::Duration};
 use std::{collections::BTreeSet, fs, path::Path, sync::Arc};
 
 #[cfg(test)]
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use clap::{Parser, Subcommand, ValueEnum};
 #[cfg(test)]
 use kernel::{AuditEventKind, ExecutionRoute, HarnessKind, PluginBridgeKind, VerticalPackManifest};
 use kernel::{Capability, ConnectorCommand, FixedClock, InMemoryAuditSink, TaskIntent};
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 #[cfg(test)]
 use sha2::{Digest, Sha256};
 #[cfg(test)]
@@ -19,7 +19,7 @@ use tokio::time::sleep;
 use loongclaw_app as mvp;
 pub(crate) use loongclaw_spec::spec_execution::*;
 pub(crate) use loongclaw_spec::spec_runtime::*;
-use loongclaw_spec::{kernel_bootstrap, CliResult, DEFAULT_AGENT_ID, DEFAULT_PACK_ID};
+use loongclaw_spec::{CliResult, DEFAULT_AGENT_ID, DEFAULT_PACK_ID, kernel_bootstrap};
 
 use loongclaw_bench::{
     run_programmatic_pressure_baseline_lint_cli, run_programmatic_pressure_benchmark_cli,
@@ -555,6 +555,7 @@ fn run_setup_cli(output: Option<&str>, force: bool) -> CliResult<()> {
         let (_, parsed) = mvp::config::load(Some(path_str))?;
         let mem_config = mvp::memory::runtime_config::MemoryRuntimeConfig {
             sqlite_path: Some(parsed.memory.resolved_sqlite_path()),
+            sliding_window: Some(parsed.memory.sliding_window),
         };
         let memory_db = mvp::memory::ensure_memory_db_ready(
             Some(parsed.memory.resolved_sqlite_path()),
@@ -738,11 +739,11 @@ fn read_spec_file(path: &str) -> CliResult<RunnerSpec> {
 fn write_json_file<T: Serialize>(path: &str, value: &T) -> CliResult<()> {
     let serialized = serde_json::to_string_pretty(value)
         .map_err(|error| format!("serialize JSON value for output file failed: {error}"))?;
-    if let Some(parent) = Path::new(path).parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("create output directory failed: {error}"))?;
-        }
+    if let Some(parent) = Path::new(path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create output directory failed: {error}"))?;
     }
     fs::write(path, serialized)
         .map_err(|error| format!("write JSON output file failed: {error}"))?;

@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::conversation::turn_engine::{ProviderTurn, ToolIntent};
 use crate::tools;

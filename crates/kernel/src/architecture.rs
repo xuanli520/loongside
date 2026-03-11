@@ -174,15 +174,21 @@ mod tests {
 
         let report = policy.evaluate_paths(&paths);
         assert_eq!(report.total_paths, 3);
-        assert!(report
-            .denied_paths
-            .contains(&"crates/kernel/src/kernel.rs".to_owned()));
-        assert!(report
-            .denied_paths
-            .contains(&"crates/kernel/src/contracts.rs".to_owned()));
-        assert!(report
-            .allowed_paths
-            .contains(&"examples/spec/runtime-extension.json".to_owned()));
+        assert!(
+            report
+                .denied_paths
+                .contains(&"crates/kernel/src/kernel.rs".to_owned())
+        );
+        assert!(
+            report
+                .denied_paths
+                .contains(&"crates/kernel/src/contracts.rs".to_owned())
+        );
+        assert!(
+            report
+                .allowed_paths
+                .contains(&"examples/spec/runtime-extension.json".to_owned())
+        );
         assert!(report.has_denials());
     }
 
@@ -192,12 +198,16 @@ mod tests {
         let report = policy.evaluate_paths(&["scripts/internal/unsafe.sh"]);
 
         assert_eq!(report.total_paths, 1);
-        assert!(report
-            .denied_paths
-            .contains(&"scripts/internal/unsafe.sh".to_owned()));
-        assert!(report
-            .unknown_paths
-            .contains(&"scripts/internal/unsafe.sh".to_owned()));
+        assert!(
+            report
+                .denied_paths
+                .contains(&"scripts/internal/unsafe.sh".to_owned())
+        );
+        assert!(
+            report
+                .unknown_paths
+                .contains(&"scripts/internal/unsafe.sh".to_owned())
+        );
     }
 
     #[test]

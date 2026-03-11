@@ -7,7 +7,7 @@ use loongclaw_kernel::{
     CoreMemoryAdapter, FixedClock, InMemoryAuditSink, LoongClawKernel, MemoryCoreOutcome,
     MemoryCoreRequest, StaticPolicyEngine, VerticalPackManifest,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::super::config::{
     CliChannelConfig, ConversationConfig, FeishuChannelConfig, LoongClawConfig, MemoryConfig,
@@ -101,12 +101,14 @@ impl ConversationRuntime for FakeRuntime {
             .lock()
             .expect("completion request lock")
             .push(messages.to_vec());
-        self.completion_responses
+        drop(calls);
+        return self
+            .completion_responses
             .lock()
             .expect("completion response lock")
             .pop_front()
             .unwrap_or_else(|| Err("unexpected_completion_call".to_owned()))
-            .map_err(|error| error.to_owned())
+            .map_err(|error| error.to_owned());
     }
 
     async fn request_turn(
@@ -121,12 +123,14 @@ impl ConversationRuntime for FakeRuntime {
             .lock()
             .expect("turn request lock")
             .push(messages.to_vec());
-        self.turn_responses
+        drop(calls);
+        return self
+            .turn_responses
             .lock()
             .expect("turn response lock")
             .pop_front()
             .unwrap_or_else(|| Err("unexpected_turn_call".to_owned()))
-            .map_err(|error| error.to_owned())
+            .map_err(|error| error.to_owned());
     }
 
     async fn persist_turn(

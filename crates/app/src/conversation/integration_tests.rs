@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use loongclaw_contracts::{Capability, ExecutionRoute, HarnessKind};
 use loongclaw_kernel::{
@@ -10,8 +10,8 @@ use loongclaw_kernel::{
 
 use super::turn_engine::{ProviderTurn, ToolIntent, TurnEngine, TurnResult};
 use crate::context::KernelContext;
-use crate::tools::runtime_config::ToolRuntimeConfig;
 use crate::tools::MvpToolAdapter;
+use crate::tools::runtime_config::ToolRuntimeConfig;
 
 /// Monotonic counter for unique harness IDs (avoids temp dir collisions).
 static HARNESS_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -123,6 +123,7 @@ impl TurnTestHarness {
             use crate::memory::runtime_config::MemoryRuntimeConfig;
             let memory_config = MemoryRuntimeConfig {
                 sqlite_path: Some(temp_dir.join("memory.sqlite3")),
+                sliding_window: Some(12),
             };
             kernel.register_core_memory_adapter(crate::memory::MvpMemoryAdapter::with_config(
                 memory_config,
@@ -204,11 +205,13 @@ mod tests {
     #[test]
     fn harness_builds_with_invoke_tool_capability() {
         let harness = TurnTestHarness::new();
-        assert!(harness
-            .kernel_ctx
-            .token
-            .allowed_capabilities
-            .contains(&Capability::InvokeTool));
+        assert!(
+            harness
+                .kernel_ctx
+                .token
+                .allowed_capabilities
+                .contains(&Capability::InvokeTool)
+        );
         assert!(harness.temp_dir.exists());
     }
 

@@ -1,11 +1,11 @@
 use std::path::Path;
 
-use axum::{routing::post, Router};
+use axum::{Router, routing::post};
 
-use crate::channel::ChannelAdapter;
-use crate::config::LoongClawConfig;
 use crate::CliResult;
 use crate::KernelContext;
+use crate::channel::ChannelAdapter;
+use crate::config::LoongClawConfig;
 
 mod adapter;
 mod payload;
@@ -13,7 +13,7 @@ mod webhook;
 
 use adapter::FeishuAdapter;
 use payload::normalize_webhook_path;
-use webhook::{feishu_webhook_handler, FeishuWebhookState};
+use webhook::{FeishuWebhookState, feishu_webhook_handler};
 
 pub(super) async fn run_feishu_send(
     config: &LoongClawConfig,

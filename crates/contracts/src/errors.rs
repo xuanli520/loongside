@@ -45,7 +45,9 @@ pub enum PolicyError {
 pub enum HarnessError {
     #[error("harness adapter not found: {0}")]
     AdapterNotFound(String),
-    #[error("harness adapter kind mismatch for adapter {adapter}: expected {expected:?}, actual {actual:?}")]
+    #[error(
+        "harness adapter kind mismatch for adapter {adapter}: expected {expected:?}, actual {actual:?}"
+    )]
     AdapterKindMismatch {
         adapter: String,
         expected: HarnessKind,

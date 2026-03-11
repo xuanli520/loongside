@@ -93,7 +93,7 @@ impl MemoryPlane {
             .ok_or(MemoryPlaneError::CoreAdapterNotFound(resolved_name))?
             .clone();
 
-        adapter.execute_core_memory(request).await
+        return adapter.execute_core_memory(request).await;
     }
 
     pub async fn execute_extension(
@@ -122,8 +122,8 @@ impl MemoryPlane {
             .ok_or(MemoryPlaneError::CoreAdapterNotFound(resolved_core_name))?
             .clone();
 
-        extension
+        return extension
             .execute_memory_extension(request, core.as_ref())
-            .await
+            .await;
     }
 }

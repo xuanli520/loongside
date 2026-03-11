@@ -6,13 +6,13 @@ use kernel::{
     StaticPolicyEngine, SystemClock, VerticalPackManifest,
 };
 
+use crate::DEFAULT_PACK_ID;
 use crate::spec_runtime::{
     AcpBridgeRuntimeExtension, CoreToolRuntime, CrmCoreConnector, CrmGrpcCoreConnector,
     EmbeddedPiHarness, FallbackCoreRuntime, KvCoreMemory, NativeCoreRuntime,
     ShieldedConnectorExtension, SqlAnalyticsToolExtension, VectorIndexMemoryExtension,
     WebhookConnector,
 };
-use crate::DEFAULT_PACK_ID;
 
 /// Builder for constructing a fully configured `LoongClawKernel`.
 ///

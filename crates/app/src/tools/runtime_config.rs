@@ -108,9 +108,11 @@ mod tests {
         );
         let outcome = result.expect("echo should be allowed with injected config");
         assert_eq!(outcome.status, "ok");
-        assert!(outcome.payload["stdout"]
-            .as_str()
-            .unwrap()
-            .contains("injected"));
+        assert!(
+            outcome.payload["stdout"]
+                .as_str()
+                .unwrap()
+                .contains("injected")
+        );
     }
 }

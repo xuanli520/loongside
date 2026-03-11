@@ -6,7 +6,7 @@ use std::{
 
 use loongclaw_contracts::{MemoryCoreOutcome, MemoryCoreRequest};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::runtime_config::MemoryRuntimeConfig;
 
@@ -84,7 +84,7 @@ pub(super) fn load_window(
         .get("limit")
         .and_then(Value::as_u64)
         .map(|limit| limit as usize)
-        .unwrap_or_else(default_window_size)
+        .unwrap_or_else(|| default_window_size(config))
         .clamp(
             crate::config::MIN_MEMORY_SLIDING_WINDOW,
             crate::config::MAX_MEMORY_SLIDING_WINDOW,
@@ -217,14 +217,12 @@ pub(super) fn ensure_memory_db_ready(
     Ok(effective)
 }
 
-fn default_window_size() -> usize {
-    std::env::var("LOONGCLAW_SLIDING_WINDOW")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
+fn default_window_size(config: &MemoryRuntimeConfig) -> usize {
+    config
+        .sliding_window
         .filter(|value| *value > 0)
         .unwrap_or(12)
 }
-
 fn unix_ts_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -240,11 +238,11 @@ fn resolve_db_path(config: &MemoryRuntimeConfig) -> PathBuf {
 }
 
 fn ensure_sqlite_schema(path: &PathBuf) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("create sqlite parent directory failed: {error}"))?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create sqlite parent directory failed: {error}"))?;
     }
 
     let conn = rusqlite::Connection::open(path)
@@ -263,4 +261,24 @@ fn ensure_sqlite_schema(path: &PathBuf) -> Result<(), String> {
     )
     .map_err(|error| format!("initialize sqlite memory schema failed: {error}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_window_size_prefers_injected_config() {
+        let config = MemoryRuntimeConfig {
+            sqlite_path: None,
+            sliding_window: Some(24),
+        };
+
+        assert_eq!(default_window_size(&config), 24);
+    }
+
+    #[test]
+    fn default_window_size_falls_back_to_default_without_config() {
+        assert_eq!(default_window_size(&MemoryRuntimeConfig::default()), 12);
+    }
 }

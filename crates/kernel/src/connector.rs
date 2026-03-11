@@ -41,7 +41,7 @@ impl ConnectorRegistry {
             .get(&connector_name)
             .ok_or(ConnectorError::NotFound(connector_name))?
             .clone();
-        connector.invoke(command).await
+        return connector.invoke(command).await;
     }
 }
 
@@ -135,7 +135,7 @@ impl ConnectorPlane {
             .ok_or(ConnectorError::CoreAdapterNotFound(resolved_name))?
             .clone();
 
-        core.invoke_core(command).await
+        return core.invoke_core(command).await;
     }
 
     pub async fn invoke_extension(
@@ -164,6 +164,6 @@ impl ConnectorPlane {
             .ok_or(ConnectorError::CoreAdapterNotFound(resolved_core_name))?
             .clone();
 
-        extension.invoke_extension(command, core.as_ref()).await
+        return extension.invoke_extension(command, core.as_ref()).await;
     }
 }

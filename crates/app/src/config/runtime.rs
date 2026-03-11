@@ -8,9 +8,9 @@ use super::{
     channels::{CliChannelConfig, FeishuChannelConfig, TelegramChannelConfig},
     provider::ProviderConfig,
     shared::{
+        ConfigValidationIssue, ConfigValidationLocale, DEFAULT_CONFIG_FILE,
         default_loongclaw_home as shared_default_loongclaw_home, expand_path,
-        format_config_validation_issues, ConfigValidationIssue, ConfigValidationLocale,
-        DEFAULT_CONFIG_FILE,
+        format_config_validation_issues,
     },
     tools_memory::{MemoryConfig, ToolConfig},
 };
@@ -194,11 +194,11 @@ pub fn write_template(path: Option<&str>, force: bool) -> CliResult<PathBuf> {
         ));
     }
 
-    if let Some(parent) = output_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("failed to create config directory: {error}"))?;
-        }
+    if let Some(parent) = output_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create config directory: {error}"))?;
     }
 
     let encoded = format!(
@@ -224,11 +224,11 @@ pub fn write(path: Option<&str>, config: &LoongClawConfig, force: bool) -> CliRe
         ));
     }
 
-    if let Some(parent) = output_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("failed to create config directory: {error}"))?;
-        }
+    if let Some(parent) = output_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create config directory: {error}"))?;
     }
 
     let encoded = encode_toml_config(config)?;

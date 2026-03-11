@@ -206,12 +206,16 @@ mod tests {
         assert_eq!(report.applied_tasks, 1);
         assert_eq!(report.deferred_tasks, 1);
         assert!(!report.blocked);
-        assert!(report
-            .applied_plugin_keys
-            .contains(&("/tmp/http.rs".to_owned(), "http-plugin".to_owned())));
-        assert!(!report
-            .applied_plugin_keys
-            .contains(&("/tmp/ffi.rs".to_owned(), "ffi-plugin".to_owned())));
+        assert!(
+            report
+                .applied_plugin_keys
+                .contains(&("/tmp/http.rs".to_owned(), "http-plugin".to_owned()))
+        );
+        assert!(
+            !report
+                .applied_plugin_keys
+                .contains(&("/tmp/ffi.rs".to_owned(), "ffi-plugin".to_owned()))
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use std::io::{self, Write};
 
-use crate::context::{bootstrap_kernel_context, DEFAULT_TOKEN_TTL_S};
 use crate::CliResult;
+use crate::context::{DEFAULT_TOKEN_TTL_S, bootstrap_kernel_context};
 
 use super::config::{self, LoongClawConfig};
 use super::conversation::{ConversationTurnLoop, ProviderErrorMode};
@@ -23,6 +23,7 @@ pub async fn run_cli_chat(config_path: Option<&str>, session_hint: Option<&str>)
     #[cfg(feature = "memory-sqlite")]
     let memory_config = MemoryRuntimeConfig {
         sqlite_path: Some(config.memory.resolved_sqlite_path()),
+        sliding_window: Some(config.memory.sliding_window),
     };
 
     #[cfg(feature = "memory-sqlite")]
@@ -147,23 +148,6 @@ fn print_history(
 }
 
 fn export_runtime_env(config: &LoongClawConfig) {
-    std::env::set_var(
-        "LOONGCLAW_SQLITE_PATH",
-        config.memory.resolved_sqlite_path().display().to_string(),
-    );
-    std::env::set_var(
-        "LOONGCLAW_SLIDING_WINDOW",
-        config.memory.sliding_window.to_string(),
-    );
-    std::env::set_var(
-        "LOONGCLAW_SHELL_ALLOWLIST",
-        config.tools.shell_allowlist.join(","),
-    );
-    std::env::set_var(
-        "LOONGCLAW_FILE_ROOT",
-        config.tools.resolved_file_root().display().to_string(),
-    );
-
     // Populate the typed tool runtime config so executors never hit env vars
     // on the hot path.  Ignore the error if already initialised (e.g. tests).
     let tool_rt = crate::tools::runtime_config::ToolRuntimeConfig {
@@ -180,6 +164,7 @@ fn export_runtime_env(config: &LoongClawConfig) {
     // Populate the typed memory runtime config (same pattern as tool config).
     let memory_rt = crate::memory::runtime_config::MemoryRuntimeConfig {
         sqlite_path: Some(config.memory.resolved_sqlite_path()),
+        sliding_window: Some(config.memory.sliding_window),
     };
     let _ = crate::memory::runtime_config::init_memory_runtime_config(memory_rt);
 }

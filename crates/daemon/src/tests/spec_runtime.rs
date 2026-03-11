@@ -56,11 +56,13 @@ async fn execute_spec_returns_blocked_instead_of_panicking_on_operation_error() 
 
     let report = execute_spec(spec.clone(), true).await;
     assert_eq!(report.operation_kind, "blocked");
-    assert!(report
-        .blocked_reason
-        .as_deref()
-        .expect("blocked reason should exist")
-        .contains("legacy connector execution from spec failed"));
+    assert!(
+        report
+            .blocked_reason
+            .as_deref()
+            .expect("blocked reason should exist")
+            .contains("legacy connector execution from spec failed")
+    );
 }
 
 #[test]
@@ -452,10 +454,12 @@ async fn execute_spec_blocks_when_security_scan_profile_sha256_mismatches() {
 
     let report = execute_spec(spec.clone(), true).await;
     assert_eq!(report.operation_kind, "blocked");
-    assert!(report
-        .blocked_reason
-        .expect("blocked reason should exist")
-        .contains("profile sha256 mismatch"));
+    assert!(
+        report
+            .blocked_reason
+            .expect("blocked reason should exist")
+            .contains("profile sha256 mismatch")
+    );
 }
 
 #[test]
@@ -671,10 +675,12 @@ async fn execute_spec_blocks_when_security_scan_profile_signature_mismatches() {
 
     let report = execute_spec(spec.clone(), true).await;
     assert_eq!(report.operation_kind, "blocked");
-    assert!(report
-        .blocked_reason
-        .expect("blocked reason should exist")
-        .contains("profile signature verification failed"));
+    assert!(
+        report
+            .blocked_reason
+            .expect("blocked reason should exist")
+            .contains("profile signature verification failed")
+    );
 }
 
 #[tokio::test]
@@ -1238,14 +1244,18 @@ async fn execute_spec_bootstrap_applies_only_bridges_allowed_by_bootstrap_policy
     assert_eq!(report.plugin_bootstrap_reports[0].deferred_tasks, 1);
     assert_eq!(report.plugin_absorb_reports[0].absorbed_plugins, 1);
     assert_eq!(report.plugin_bootstrap_queue.len(), 1);
-    assert!(report
-        .integration_catalog
-        .provider("http-provider")
-        .is_some());
-    assert!(report
-        .integration_catalog
-        .provider("ffi-provider")
-        .is_none());
+    assert!(
+        report
+            .integration_catalog
+            .provider("http-provider")
+            .is_some()
+    );
+    assert!(
+        report
+            .integration_catalog
+            .provider("ffi-provider")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -1341,18 +1351,22 @@ async fn execute_spec_bootstrap_enforcement_blocks_when_ready_plugins_are_deferr
     let report = execute_spec(spec, true).await;
     assert_eq!(report.operation_kind, "blocked");
     assert_eq!(report.outcome["status"], "blocked");
-    assert!(report
-        .blocked_reason
-        .expect("blocked reason must exist")
-        .contains("bootstrap policy blocked"));
+    assert!(
+        report
+            .blocked_reason
+            .expect("blocked reason must exist")
+            .contains("bootstrap policy blocked")
+    );
     assert_eq!(report.plugin_bootstrap_reports.len(), 1);
     assert_eq!(report.plugin_bootstrap_reports[0].applied_tasks, 0);
     assert_eq!(report.plugin_bootstrap_reports[0].deferred_tasks, 1);
     assert!(report.plugin_absorb_reports.is_empty());
-    assert!(report
-        .integration_catalog
-        .provider("ffi-provider")
-        .is_none());
+    assert!(
+        report
+            .integration_catalog
+            .provider("ffi-provider")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -1408,10 +1422,12 @@ async fn execute_spec_blocks_on_bridge_support_checksum_mismatch() {
     let report = execute_spec(spec, true).await;
     assert_eq!(report.operation_kind, "blocked");
     assert_eq!(report.outcome["status"], "blocked");
-    assert!(report
-        .blocked_reason
-        .expect("blocked reason should be present")
-        .contains("checksum mismatch"));
+    assert!(
+        report
+            .blocked_reason
+            .expect("blocked reason should be present")
+            .contains("checksum mismatch")
+    );
     assert!(report.bridge_support_checksum.is_some());
 }
 
@@ -1468,10 +1484,12 @@ async fn execute_spec_blocks_on_bridge_support_sha256_mismatch() {
     let report = execute_spec(spec, true).await;
     assert_eq!(report.operation_kind, "blocked");
     assert_eq!(report.outcome["status"], "blocked");
-    assert!(report
-        .blocked_reason
-        .expect("blocked reason should be present")
-        .contains("sha256 mismatch"));
+    assert!(
+        report
+            .blocked_reason
+            .expect("blocked reason should be present")
+            .contains("sha256 mismatch")
+    );
     assert!(report.bridge_support_sha256.is_some());
 }
 
@@ -1800,20 +1818,18 @@ async fn execute_spec_wasm_component_bridge_executes_when_runtime_enabled() {
         ["cache_total_module_bytes"]
         .as_u64()
         .expect("cache total bytes should be numeric");
-    let first_cache_max = report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]
-        ["cache_max_bytes"]
-        .as_u64()
-        .expect("cache max bytes should be numeric");
+    let first_cache_max =
+        report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]["cache_max_bytes"]
+            .as_u64()
+            .expect("cache max bytes should be numeric");
     assert!(first_cache_total > 0);
     assert!(first_cache_total <= first_cache_max);
     assert_eq!(
-        report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]
-            ["integrity_check_required"],
+        report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]["integrity_check_required"],
         true
     );
     assert_eq!(
-        report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]
-            ["integrity_check_passed"],
+        report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]["integrity_check_passed"],
         true
     );
     assert_eq!(
@@ -1842,18 +1858,15 @@ async fn execute_spec_wasm_component_bridge_executes_when_runtime_enabled() {
         false
     );
     assert_eq!(
-        cached_report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]
-            ["cache_inserted"],
+        cached_report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]["cache_inserted"],
         false
     );
     assert_eq!(
-        cached_report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]
-            ["integrity_check_required"],
+        cached_report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]["integrity_check_required"],
         true
     );
     assert_eq!(
-        cached_report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]
-            ["integrity_check_passed"],
+        cached_report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]["integrity_check_passed"],
         true
     );
 }
@@ -1980,10 +1993,12 @@ async fn execute_spec_wasm_component_bridge_blocks_when_component_sha256_mismatc
         .security_scan_report
         .expect("security scan report should exist");
     assert!(security.blocked);
-    assert!(security
-        .findings
-        .iter()
-        .any(|finding| finding.category == "wasm_sha256_mismatch"));
+    assert!(
+        security
+            .findings
+            .iter()
+            .any(|finding| finding.category == "wasm_sha256_mismatch")
+    );
 }
 
 #[tokio::test]
@@ -2877,10 +2892,12 @@ async fn execute_spec_blocks_when_wasm_runtime_enabled_without_allowed_prefixes(
 
     let report = execute_spec(spec, true).await;
     assert_eq!(report.operation_kind, "blocked");
-    assert!(report
-        .blocked_reason
-        .expect("blocked reason should exist")
-        .contains("runtime.execute_wasm_component requires runtime.allowed_path_prefixes"));
+    assert!(
+        report
+            .blocked_reason
+            .expect("blocked reason should exist")
+            .contains("runtime.execute_wasm_component requires runtime.allowed_path_prefixes")
+    );
 }
 
 #[tokio::test]
@@ -3001,19 +3018,23 @@ async fn execute_spec_security_scan_blocks_wasm_plugin_with_wasi_import() {
 
     let report = execute_spec(spec, true).await;
     assert_eq!(report.operation_kind, "blocked");
-    assert!(report
-        .blocked_reason
-        .expect("blocked reason should exist")
-        .contains("security scan blocked"));
+    assert!(
+        report
+            .blocked_reason
+            .expect("blocked reason should exist")
+            .contains("security scan blocked")
+    );
     let security = report
         .security_scan_report
         .expect("security scan report should exist");
     assert!(security.blocked);
     assert!(security.high_findings > 0);
-    assert!(security
-        .findings
-        .iter()
-        .any(|finding| finding.category.contains("wasi")));
+    assert!(
+        security
+            .findings
+            .iter()
+            .any(|finding| finding.category.contains("wasi"))
+    );
     let audit = report.audit_events.expect("audit events should exist");
     assert!(audit.iter().any(|event| {
         matches!(
@@ -3150,10 +3171,12 @@ async fn execute_spec_security_scan_allows_clean_wasm_with_hash_pin() {
         .expect("security scan report should exist");
     assert!(!security.blocked);
     assert_eq!(security.high_findings, 0);
-    assert!(security
-        .findings
-        .iter()
-        .any(|finding| finding.category == "wasm_digest_observed"));
+    assert!(
+        security
+            .findings
+            .iter()
+            .any(|finding| finding.category == "wasm_digest_observed")
+    );
     assert!(report.integration_catalog.provider("wasm-clean").is_some());
 }
 
@@ -3277,14 +3300,18 @@ async fn execute_spec_security_scan_allows_clean_wasm_with_metadata_hash_pin() {
         .expect("security scan report should exist");
     assert!(!security.blocked);
     assert_eq!(security.high_findings, 0);
-    assert!(security
-        .findings
-        .iter()
-        .any(|finding| finding.category == "wasm_digest_observed"));
-    assert!(report
-        .integration_catalog
-        .provider("wasm-clean-metadata-pin")
-        .is_some());
+    assert!(
+        security
+            .findings
+            .iter()
+            .any(|finding| finding.category == "wasm_digest_observed")
+    );
+    assert!(
+        report
+            .integration_catalog
+            .provider("wasm-clean-metadata-pin")
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -3406,10 +3433,12 @@ async fn execute_spec_security_scan_blocks_when_metadata_hash_pin_is_invalid() {
         .expect("security scan report should exist");
     assert!(security.blocked);
     assert!(security.high_findings > 0);
-    assert!(security
-        .findings
-        .iter()
-        .any(|finding| finding.category == "wasm_sha256_pin_invalid"));
+    assert!(
+        security
+            .findings
+            .iter()
+            .any(|finding| finding.category == "wasm_sha256_pin_invalid")
+    );
 }
 
 #[tokio::test]
@@ -3535,10 +3564,12 @@ async fn execute_spec_security_scan_blocks_when_metadata_pin_conflicts_with_poli
         .expect("security scan report should exist");
     assert!(security.blocked);
     assert!(security.high_findings > 0);
-    assert!(security
-        .findings
-        .iter()
-        .any(|finding| finding.category == "wasm_sha256_pin_conflict"));
+    assert!(
+        security
+            .findings
+            .iter()
+            .any(|finding| finding.category == "wasm_sha256_pin_conflict")
+    );
 }
 
 #[tokio::test]
@@ -3677,9 +3708,11 @@ async fn execute_spec_security_scan_emits_audit_summary_when_not_blocking() {
         summary.expect("security scan audit summary should exist");
     assert!(!blocked);
     assert!(high_findings >= 1);
-    assert!(categories
-        .iter()
-        .any(|value| value == "process_command_not_allowlisted"));
+    assert!(
+        categories
+            .iter()
+            .any(|value| value == "process_command_not_allowlisted")
+    );
     assert!(!finding_ids.is_empty());
     assert!(finding_ids.iter().all(|value| value.starts_with("sf-")));
 }
@@ -3943,10 +3976,12 @@ async fn execute_spec_security_scan_siem_fail_closed_blocks_execution() {
 
     let report = execute_spec(spec, true).await;
     assert_eq!(report.operation_kind, "blocked");
-    assert!(report
-        .blocked_reason
-        .expect("blocked reason should exist")
-        .contains("siem export failed"));
+    assert!(
+        report
+            .blocked_reason
+            .expect("blocked reason should exist")
+            .contains("siem export failed")
+    );
     let security = report
         .security_scan_report
         .expect("security scan report should exist");
@@ -4089,10 +4124,12 @@ async fn execute_spec_security_scan_covers_deferred_plugins_not_only_applied_sub
 
     let report = execute_spec(spec, true).await;
     assert_eq!(report.operation_kind, "blocked");
-    assert!(report
-        .blocked_reason
-        .expect("blocked reason should exist")
-        .contains("security scan blocked"));
+    assert!(
+        report
+            .blocked_reason
+            .expect("blocked reason should exist")
+            .contains("security scan blocked")
+    );
     assert_eq!(report.plugin_bootstrap_reports.len(), 1);
     assert!(report.plugin_bootstrap_reports[0].total_tasks >= 1);
     assert_eq!(report.plugin_scan_reports[0].matched_plugins, 2);
@@ -4102,10 +4139,12 @@ async fn execute_spec_security_scan_covers_deferred_plugins_not_only_applied_sub
         .expect("security scan report should exist");
     assert!(security.blocked);
     assert!(security.high_findings >= 1);
-    assert!(security
-        .findings
-        .iter()
-        .any(|finding| finding.plugin_id == "stdio-risky"));
+    assert!(
+        security
+            .findings
+            .iter()
+            .any(|finding| finding.plugin_id == "stdio-risky")
+    );
     assert!(report.plugin_absorb_reports.is_empty());
 }
 
@@ -4147,10 +4186,12 @@ async fn execute_spec_default_medium_policy_blocks_high_risk_tool_call_without_a
     assert_eq!(report.outcome["status"], "blocked");
     assert!(report.approval_guard.requires_human_approval);
     assert!(!report.approval_guard.approved);
-    assert!(report
-        .blocked_reason
-        .expect("blocked reason should exist")
-        .contains("human approval required"));
+    assert!(
+        report
+            .blocked_reason
+            .expect("blocked reason should exist")
+            .contains("human approval required")
+    );
 }
 
 #[tokio::test]
@@ -4370,10 +4411,12 @@ async fn execute_spec_denylist_overrides_other_approvals() {
     assert_eq!(report.operation_kind, "blocked");
     assert!(report.approval_guard.denylisted);
     assert!(!report.approval_guard.approved);
-    assert!(report
-        .blocked_reason
-        .expect("blocked reason should exist")
-        .contains("denylisted"));
+    assert!(
+        report
+            .blocked_reason
+            .expect("blocked reason should exist")
+            .contains("denylisted")
+    );
 }
 
 #[tokio::test]
@@ -4813,10 +4856,12 @@ async fn execute_spec_plugin_scan_is_transactional_when_blocked() {
 
     let report = execute_spec(spec, true).await;
     assert_eq!(report.operation_kind, "blocked");
-    assert!(report
-        .blocked_reason
-        .expect("blocked reason")
-        .contains("bridge support enforcement blocked"));
+    assert!(
+        report
+            .blocked_reason
+            .expect("blocked reason")
+            .contains("bridge support enforcement blocked")
+    );
     assert_eq!(report.plugin_scan_reports.len(), 2);
     assert!(report.plugin_absorb_reports.is_empty());
     assert!(report.integration_catalog.provider("rollback-a").is_none());

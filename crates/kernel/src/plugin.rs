@@ -361,14 +361,18 @@ mod tests {
         let scanner = PluginScanner::new();
         let report = scanner.scan_path(&root).expect("scan should succeed");
         assert_eq!(report.matched_plugins, 2);
-        assert!(report
-            .descriptors
-            .iter()
-            .any(|descriptor| descriptor.manifest.provider_id == "openrouter"));
-        assert!(report
-            .descriptors
-            .iter()
-            .any(|descriptor| descriptor.manifest.provider_id == "slack"));
+        assert!(
+            report
+                .descriptors
+                .iter()
+                .any(|descriptor| descriptor.manifest.provider_id == "openrouter")
+        );
+        assert!(
+            report
+                .descriptors
+                .iter()
+                .any(|descriptor| descriptor.manifest.provider_id == "slack")
+        );
     }
 
     #[test]
@@ -410,9 +414,10 @@ mod tests {
         assert!(catalog.provider("openai").is_some());
         assert!(catalog.channel("chat-main").is_some());
         assert!(pack.allowed_connectors.contains("openai"));
-        assert!(pack
-            .granted_capabilities
-            .contains(&Capability::InvokeConnector));
+        assert!(
+            pack.granted_capabilities
+                .contains(&Capability::InvokeConnector)
+        );
     }
 
     #[test]

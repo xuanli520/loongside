@@ -9,6 +9,7 @@ use serde_json::json;
 
 use crate::task_supervisor::TaskSupervisor;
 use crate::{
+    Fault, TaskState,
     audit::{AuditEventKind, ExecutionPlane, InMemoryAuditSink, PlaneTier},
     clock::FixedClock,
     connector::{ConnectorAdapter, ConnectorExtensionAdapter, CoreConnectorAdapter},
@@ -34,7 +35,6 @@ use crate::{
         CoreToolAdapter, ToolCoreOutcome, ToolCoreRequest, ToolExtensionAdapter,
         ToolExtensionOutcome, ToolExtensionRequest,
     },
-    Fault, TaskState,
 };
 
 struct MockEmbeddedPiHarness {
@@ -668,15 +668,21 @@ async fn audit_sink_receives_core_lifecycle_events() {
 
     let snapshot = audit.snapshot();
     assert!(snapshot.len() >= 4);
-    assert!(snapshot
-        .iter()
-        .any(|event| { matches!(event.kind, AuditEventKind::TokenIssued { .. }) }));
-    assert!(snapshot
-        .iter()
-        .any(|event| { matches!(event.kind, AuditEventKind::TaskDispatched { .. }) }));
-    assert!(snapshot
-        .iter()
-        .any(|event| { matches!(event.kind, AuditEventKind::ConnectorInvoked { .. }) }));
+    assert!(
+        snapshot
+            .iter()
+            .any(|event| { matches!(event.kind, AuditEventKind::TokenIssued { .. }) })
+    );
+    assert!(
+        snapshot
+            .iter()
+            .any(|event| { matches!(event.kind, AuditEventKind::TaskDispatched { .. }) })
+    );
+    assert!(
+        snapshot
+            .iter()
+            .any(|event| { matches!(event.kind, AuditEventKind::ConnectorInvoked { .. }) })
+    );
     assert!(snapshot.iter().any(|event| {
         matches!(
             event.kind,

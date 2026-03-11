@@ -1,16 +1,16 @@
 use std::collections::VecDeque;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::CliResult;
 use crate::KernelContext;
 
 use super::super::config::LoongClawConfig;
+use super::ProviderErrorMode;
 use super::persistence::{format_provider_error_reply, persist_error_turns, persist_success_turns};
 use super::runtime::{ConversationRuntime, DefaultConversationRuntime};
 use super::turn_engine::{ProviderTurn, ToolIntent, TurnEngine, TurnResult};
-use super::ProviderErrorMode;
 
 #[derive(Default)]
 pub struct ConversationTurnLoop;
@@ -401,7 +401,9 @@ fn append_repeated_tool_guard_followup_messages(
 }
 
 fn build_tool_loop_guard_prompt(user_input: &str, reason: &str) -> String {
-    format!("{TOOL_LOOP_GUARD_PROMPT}\n\nLoop guard reason:\n{reason}\n\nOriginal request:\n{user_input}")
+    format!(
+        "{TOOL_LOOP_GUARD_PROMPT}\n\nLoop guard reason:\n{reason}\n\nOriginal request:\n{user_input}"
+    )
 }
 
 async fn request_completion_with_raw_fallback<R: ConversationRuntime + ?Sized>(

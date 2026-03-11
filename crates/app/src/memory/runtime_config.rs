@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 #[derive(Debug, Clone, Default)]
 pub struct MemoryRuntimeConfig {
     pub sqlite_path: Option<PathBuf>,
+    pub sliding_window: Option<usize>,
 }
 
 impl MemoryRuntimeConfig {
@@ -20,8 +21,18 @@ impl MemoryRuntimeConfig {
         let sqlite_path = std::env::var("LOONGCLAW_SQLITE_PATH")
             .ok()
             .map(PathBuf::from);
-        Self { sqlite_path }
+        let sliding_window_raw = std::env::var("LOONGCLAW_SLIDING_WINDOW").ok();
+        let sliding_window = parse_sliding_window(sliding_window_raw.as_deref());
+        Self {
+            sqlite_path,
+            sliding_window,
+        }
     }
+}
+
+fn parse_sliding_window(raw: Option<&str>) -> Option<usize> {
+    raw.and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
 }
 
 static MEMORY_RUNTIME_CONFIG: OnceLock<MemoryRuntimeConfig> = OnceLock::new();
@@ -50,19 +61,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn memory_runtime_config_default_has_no_path() {
-        let config = MemoryRuntimeConfig::default();
-        assert!(config.sqlite_path.is_none());
+    fn parse_sliding_window_accepts_positive_integer() {
+        assert_eq!(parse_sliding_window(Some("24")), Some(24));
     }
 
     #[test]
-    fn explicit_path_overrides_default() {
+    fn parse_sliding_window_rejects_zero_negative_and_invalid_values() {
+        assert_eq!(parse_sliding_window(Some("0")), None);
+        assert_eq!(parse_sliding_window(Some("-1")), None);
+        assert_eq!(parse_sliding_window(Some("invalid")), None);
+    }
+
+    #[test]
+    fn parse_sliding_window_returns_none_when_absent() {
+        assert_eq!(parse_sliding_window(None), None);
+    }
+
+    #[test]
+    fn memory_runtime_config_default_has_no_path() {
+        let config = MemoryRuntimeConfig::default();
+        assert!(config.sqlite_path.is_none());
+        assert!(config.sliding_window.is_none());
+    }
+
+    #[test]
+    fn explicit_config_overrides_default() {
         let config = MemoryRuntimeConfig {
             sqlite_path: Some(PathBuf::from("/tmp/test-memory.sqlite3")),
+            sliding_window: Some(24),
         };
         assert_eq!(
             config.sqlite_path,
             Some(PathBuf::from("/tmp/test-memory.sqlite3"))
         );
+        assert_eq!(config.sliding_window, Some(24));
     }
 }

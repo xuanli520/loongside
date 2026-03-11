@@ -4,11 +4,11 @@ use std::time::Duration;
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use kernel::{Capability, ConnectorCommand, LoongClawKernel, StaticPolicyEngine};
-use serde_json::{json, Value};
-use tokio::time::{sleep, Instant as TokioInstant};
+use serde_json::{Value, json};
+use tokio::time::{Instant as TokioInstant, sleep};
 
-use crate::spec_runtime::*;
 use crate::CliResult;
+use crate::spec_runtime::*;
 
 #[derive(Debug, Clone, Copy)]
 enum ProgrammaticErrorCode {
@@ -743,16 +743,15 @@ async fn execute_programmatic_batch_calls(
                         }
                     } else {
                         consecutive_successes = 0;
-                        if let Some(error_code) = failure_error_code.as_deref() {
-                            if should_reduce_programmatic_budget(concurrency, error_code)
-                                && current_budget > concurrency.min_in_flight
-                            {
-                                current_budget = current_budget
-                                    .saturating_sub(concurrency.adaptive_downshift_step)
-                                    .max(concurrency.min_in_flight);
-                                scheduler.budget_reductions =
-                                    scheduler.budget_reductions.saturating_add(1);
-                            }
+                        if let Some(error_code) = failure_error_code.as_deref()
+                            && should_reduce_programmatic_budget(concurrency, error_code)
+                            && current_budget > concurrency.min_in_flight
+                        {
+                            current_budget = current_budget
+                                .saturating_sub(concurrency.adaptive_downshift_step)
+                                .max(concurrency.min_in_flight);
+                            scheduler.budget_reductions =
+                                scheduler.budget_reductions.saturating_add(1);
                         }
                     }
                 }
@@ -760,10 +759,10 @@ async fn execute_programmatic_batch_calls(
             }
         }
 
-        if let Some(error) = first_error {
-            if !continue_on_error {
-                return Err(error);
-            }
+        if let Some(error) = first_error
+            && !continue_on_error
+        {
+            return Err(error);
         }
     } else {
         for call in prepared_calls {
@@ -1286,19 +1285,19 @@ pub async fn acquire_programmatic_circuit_slot(
     let now = TokioInstant::now();
 
     if entry.phase == ProgrammaticCircuitPhase::Open {
-        if let Some(until) = entry.open_until {
-            if until > now {
-                let remaining_ms = until.duration_since(now).as_millis();
-                let call_label = call_id
-                    .map(|id| format!(" call_id={id}"))
-                    .unwrap_or_default();
-                return Err(programmatic_error(
-                    ProgrammaticErrorCode::CircuitOpen,
-                    format!(
-                        "programmatic step {step_id}{call_label} connector {connector_name} is circuit-open (remaining_cooldown_ms={remaining_ms})"
-                    ),
-                ));
-            }
+        if let Some(until) = entry.open_until
+            && until > now
+        {
+            let remaining_ms = until.duration_since(now).as_millis();
+            let call_label = call_id
+                .map(|id| format!(" call_id={id}"))
+                .unwrap_or_default();
+            return Err(programmatic_error(
+                ProgrammaticErrorCode::CircuitOpen,
+                format!(
+                    "programmatic step {step_id}{call_label} connector {connector_name} is circuit-open (remaining_cooldown_ms={remaining_ms})"
+                ),
+            ));
         }
         entry.phase = ProgrammaticCircuitPhase::HalfOpen;
         entry.open_until = None;
