@@ -13,7 +13,9 @@ pub(crate) struct ScopedEnv {
 
 impl ScopedEnv {
     pub(crate) fn new() -> Self {
-        let guard = env_lock().lock().expect("env lock should not be poisoned");
+        let guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         Self {
             originals: Vec::new(),
             _guard: guard,
@@ -46,5 +48,27 @@ impl Drop for ScopedEnv {
                 None => std::env::remove_var(key),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ScopedEnv;
+
+    #[test]
+    fn scoped_env_recovers_after_mutex_poison() {
+        let panic_result = std::thread::spawn(|| {
+            let _env = ScopedEnv::new();
+            panic!("poison env lock for test");
+        })
+        .join();
+
+        assert!(panic_result.is_err(), "setup thread should poison the lock");
+
+        let recovery = std::panic::catch_unwind(ScopedEnv::new);
+        assert!(
+            recovery.is_ok(),
+            "ScopedEnv::new should recover from a poisoned env lock"
+        );
     }
 }
