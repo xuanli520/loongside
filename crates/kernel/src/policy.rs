@@ -187,8 +187,9 @@ impl PolicyEngine for StaticPolicyEngine {
         self.revoke_generation(below);
     }
 
-    fn check_tool_call(&self, request: &PolicyRequest) -> PolicyDecision {
-        default_tool_policy(request)
+    // Deprecated: Tool policy is now enforced via PolicyExtensionChain.
+    fn check_tool_call(&self, _request: &PolicyRequest) -> PolicyDecision {
+        PolicyDecision::Allow
     }
 }
 
