@@ -80,7 +80,11 @@ pub(crate) struct TurnTestHarness {
 
 impl TurnTestHarness {
     pub fn new() -> Self {
-        Self::with_capabilities(BTreeSet::from([Capability::InvokeTool]))
+        Self::with_capabilities(BTreeSet::from([
+            Capability::InvokeTool,
+            Capability::FilesystemRead,
+            Capability::FilesystemWrite,
+        ]))
     }
 
     pub fn with_capabilities(capabilities: BTreeSet<Capability>) -> Self {
@@ -91,7 +95,6 @@ impl TurnTestHarness {
 
         // Inject config so tests don't race on the global OnceLock
         let tool_config = ToolRuntimeConfig {
-            shell_allowlist: BTreeSet::from(["echo".to_owned(), "cat".to_owned(), "ls".to_owned()]),
             file_root: Some(temp_dir.clone()),
         };
 
@@ -113,10 +116,18 @@ impl TurnTestHarness {
             metadata: BTreeMap::new(),
         };
         kernel.register_pack(pack).expect("register pack");
-        kernel.register_core_tool_adapter(MvpToolAdapter::with_config(tool_config));
+        kernel.register_core_tool_adapter(MvpToolAdapter::with_config(tool_config.clone()));
         kernel
             .set_default_core_tool_adapter("mvp-tools")
             .expect("set default adapter");
+
+        // Register policy extensions for unified security enforcement.
+        kernel.register_policy_extension(
+            crate::tools::policy_ext::ToolPolicyExtension::default_rules(),
+        );
+        kernel.register_policy_extension(
+            crate::tools::file_policy_ext::FilePolicyExtension::new(tool_config.file_root),
+        );
 
         #[cfg(feature = "memory-sqlite")]
         {
@@ -337,13 +348,13 @@ mod tests {
         let result = harness.execute(&turn).await;
 
         match result {
-            TurnResult::ToolError(err) => {
+            TurnResult::ToolDenied(err) => {
                 assert!(
                     err.contains("escapes"),
                     "expected 'escapes' in error, got: {err}"
                 );
             }
-            other => panic!("expected ToolError with 'escapes', got: {other:?}"),
+            other => panic!("expected ToolDenied with 'escapes', got: {other:?}"),
         }
     }
 

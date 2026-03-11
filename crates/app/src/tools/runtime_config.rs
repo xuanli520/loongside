@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -8,7 +7,6 @@ use std::sync::OnceLock;
 /// process-wide singleton that is populated once at startup.
 #[derive(Debug, Clone, Default)]
 pub struct ToolRuntimeConfig {
-    pub shell_allowlist: BTreeSet<String>,
     pub file_root: Option<PathBuf>,
 }
 
@@ -16,21 +14,11 @@ impl ToolRuntimeConfig {
     /// Build a config by reading the legacy environment variables.
     ///
     /// Keeps full backward compatibility for callers that still rely on
-    /// `LOONGCLAW_SHELL_ALLOWLIST` / `LOONGCLAW_FILE_ROOT`.
+    /// `LOONGCLAW_FILE_ROOT`.
     pub fn from_env() -> Self {
-        let shell_allowlist = std::env::var("LOONGCLAW_SHELL_ALLOWLIST")
-            .ok()
-            .unwrap_or_else(|| "echo,cat,ls,pwd".to_owned())
-            .split([',', ';', ' '])
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(str::to_ascii_lowercase)
-            .collect();
-
         let file_root = std::env::var("LOONGCLAW_FILE_ROOT").ok().map(PathBuf::from);
 
         Self {
-            shell_allowlist,
             file_root,
         }
     }
@@ -64,39 +52,21 @@ mod tests {
     #[test]
     fn tool_runtime_config_from_env_defaults() {
         let config = ToolRuntimeConfig::default();
-        assert!(config.shell_allowlist.is_empty());
         assert!(config.file_root.is_none());
     }
 
     #[test]
-    fn shell_allowlist_uses_injected_config_not_env() {
-        // Build a ToolRuntimeConfig with an explicit allowlist that differs
-        // from any env var that might be set.
+    fn file_root_uses_injected_config() {
         let config = ToolRuntimeConfig {
-            shell_allowlist: BTreeSet::from(["git".to_owned(), "cargo".to_owned()]),
             file_root: Some(PathBuf::from("/tmp/test-root")),
         };
-        assert!(config.shell_allowlist.contains("git"));
-        assert!(config.shell_allowlist.contains("cargo"));
-        assert!(!config.shell_allowlist.contains("echo"));
         assert_eq!(config.file_root, Some(PathBuf::from("/tmp/test-root")));
-    }
-
-    #[test]
-    fn from_env_parses_default_allowlist() {
-        // When the env var is not set, from_env falls back to the hardcoded
-        // defaults: echo, cat, ls, pwd.
-        let config = ToolRuntimeConfig::from_env();
-        // We can't guarantee the env var is unset in all CI environments,
-        // but the parser itself should produce a non-empty set either way.
-        assert!(!config.shell_allowlist.is_empty());
     }
 
     #[cfg(feature = "tool-shell")]
     #[test]
     fn injected_config_overrides_global() {
         let config = ToolRuntimeConfig {
-            shell_allowlist: BTreeSet::from(["echo".to_owned()]),
             file_root: Some(PathBuf::from("/tmp/injected-root")),
         };
         let result = crate::tools::execute_tool_core_with_config(

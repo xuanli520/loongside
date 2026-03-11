@@ -12,7 +12,9 @@ pub(crate) const MAX_MEMORY_SLIDING_WINDOW: usize = 128;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolConfig {
-    #[serde(default = "default_shell_allowlist")]
+    /// Deprecated: shell policy is now enforced via PolicyExtensionChain.
+    /// Kept for config deserialization backward compatibility.
+    #[serde(default)]
     pub shell_allowlist: Vec<String>,
     #[serde(default)]
     pub file_root: Option<String>,
@@ -103,7 +105,7 @@ pub enum MemoryMode {
 impl Default for ToolConfig {
     fn default() -> Self {
         Self {
-            shell_allowlist: default_shell_allowlist(),
+            shell_allowlist: Vec::new(),
             file_root: None,
         }
     }
@@ -179,15 +181,6 @@ fn default_sqlite_path() -> String {
         .join(DEFAULT_SQLITE_FILE)
         .display()
         .to_string()
-}
-
-fn default_shell_allowlist() -> Vec<String> {
-    vec![
-        "echo".to_owned(),
-        "cat".to_owned(),
-        "ls".to_owned(),
-        "pwd".to_owned(),
-    ]
 }
 
 const fn default_sliding_window() -> usize {

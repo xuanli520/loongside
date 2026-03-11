@@ -279,7 +279,6 @@ mod tests {
         assert!(create_symlink(&outside_file, &link).is_ok());
 
         let config = ToolRuntimeConfig {
-            shell_allowlist: Default::default(),
             file_root: Some(root.clone()),
         };
         let error =
@@ -302,7 +301,6 @@ mod tests {
         assert!(create_symlink(&outside_dir, &link).is_ok());
 
         let config = ToolRuntimeConfig {
-            shell_allowlist: Default::default(),
             file_root: Some(root.clone()),
         };
         let request = ToolCoreRequest {
@@ -327,7 +325,6 @@ mod tests {
         fs::create_dir_all(&root).expect("create root");
 
         let config = ToolRuntimeConfig {
-            shell_allowlist: Default::default(),
             file_root: Some(root.clone()),
         };
         let request = ToolCoreRequest {

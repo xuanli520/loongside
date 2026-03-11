@@ -449,7 +449,6 @@ mod tests {
         );
 
         let config = runtime_config::ToolRuntimeConfig {
-            shell_allowlist: BTreeSet::new(),
             file_root: Some(root.clone()),
         };
         let outcome = execute_tool_core_with_config(
@@ -533,7 +532,6 @@ mod tests {
 
         let output_path = root.join("generated").join("loongclaw.toml");
         let config = runtime_config::ToolRuntimeConfig {
-            shell_allowlist: BTreeSet::new(),
             file_root: Some(root.clone()),
         };
         let outcome = execute_tool_core_with_config(
@@ -613,7 +611,6 @@ mod tests {
         );
 
         let config = runtime_config::ToolRuntimeConfig {
-            shell_allowlist: BTreeSet::new(),
             file_root: Some(root.clone()),
         };
         let outcome = execute_tool_core_with_config(
@@ -684,7 +681,6 @@ mod tests {
         );
 
         let config = runtime_config::ToolRuntimeConfig {
-            shell_allowlist: BTreeSet::new(),
             file_root: Some(root.clone()),
         };
         let outcome = execute_tool_core_with_config(
@@ -756,7 +752,6 @@ mod tests {
         );
 
         let config = runtime_config::ToolRuntimeConfig {
-            shell_allowlist: BTreeSet::new(),
             file_root: Some(root.clone()),
         };
         let outcome = execute_tool_core_with_config(
@@ -833,7 +828,6 @@ mod tests {
         fs::write(&output_path, &original_body).expect("write original config");
 
         let config = runtime_config::ToolRuntimeConfig {
-            shell_allowlist: BTreeSet::new(),
             file_root: Some(root.clone()),
         };
         let outcome = execute_tool_core_with_config(
@@ -918,7 +912,6 @@ mod tests {
         fs::write(&output_path, &original_body).expect("write original config");
 
         let config = runtime_config::ToolRuntimeConfig {
-            shell_allowlist: BTreeSet::new(),
             file_root: Some(root.clone()),
         };
         execute_tool_core_with_config(
