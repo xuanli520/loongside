@@ -93,7 +93,7 @@ impl RuntimePlane {
             .ok_or(RuntimePlaneError::CoreAdapterNotFound(resolved_name))?
             .clone();
 
-        adapter.execute_core(request).await
+        return adapter.execute_core(request).await;
     }
 
     pub async fn execute_extension(
@@ -122,6 +122,6 @@ impl RuntimePlane {
             .ok_or(RuntimePlaneError::CoreAdapterNotFound(resolved_core_name))?
             .clone();
 
-        extension.execute_extension(request, core.as_ref()).await
+        return extension.execute_extension(request, core.as_ref()).await;
     }
 }

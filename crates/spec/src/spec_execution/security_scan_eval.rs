@@ -1,13 +1,13 @@
 use std::{collections::BTreeSet, fs, path::PathBuf};
 
 use kernel::{PluginBridgeKind, PluginDescriptor, PluginScanReport};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use wasmparser::{Parser as WasmParser, Payload as WasmPayload};
 
 use crate::spec_runtime::{
-    is_process_command_allowed, SecurityFinding, SecurityFindingSeverity, SecurityScanSpec,
-    WasmSecurityScanSpec,
+    SecurityFinding, SecurityFindingSeverity, SecurityScanSpec, WasmSecurityScanSpec,
+    is_process_command_allowed,
 };
 
 use super::SecurityScanDelta;
@@ -467,20 +467,20 @@ fn scan_wasm_plugin_security(
         }
     };
 
-    if let Some(expected) = expected_sha256 {
-        if !expected.eq_ignore_ascii_case(&digest_hex) {
-            findings.push(build_security_finding(
-                SecurityFindingSeverity::High,
-                "wasm_sha256_mismatch",
-                descriptor.manifest.plugin_id.clone(),
-                descriptor.path.clone(),
-                "wasm sha256 does not match required pin",
-                json!({
-                    "expected_sha256": expected,
-                    "actual_sha256": digest_hex,
-                }),
-            ));
-        }
+    if let Some(expected) = expected_sha256
+        && !expected.eq_ignore_ascii_case(&digest_hex)
+    {
+        findings.push(build_security_finding(
+            SecurityFindingSeverity::High,
+            "wasm_sha256_mismatch",
+            descriptor.manifest.plugin_id.clone(),
+            descriptor.path.clone(),
+            "wasm sha256 does not match required pin",
+            json!({
+                "expected_sha256": expected,
+                "actual_sha256": digest_hex,
+            }),
+        ));
     }
 
     let imports = match parse_wasm_import_modules(&bytes) {

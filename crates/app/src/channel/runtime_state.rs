@@ -2,8 +2,8 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -11,7 +11,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tokio::{task::JoinHandle, time::sleep};
 
-use crate::{config::default_loongclaw_home, CliResult};
+use crate::{CliResult, config::default_loongclaw_home};
 
 use super::ChannelPlatform;
 
@@ -442,12 +442,11 @@ fn normalize_optional_account_value(value: Option<&str>) -> Option<String> {
 }
 
 fn write_runtime_state(path: &Path, state: &PersistedChannelOperationRuntime) -> CliResult<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).map_err(|error| {
-                format!("create channel runtime state directory failed: {error}")
-            })?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create channel runtime state directory failed: {error}"))?;
     }
     let encoded = serde_json::to_string_pretty(state)
         .map_err(|error| format!("serialize channel runtime state failed: {error}"))?;

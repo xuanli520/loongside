@@ -18,9 +18,9 @@ pub use conversation::{ConversationConfig, ConversationTurnLoopConfig};
 pub use provider::{ProviderConfig, ProviderKind, ReasoningEffort};
 #[allow(unused_imports)]
 pub use runtime::{
-    default_config_path, default_loongclaw_home, load, normalize_validation_locale,
-    supported_validation_locales, validate_file, validate_file_with_locale, write, write_template,
-    ConfigValidationDiagnostic, LoongClawConfig,
+    ConfigValidationDiagnostic, LoongClawConfig, default_config_path, default_loongclaw_home, load,
+    normalize_validation_locale, supported_validation_locales, validate_file,
+    validate_file_with_locale, write, write_template,
 };
 #[allow(unused_imports)]
 pub use shared::expand_path;
@@ -498,6 +498,31 @@ kind = "kimi_coding"
     }
 
     #[test]
+    fn config_validation_rejects_zero_memory_sliding_window() {
+        let mut config = LoongClawConfig::default();
+        config.memory.sliding_window = 0;
+
+        let error = config
+            .validate()
+            .expect_err("zero memory.sliding_window should be rejected");
+        assert!(error.contains("memory.sliding_window"));
+        assert!(error.contains("between 1 and 128"));
+    }
+
+    #[test]
+    fn config_validation_rejects_memory_sliding_window_above_adapter_cap() {
+        let mut config = LoongClawConfig::default();
+        config.memory.sliding_window = 129;
+
+        let error = config
+            .validate()
+            .expect_err("memory.sliding_window above adapter cap should be rejected");
+        assert!(error.contains("memory.sliding_window"));
+        assert!(error.contains("between 1 and 128"));
+        assert!(error.contains("129"));
+    }
+
+    #[test]
     fn config_validation_rejects_assignment_style_env_pointer() {
         let mut config = LoongClawConfig::default();
         config.provider.api_key_env = Some("OPENAI_API_KEY=sk-1234567890".to_owned());
@@ -778,10 +803,12 @@ max_followup_tool_payload_chars_total = 3200
         assert_eq!(config.safe_lane_event_sample_every, 1);
         assert!(config.safe_lane_event_adaptive_sampling);
         assert_eq!(config.safe_lane_event_adaptive_failure_threshold, 1);
-        assert!(config
-            .safe_lane_verify_deny_markers
-            .iter()
-            .any(|marker| marker == "tool_failure"));
+        assert!(
+            config
+                .safe_lane_verify_deny_markers
+                .iter()
+                .any(|marker| marker == "tool_failure")
+        );
         assert_eq!(config.safe_lane_replan_max_rounds, 1);
         assert_eq!(config.safe_lane_replan_max_node_attempts, 4);
         assert!(config.safe_lane_session_governor_enabled);
@@ -822,10 +849,12 @@ max_followup_tool_payload_chars_total = 3200
         assert_eq!(config.safe_lane_risk_threshold, 4);
         assert_eq!(config.safe_lane_complexity_threshold, 6);
         assert_eq!(config.fast_lane_max_input_chars, 400);
-        assert!(config
-            .high_risk_keywords
-            .iter()
-            .any(|keyword| keyword == "production"));
+        assert!(
+            config
+                .high_risk_keywords
+                .iter()
+                .any(|keyword| keyword == "production")
+        );
     }
 
     #[test]

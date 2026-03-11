@@ -126,7 +126,7 @@ impl PlanGraph {
                     return Err(format!(
                         "plan edge references unknown `to` node `{}`",
                         edge.to
-                    ))
+                    ));
                 }
             };
             if from_index == to_index {

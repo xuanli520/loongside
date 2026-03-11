@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -7,7 +7,7 @@ use loongclaw_kernel::{
     CoreMemoryAdapter, FixedClock, InMemoryAuditSink, LoongClawKernel, MemoryCoreOutcome,
     MemoryCoreRequest, StaticPolicyEngine, VerticalPackManifest,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::super::config::{
     CliChannelConfig, ConversationConfig, FeishuChannelConfig, LoongClawConfig, MemoryConfig,
@@ -21,10 +21,12 @@ use crate::KernelContext;
 
 struct FakeRuntime {
     seed_messages: Vec<Value>,
-    completion: Result<String, String>,
-    turn: Result<ProviderTurn, String>,
+    completion_responses: Mutex<VecDeque<Result<String, String>>>,
+    turn_responses: Mutex<VecDeque<Result<ProviderTurn, String>>>,
     persisted: Mutex<Vec<(String, String, String)>>,
     requested_messages: Mutex<Vec<Value>>,
+    turn_requested_messages: Mutex<Vec<Vec<Value>>>,
+    completion_requested_messages: Mutex<Vec<Vec<Value>>>,
     completion_calls: Mutex<usize>,
     turn_calls: Mutex<usize>,
 }
@@ -41,15 +43,7 @@ impl FakeRuntime {
                 })
             },
         );
-        Self {
-            seed_messages,
-            completion,
-            turn,
-            persisted: Mutex::new(Vec::new()),
-            requested_messages: Mutex::new(Vec::new()),
-            completion_calls: Mutex::new(0),
-            turn_calls: Mutex::new(0),
-        }
+        Self::with_turns_and_completions(seed_messages, vec![turn], vec![completion])
     }
 
     fn with_turn_and_completion(
@@ -57,12 +51,22 @@ impl FakeRuntime {
         turn: Result<ProviderTurn, String>,
         completion: Result<String, String>,
     ) -> Self {
+        Self::with_turns_and_completions(seed_messages, vec![turn], vec![completion])
+    }
+
+    fn with_turns_and_completions(
+        seed_messages: Vec<Value>,
+        turns: Vec<Result<ProviderTurn, String>>,
+        completions: Vec<Result<String, String>>,
+    ) -> Self {
         Self {
             seed_messages,
-            completion,
-            turn,
+            completion_responses: Mutex::new(VecDeque::from(completions)),
+            turn_responses: Mutex::new(VecDeque::from(turns)),
             persisted: Mutex::new(Vec::new()),
             requested_messages: Mutex::new(Vec::new()),
+            turn_requested_messages: Mutex::new(Vec::new()),
+            completion_requested_messages: Mutex::new(Vec::new()),
             completion_calls: Mutex::new(0),
             turn_calls: Mutex::new(0),
         }
@@ -89,7 +93,17 @@ impl ConversationRuntime for FakeRuntime {
         let mut calls = self.completion_calls.lock().expect("completion calls lock");
         *calls += 1;
         *self.requested_messages.lock().expect("request lock") = messages.to_vec();
-        self.completion.clone().map_err(|error| error.to_owned())
+        self.completion_requested_messages
+            .lock()
+            .expect("completion request lock")
+            .push(messages.to_vec());
+        drop(calls);
+        self.completion_responses
+            .lock()
+            .expect("completion response lock")
+            .pop_front()
+            .unwrap_or_else(|| Err("unexpected_completion_call".to_owned()))
+            .map_err(|error| error.to_owned())
     }
 
     async fn request_turn(
@@ -100,7 +114,17 @@ impl ConversationRuntime for FakeRuntime {
         let mut calls = self.turn_calls.lock().expect("turn calls lock");
         *calls += 1;
         *self.requested_messages.lock().expect("request lock") = messages.to_vec();
-        self.turn.clone().map_err(|error| error.to_owned())
+        self.turn_requested_messages
+            .lock()
+            .expect("turn request lock")
+            .push(messages.to_vec());
+        drop(calls);
+        self.turn_responses
+            .lock()
+            .expect("turn response lock")
+            .pop_front()
+            .unwrap_or_else(|| Err("unexpected_turn_call".to_owned()))
+            .map_err(|error| error.to_owned())
     }
 
     async fn persist_turn(
@@ -2309,7 +2333,7 @@ async fn turn_engine_tool_execution_error_is_marked_retryable() {
 
 #[test]
 fn kernel_error_classification_table_is_stable() {
-    use crate::conversation::turn_engine::{classify_kernel_error, KernelFailureClass};
+    use crate::conversation::turn_engine::{KernelFailureClass, classify_kernel_error};
     use loongclaw_contracts::{KernelError, PolicyError, RuntimePlaneError, ToolPlaneError};
 
     let policy_error = KernelError::Policy(PolicyError::ToolCallDenied {

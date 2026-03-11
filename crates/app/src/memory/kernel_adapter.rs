@@ -11,7 +11,7 @@ pub struct MvpMemoryAdapter {
 impl MvpMemoryAdapter {
     pub fn new() -> Self {
         Self {
-            config: MemoryRuntimeConfig::from_env(),
+            config: super::runtime_config::get_memory_runtime_config().clone(),
         }
     }
 

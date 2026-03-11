@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
-use crate::channel::{ChannelOutboundTarget, ChannelPlatform, ChannelSession};
 use crate::CliResult;
+use crate::channel::{ChannelOutboundTarget, ChannelPlatform, ChannelSession};
 
 use super::crypto::decrypt_payload_if_needed;
 use super::types::{FeishuInboundEvent, FeishuWebhookAction};

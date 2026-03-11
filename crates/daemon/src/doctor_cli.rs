@@ -59,15 +59,15 @@ pub(crate) async fn run_doctor_cli(options: DoctorCommandOptions) -> CliResult<(
         });
     } else {
         let mut hints = Vec::new();
-        if let Some(key) = config.provider.api_key_env.as_deref().map(str::trim) {
-            if !key.is_empty() {
-                hints.push(key.to_owned());
-            }
+        if let Some(key) = config.provider.api_key_env.as_deref().map(str::trim)
+            && !key.is_empty()
+        {
+            hints.push(key.to_owned());
         }
-        if let Some(default_key) = config.provider.kind.default_api_key_env() {
-            if !hints.iter().any(|existing| existing == default_key) {
-                hints.push(default_key.to_owned());
-            }
+        if let Some(default_key) = config.provider.kind.default_api_key_env()
+            && !hints.iter().any(|existing| existing == default_key)
+        {
+            hints.push(default_key.to_owned());
         }
         let detail = if hints.is_empty() {
             "provider credentials are missing".to_owned()
@@ -306,13 +306,13 @@ fn build_channel_surface_checks(
                 detail: operation.detail.clone(),
             });
 
-            if let Some(runtime_name) = spec.runtime_name {
-                if operation.health == mvp::channel::ChannelOperationHealth::Ready {
-                    checks.push(build_channel_runtime_check(
-                        scoped_doctor_check_name(runtime_name, snapshot, scoped).as_str(),
-                        operation,
-                    ));
-                }
+            if let Some(runtime_name) = spec.runtime_name
+                && operation.health == mvp::channel::ChannelOperationHealth::Ready
+            {
+                checks.push(build_channel_runtime_check(
+                    scoped_doctor_check_name(runtime_name, snapshot, scoped).as_str(),
+                    operation,
+                ));
             }
         }
     }
@@ -372,14 +372,8 @@ fn build_channel_runtime_check(
 
     let detail_tail = format!(
         "account={} account_id={} pid={} busy={} active_runs={} instance_count={} running_instances={} stale_instances={} last_run_activity_at={} last_heartbeat_at={}",
-        runtime
-            .account_label
-            .as_deref()
-            .unwrap_or("-"),
-        runtime
-            .account_id
-            .as_deref()
-            .unwrap_or("-"),
+        runtime.account_label.as_deref().unwrap_or("-"),
+        runtime.account_id.as_deref().unwrap_or("-"),
         runtime
             .pid
             .map(|value| value.to_string())
@@ -443,14 +437,12 @@ fn maybe_apply_provider_env_fix(
         .map(str::trim)
         .unwrap_or("")
         .is_empty()
+        && let Some(default_key) = config.provider.kind.default_api_key_env()
+        && fix
     {
-        if let Some(default_key) = config.provider.kind.default_api_key_env() {
-            if fix {
-                config.provider.api_key_env = Some(default_key.to_owned());
-                fixes.push(format!("set provider.api_key_env={default_key}"));
-                changed = true;
-            }
-        }
+        config.provider.api_key_env = Some(default_key.to_owned());
+        fixes.push(format!("set provider.api_key_env={default_key}"));
+        changed = true;
     }
     changed
 }
@@ -853,12 +845,16 @@ mod tests {
 
         let checks = build_channel_surface_checks(&snapshots);
 
-        assert!(checks
-            .iter()
-            .any(|check| check.name == "telegram channel [ops]"));
-        assert!(checks
-            .iter()
-            .any(|check| check.name == "telegram channel runtime [personal]"));
+        assert!(
+            checks
+                .iter()
+                .any(|check| check.name == "telegram channel [ops]")
+        );
+        assert!(
+            checks
+                .iter()
+                .any(|check| check.name == "telegram channel runtime [personal]")
+        );
     }
 
     #[test]

@@ -2,12 +2,11 @@ use std::time::Duration;
 
 use kernel::ConnectorCommand;
 use reqwest::Method;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::{
-    authorize_connector_protocol_context, http_json_runtime_evidence,
-    parse_http_enforce_protocol_contract, parse_http_timeout_ms, ConnectorProtocolContext,
-    HttpJsonRuntimeEvidenceKind,
+    ConnectorProtocolContext, HttpJsonRuntimeEvidenceKind, authorize_connector_protocol_context,
+    http_json_runtime_evidence, parse_http_enforce_protocol_contract, parse_http_timeout_ms,
 };
 
 #[allow(clippy::indexing_slicing)] // serde_json::Value string-keyed IndexMut is infallible

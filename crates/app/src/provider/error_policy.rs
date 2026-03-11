@@ -38,14 +38,13 @@ pub(super) fn validate_provider_configuration(config: &LoongClawConfig) -> CliRe
         );
     }
 
-    if config.provider.kind == ProviderKind::KimiCoding {
-        if let Some(user_agent) = config.provider.header_value("user-agent") {
-            if !is_kimi_cli_user_agent(user_agent) {
-                return Err(format!(
-                    "kimi_coding provider requires a `User-Agent` header starting with `KimiCLI/`; got `{user_agent}`"
-                ));
-            }
-        }
+    if config.provider.kind == ProviderKind::KimiCoding
+        && let Some(user_agent) = config.provider.header_value("user-agent")
+        && !is_kimi_cli_user_agent(user_agent)
+    {
+        return Err(format!(
+            "kimi_coding provider requires a `User-Agent` header starting with `KimiCLI/`; got `{user_agent}`"
+        ));
     }
 
     Ok(())

@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::CliResult;
 
 use super::shared::{
-    read_secret_prefer_inline, validate_env_pointer_field, ConfigValidationCode,
-    ConfigValidationIssue, EnvPointerValidationHint,
+    ConfigValidationCode, ConfigValidationIssue, EnvPointerValidationHint,
+    read_secret_prefer_inline, validate_env_pointer_field,
 };
 
 const TELEGRAM_BOT_TOKEN_ENV: &str = "TELEGRAM_BOT_TOKEN";
@@ -1010,13 +1010,14 @@ fn resolve_default_configured_account_selection_from_ids(
     preferred: Option<&str>,
     fallback: &str,
 ) -> ChannelDefaultAccountSelection {
-    if let Some(preferred) = normalize_optional_account_id(preferred) {
-        if !ids.is_empty() && ids.iter().any(|value| value == &preferred) {
-            return ChannelDefaultAccountSelection {
-                id: preferred,
-                source: ChannelDefaultAccountSelectionSource::ExplicitDefault,
-            };
-        }
+    if let Some(preferred) = normalize_optional_account_id(preferred)
+        && !ids.is_empty()
+        && ids.iter().any(|value| value == &preferred)
+    {
+        return ChannelDefaultAccountSelection {
+            id: preferred,
+            source: ChannelDefaultAccountSelectionSource::ExplicitDefault,
+        };
     }
     if ids.is_empty() {
         return ChannelDefaultAccountSelection {

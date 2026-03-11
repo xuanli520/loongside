@@ -31,6 +31,8 @@ Non-negotiable: no dependency cycles. See [Core Beliefs](docs/design-docs/core-b
 
 - Format check: `cargo fmt --all -- --check`
 - Strict lint: `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- Architecture check: `task check:architecture`
+- Convention check: `task check:conventions`
 - Test all features: `cargo test --workspace --all-features`
 - Canonical verify: `task verify`
 - Extended verify: `task verify:full`
@@ -60,7 +62,8 @@ CI enforces:
 cp scripts/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
 ```
 
-Runs fmt + clippy before each commit, matching CI exactly.
+Runs CI-parity cargo checks before each commit.
+Use `task verify` for the stricter local superset (architecture, conventions, docs, deny).
 
 ## 7. Where to Look Next
 

@@ -12,7 +12,7 @@ These are the golden principles for anyone — agent or human — working in thi
 
 5. **7-crate DAG, no cycles** — keep dependency direction strictly acyclic: `contracts -> kernel`; `app -> {contracts, kernel}`; `protocol` remains a foundation crate used by `spec`; `spec -> {kernel, protocol}`; `bench -> {kernel, spec}`; `daemon -> {kernel, app, spec, bench}`. Dependency direction is non-negotiable. See [Layered Kernel Design](layered-kernel-design.md).
 
-6. **Tests are the contract** — if a behavior isn't tested, it doesn't exist. All tests pass at every commit, enforced by the pre-commit hook.
+6. **Tests are the contract** — if a behavior isn't tested, it doesn't exist. All CI-parity tests pass at every commit, enforced by CI and checked locally by `scripts/pre-commit` when installed.
 
 7. **Boring technology preferred** — choose well-understood, composable dependencies that agents can reason about from repo context alone. Reimplement small utilities rather than pulling in opaque upstream packages.
 

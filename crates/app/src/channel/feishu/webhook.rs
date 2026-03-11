@@ -4,22 +4,22 @@ use std::{
 };
 
 use axum::{
+    Json,
     body::Bytes,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    Json,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
+use crate::KernelContext;
 use crate::channel::{
-    process_inbound_with_provider, runtime_state::ChannelOperationRuntimeTracker, ChannelAdapter,
-    ChannelInboundMessage,
+    ChannelAdapter, ChannelInboundMessage, process_inbound_with_provider,
+    runtime_state::ChannelOperationRuntimeTracker,
 };
 use crate::config::{LoongClawConfig, ResolvedFeishuChannelConfig};
-use crate::KernelContext;
 
 use super::adapter::FeishuAdapter;
 use super::payload::FeishuWebhookAction;

@@ -2,8 +2,8 @@ use std::fs;
 
 use serde_json::Value;
 
-use crate::spec_runtime::*;
 use crate::BUNDLED_APPROVAL_RISK_PROFILE;
+use crate::spec_runtime::*;
 
 pub(super) fn evaluate_approval_guard(spec: &RunnerSpec) -> ApprovalDecisionReport {
     let policy = spec.approval.clone().unwrap_or_default();

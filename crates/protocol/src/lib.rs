@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
-use tokio::io::{stdin, stdout, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::sync::{mpsc, Mutex};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, stdin, stdout};
+use tokio::sync::{Mutex, mpsc};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransportInfo {
@@ -346,14 +346,14 @@ impl Transport for ChannelTransport {
             .cloned()
             .ok_or(TransportError::Closed)?;
 
-        sender
+        return sender
             .send(InboundFrame {
                 method: frame.method,
                 id: frame.id,
                 payload: frame.payload,
             })
             .await
-            .map_err(|_err| TransportError::Closed)
+            .map_err(|_err| TransportError::Closed);
     }
 
     async fn recv(&self) -> Result<Option<InboundFrame>, TransportError> {
@@ -465,7 +465,7 @@ where
 mod tests {
     use super::*;
     use std::time::Duration;
-    use tokio::io::{duplex, split, AsyncWriteExt};
+    use tokio::io::{AsyncWriteExt, duplex, split};
     use tokio::time::{sleep, timeout};
 
     fn test_transport_info(name: &str) -> TransportInfo {

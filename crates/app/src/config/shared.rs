@@ -46,6 +46,7 @@ pub(super) enum ConfigValidationCode {
     PercentWrapped,
     SecretLiteral,
     InvalidName,
+    NumericRange,
     DuplicateChannelAccountId,
     UnknownChannelDefaultAccount,
 }
@@ -58,6 +59,7 @@ impl ConfigValidationCode {
             ConfigValidationCode::PercentWrapped => "config.env_pointer.percent_wrapped",
             ConfigValidationCode::SecretLiteral => "config.env_pointer.secret_literal",
             ConfigValidationCode::InvalidName => "config.env_pointer.invalid_name",
+            ConfigValidationCode::NumericRange => "config.numeric_range",
             ConfigValidationCode::DuplicateChannelAccountId => {
                 "config.channel_account.duplicate_id"
             }
@@ -84,6 +86,7 @@ impl ConfigValidationCode {
             ConfigValidationCode::InvalidName => {
                 "urn:loongclaw:problem:config.env_pointer.invalid_name"
             }
+            ConfigValidationCode::NumericRange => "urn:loongclaw:problem:config.numeric_range",
             ConfigValidationCode::DuplicateChannelAccountId => {
                 "urn:loongclaw:problem:config.channel_account.duplicate_id"
             }
@@ -100,6 +103,7 @@ impl ConfigValidationCode {
             ConfigValidationCode::PercentWrapped => "config.env_pointer.percent_wrapped.title",
             ConfigValidationCode::SecretLiteral => "config.env_pointer.secret_literal.title",
             ConfigValidationCode::InvalidName => "config.env_pointer.invalid_name.title",
+            ConfigValidationCode::NumericRange => "config.numeric_range.title",
             ConfigValidationCode::DuplicateChannelAccountId => {
                 "config.channel_account.duplicate_id.title"
             }
@@ -126,6 +130,7 @@ impl ConfigValidationCode {
             ConfigValidationCode::PercentWrapped => "Percent-Wrapped Env Pointer Notation",
             ConfigValidationCode::SecretLiteral => "Secret Literal Used In Env Pointer",
             ConfigValidationCode::InvalidName => "Invalid Env Pointer Name",
+            ConfigValidationCode::NumericRange => "Config Value Out Of Range",
             ConfigValidationCode::DuplicateChannelAccountId => {
                 "Duplicate Normalized Channel Account ID"
             }
@@ -149,6 +154,9 @@ impl ConfigValidationCode {
             }
             ConfigValidationCode::InvalidName => {
                 "[{code}] {field_path} is not a valid environment variable name reference. use `{field_path}` with a name like `{example_env_name}`"
+            }
+            ConfigValidationCode::NumericRange => {
+                "[{code}] {field_path} must be between {min} and {max}; got {actual_value}"
             }
             ConfigValidationCode::DuplicateChannelAccountId => {
                 "[{code}] {field_path} contains duplicate configured accounts that normalize to `{normalized_account_id}`: {raw_account_labels}. rename one of the account keys so each normalized account id is unique"
@@ -249,6 +257,7 @@ const EN_VALIDATION_MESSAGE_CATALOG: &[ConfigValidationCatalogEntry] = &[
         "config.env_pointer.invalid_name.title",
         "Invalid Env Pointer Name",
     ),
+    ConfigValidationCatalogEntry::new("config.numeric_range.title", "Config Value Out Of Range"),
     ConfigValidationCatalogEntry::new(
         "config.channel_account.duplicate_id.title",
         "Duplicate Normalized Channel Account ID",
@@ -276,6 +285,10 @@ const EN_VALIDATION_MESSAGE_CATALOG: &[ConfigValidationCatalogEntry] = &[
     ConfigValidationCatalogEntry::new(
         "config.env_pointer.invalid_name",
         "[{code}] {field_path} is not a valid environment variable name reference. use `{field_path}` with a name like `{example_env_name}`",
+    ),
+    ConfigValidationCatalogEntry::new(
+        "config.numeric_range",
+        "[{code}] {field_path} must be between {min} and {max}; got {actual_value}",
     ),
     ConfigValidationCatalogEntry::new(
         "config.channel_account.duplicate_id",
@@ -332,8 +345,17 @@ pub(super) fn format_config_validation_issues_with_locale(
 }
 
 fn get_user_home() -> PathBuf {
-    env::var_os("HOME")
-        .or_else(|| env::var_os("USERPROFILE"))
+    resolve_user_home(
+        env::var_os("HOME").as_deref(),
+        env::var_os("USERPROFILE").as_deref(),
+    )
+}
+
+fn resolve_user_home(
+    home: Option<&std::ffi::OsStr>,
+    userprofile: Option<&std::ffi::OsStr>,
+) -> PathBuf {
+    home.or(userprofile)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
 }
@@ -428,6 +450,31 @@ pub(super) fn validate_env_pointer_field(
     }
 
     Ok(())
+}
+
+pub(super) fn validate_numeric_range(
+    field_path: &str,
+    actual_value: usize,
+    min: usize,
+    max: usize,
+) -> Result<(), Box<ConfigValidationIssue>> {
+    if (min..=max).contains(&actual_value) {
+        return Ok(());
+    }
+
+    let mut extra_message_variables = BTreeMap::new();
+    extra_message_variables.insert("actual_value".to_owned(), actual_value.to_string());
+    extra_message_variables.insert("min".to_owned(), min.to_string());
+    extra_message_variables.insert("max".to_owned(), max.to_string());
+
+    Err(Box::new(ConfigValidationIssue {
+        code: ConfigValidationCode::NumericRange,
+        field_path: field_path.to_owned(),
+        inline_field_path: field_path.to_owned(),
+        example_env_name: String::new(),
+        suggested_env_name: None,
+        extra_message_variables,
+    }))
 }
 
 fn looks_like_secret_literal(raw: &str, detect_telegram_token_shape: bool) -> bool {
@@ -610,44 +657,41 @@ mod tests {
         );
     }
 
-    /// Deterministic regression test for `get_user_home()` covering three
-    /// scenarios sequentially in a single test to avoid env-var races with
-    /// parallel test threads:
-    ///
-    /// 1. Real OS — at least one of HOME/USERPROFILE is set → not "."
-    /// 2. Only USERPROFILE set → should return USERPROFILE value
-    /// 3. Neither HOME nor USERPROFILE set → should return "."
+    #[test]
+    fn numeric_range_validation_reports_actual_and_bounds() {
+        let issue = validate_numeric_range("memory.sliding_window", 129, 1, 128)
+            .expect_err("out-of-range values should be rejected");
+        let rendered = issue.render(ConfigValidationLocale::En);
+        assert!(rendered.contains("memory.sliding_window"));
+        assert!(rendered.contains("between 1 and 128"));
+        assert!(rendered.contains("129"));
+    }
+
+    /// Deterministic regression test for the user-home fallback logic without
+    /// mutating process-global environment variables.
     #[test]
     fn get_user_home_deterministic_fallback_scenarios() {
-        use crate::test_support::ScopedEnv;
-
-        // Scenario 1: real OS should have at least one var set
-        let home_on_real_os = get_user_home();
-        assert_ne!(
-            home_on_real_os,
-            PathBuf::from("."),
-            "get_user_home() should resolve to a real directory, not \".\""
-        );
-
-        let synthetic = PathBuf::from(if cfg!(windows) {
+        let home = if cfg!(windows) {
+            PathBuf::from(r"C:\Users\loongclaw-test-home")
+        } else {
+            PathBuf::from("/tmp/loongclaw-test-home")
+        };
+        let userprofile = PathBuf::from(if cfg!(windows) {
             r"C:\Users\loongclaw-test-synthetic"
         } else {
             "/tmp/loongclaw-test-synthetic"
         });
 
-        let mut env_guard = ScopedEnv::new();
-
-        // Scenario 2: HOME absent, USERPROFILE present → returns USERPROFILE
-        env_guard.remove("HOME");
-        env_guard.set("USERPROFILE", &synthetic);
-        let result_userprofile = get_user_home();
-
-        // Scenario 3: both absent → returns "."
-        env_guard.remove("USERPROFILE");
-        let result_dot = get_user_home();
+        let result_home = resolve_user_home(Some(home.as_os_str()), Some(userprofile.as_os_str()));
+        let result_userprofile = resolve_user_home(None, Some(userprofile.as_os_str()));
+        let result_dot = resolve_user_home(None, None);
 
         assert_eq!(
-            result_userprofile, synthetic,
+            result_home, home,
+            "resolve_user_home() should prefer HOME when both values are present"
+        );
+        assert_eq!(
+            result_userprofile, userprofile,
             "get_user_home() should fall back to USERPROFILE when HOME is absent"
         );
         assert_eq!(

@@ -315,10 +315,12 @@ mod tests {
             .expect("awareness snapshot should succeed");
 
         assert!(snapshot.architecture_guard.has_denials());
-        assert!(snapshot
-            .architecture_guard
-            .denied_paths
-            .contains(&"crates/kernel/src/kernel.rs".to_owned()));
+        assert!(
+            snapshot
+                .architecture_guard
+                .denied_paths
+                .contains(&"crates/kernel/src/kernel.rs".to_owned())
+        );
     }
 
     #[test]

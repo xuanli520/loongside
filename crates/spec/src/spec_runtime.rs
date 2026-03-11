@@ -22,16 +22,16 @@ use kernel::{
 };
 use loongclaw_protocol::{OutboundFrame, ProtocolRouter, RouteAuthorizationRequest};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::time::{sleep, Instant as TokioInstant};
+use tokio::time::{Instant as TokioInstant, sleep};
 use wasmtime::{
     Config as WasmtimeConfig, Engine as WasmtimeEngine, Linker as WasmtimeLinker,
     Module as WasmtimeModule, Store as WasmtimeStore,
 };
 
-use crate::spec_execution::{normalize_path_for_policy, resolve_plugin_relative_path};
 use crate::WEBHOOK_TEST_RETRY_STATE;
+use crate::spec_execution::{normalize_path_for_policy, resolve_plugin_relative_path};
 
 mod http_json_bridge;
 mod process_stdio_bridge;
@@ -39,14 +39,14 @@ mod wasm_cache;
 mod wasm_runtime_policy;
 pub use http_json_bridge::execute_http_json_bridge;
 pub use process_stdio_bridge::{
-    execute_process_stdio_bridge, run_process_stdio_json_line_exchange, ProcessStdioExchangeOutcome,
+    ProcessStdioExchangeOutcome, execute_process_stdio_bridge, run_process_stdio_json_line_exchange,
 };
 #[cfg(test)]
 use wasm_cache::WasmModuleCache;
 use wasm_cache::{
-    build_wasm_module_cache_key, insert_cached_wasm_module, lookup_cached_wasm_module,
-    modified_unix_nanos, wasm_artifact_file_identity, wasm_module_cache_capacity,
-    wasm_module_cache_max_bytes, CachedWasmModule, WasmArtifactFileIdentity,
+    CachedWasmModule, WasmArtifactFileIdentity, build_wasm_module_cache_key,
+    insert_cached_wasm_module, lookup_cached_wasm_module, modified_unix_nanos,
+    wasm_artifact_file_identity, wasm_module_cache_capacity, wasm_module_cache_max_bytes,
 };
 use wasm_runtime_policy::wasm_signals_based_traps_enabled_from_env;
 
@@ -1540,12 +1540,12 @@ fn resolve_expected_wasm_sha256(
         None
     };
 
-    if let (Some(metadata_pin), Some(policy_pin)) = (metadata_pin.as_ref(), policy_pin.as_ref()) {
-        if metadata_pin != policy_pin {
-            return Err(format!(
-                "conflicting wasm sha256 pins for plugin `{plugin_id}` between provider metadata and security_scan.wasm.required_sha256_by_plugin"
-            ));
-        }
+    if let (Some(metadata_pin), Some(policy_pin)) = (metadata_pin.as_ref(), policy_pin.as_ref())
+        && metadata_pin != policy_pin
+    {
+        return Err(format!(
+            "conflicting wasm sha256 pins for plugin `{plugin_id}` between provider metadata and security_scan.wasm.required_sha256_by_plugin"
+        ));
     }
 
     let resolved_pin = policy_pin.or(metadata_pin);
@@ -1701,21 +1701,21 @@ pub fn execute_wasm_component_bridge(
         return execution;
     }
 
-    if let Some(limit) = runtime_policy.wasm_max_component_bytes {
-        if module_size_bytes > limit {
-            execution["status"] = Value::String("blocked".to_owned());
-            execution["reason"] = Value::String(format!(
-                "wasm artifact size {} exceeds runtime max_component_bytes {limit}",
-                module_size_bytes
-            ));
-            execution["runtime"] = json!({
-                "executor": "wasmtime_module",
-                "artifact_path": artifact_path.display().to_string(),
-                "module_size_bytes": module_size_bytes,
-                "max_component_bytes": limit,
-            });
-            return execution;
-        }
+    if let Some(limit) = runtime_policy.wasm_max_component_bytes
+        && module_size_bytes > limit
+    {
+        execution["status"] = Value::String("blocked".to_owned());
+        execution["reason"] = Value::String(format!(
+            "wasm artifact size {} exceeds runtime max_component_bytes {limit}",
+            module_size_bytes
+        ));
+        execution["runtime"] = json!({
+            "executor": "wasmtime_module",
+            "artifact_path": artifact_path.display().to_string(),
+            "module_size_bytes": module_size_bytes,
+            "max_component_bytes": limit,
+        });
+        return execution;
     }
 
     let export_name = resolve_wasm_export_name(provider);
@@ -1789,21 +1789,21 @@ pub fn execute_wasm_component_bridge(
             let module_bytes = artifact_bytes.bytes;
 
             module_size_bytes = module_bytes.len();
-            if let Some(limit) = runtime_policy.wasm_max_component_bytes {
-                if module_size_bytes > limit {
-                    execution["status"] = Value::String("blocked".to_owned());
-                    execution["reason"] = Value::String(format!(
-                        "wasm artifact size {} exceeds runtime max_component_bytes {limit}",
-                        module_size_bytes
-                    ));
-                    execution["runtime"] = json!({
-                        "executor": "wasmtime_module",
-                        "artifact_path": artifact_path.display().to_string(),
-                        "module_size_bytes": module_size_bytes,
-                        "max_component_bytes": limit,
-                    });
-                    return execution;
-                }
+            if let Some(limit) = runtime_policy.wasm_max_component_bytes
+                && module_size_bytes > limit
+            {
+                execution["status"] = Value::String("blocked".to_owned());
+                execution["reason"] = Value::String(format!(
+                    "wasm artifact size {} exceeds runtime max_component_bytes {limit}",
+                    module_size_bytes
+                ));
+                execution["runtime"] = json!({
+                    "executor": "wasmtime_module",
+                    "artifact_path": artifact_path.display().to_string(),
+                    "module_size_bytes": module_size_bytes,
+                    "max_component_bytes": limit,
+                });
+                return execution;
             }
 
             let artifact_sha256 = if let Some(expected) = expected_sha256.as_deref() {
@@ -2086,10 +2086,10 @@ pub fn resolve_wasm_export_name(provider: &kernel::ProviderConfig) -> String {
 }
 
 pub fn parse_process_args(provider: &kernel::ProviderConfig) -> Vec<String> {
-    if let Some(args_json) = provider.metadata.get("args_json") {
-        if let Ok(args) = serde_json::from_str::<Vec<String>>(args_json) {
-            return args;
-        }
+    if let Some(args_json) = provider.metadata.get("args_json")
+        && let Ok(args) = serde_json::from_str::<Vec<String>>(args_json)
+    {
+        return args;
     }
 
     provider
@@ -2102,13 +2102,13 @@ pub fn parse_process_args(provider: &kernel::ProviderConfig) -> Vec<String> {
 pub fn provider_allowed_callers(provider: &kernel::ProviderConfig) -> BTreeSet<String> {
     let mut allowed = BTreeSet::new();
 
-    if let Some(raw_json) = provider.metadata.get("allowed_callers_json") {
-        if let Ok(values) = serde_json::from_str::<Vec<String>>(raw_json) {
-            for value in values {
-                let normalized = value.trim().to_ascii_lowercase();
-                if !normalized.is_empty() {
-                    allowed.insert(normalized);
-                }
+    if let Some(raw_json) = provider.metadata.get("allowed_callers_json")
+        && let Ok(values) = serde_json::from_str::<Vec<String>>(raw_json)
+    {
+        for value in values {
+            let normalized = value.trim().to_ascii_lowercase();
+            if !normalized.is_empty() {
+                allowed.insert(normalized);
             }
         }
     }
@@ -2168,10 +2168,10 @@ pub fn detect_provider_bridge_kind(
     provider: &kernel::ProviderConfig,
     endpoint: &str,
 ) -> PluginBridgeKind {
-    if let Some(raw) = provider.metadata.get("bridge_kind") {
-        if let Some(kind) = parse_bridge_kind_label(raw) {
-            return kind;
-        }
+    if let Some(raw) = provider.metadata.get("bridge_kind")
+        && let Some(kind) = parse_bridge_kind_label(raw)
+    {
+        return kind;
     }
 
     if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
@@ -2496,16 +2496,15 @@ mod tests {
     };
 
     use super::wasm_runtime_policy::{
-        default_wasm_signals_based_traps, parse_wasm_module_cache_capacity,
-        parse_wasm_module_cache_max_bytes, parse_wasm_signals_based_traps,
         DEFAULT_WASM_MODULE_CACHE_CAPACITY, DEFAULT_WASM_MODULE_CACHE_MAX_BYTES,
         MAX_WASM_MODULE_CACHE_CAPACITY, MAX_WASM_MODULE_CACHE_MAX_BYTES,
-        MIN_WASM_MODULE_CACHE_MAX_BYTES,
+        MIN_WASM_MODULE_CACHE_MAX_BYTES, default_wasm_signals_based_traps,
+        parse_wasm_module_cache_capacity, parse_wasm_module_cache_max_bytes,
+        parse_wasm_signals_based_traps,
     };
     use super::{
-        build_wasm_module_cache_key, compile_wasm_module, normalize_sha256_pin,
-        resolve_expected_wasm_sha256, wasm_artifact_file_identity, BridgeRuntimePolicy,
-        WasmModuleCache,
+        BridgeRuntimePolicy, WasmModuleCache, build_wasm_module_cache_key, compile_wasm_module,
+        normalize_sha256_pin, resolve_expected_wasm_sha256, wasm_artifact_file_identity,
     };
 
     const EMPTY_WASM_MODULE: [u8; 8] = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];

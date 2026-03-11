@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::time::sleep;
 
 use crate::CliResult;
@@ -22,9 +22,9 @@ use error_policy::{
 };
 use model_selection::{fetch_available_models_with_policy, resolve_request_models};
 use payload_adaptation::{
-    adapt_payload_mode_for_error, build_completion_request_body, build_turn_request_body,
-    parse_provider_api_error, should_disable_tool_schema_for_error, should_try_next_model_on_error,
-    CompletionPayloadMode,
+    CompletionPayloadMode, adapt_payload_mode_for_error, build_completion_request_body,
+    build_turn_request_body, parse_provider_api_error, should_disable_tool_schema_for_error,
+    should_try_next_model_on_error,
 };
 
 pub use shape::extract_provider_turn;
@@ -101,6 +101,7 @@ pub fn load_memory_window_messages(
     {
         let mem_config = super::memory::runtime_config::MemoryRuntimeConfig {
             sqlite_path: Some(config.memory.resolved_sqlite_path()),
+            sliding_window: Some(config.memory.sliding_window),
         };
         let turns = memory::window_direct(session_id, config.memory.sliding_window, &mem_config)
             .map_err(|error| format!("load memory window failed: {error}"))?;
@@ -277,12 +278,11 @@ async fn request_completion_with_model(
                 let api_error = parse_provider_api_error(&response_body);
                 if let Some(next_mode) =
                     adapt_payload_mode_for_error(payload_mode, &config.provider, &api_error)
+                    && !tried_payload_modes.contains(&next_mode)
                 {
-                    if !tried_payload_modes.contains(&next_mode) {
-                        payload_mode = next_mode;
-                        tried_payload_modes.push(next_mode);
-                        continue;
-                    }
+                    payload_mode = next_mode;
+                    tried_payload_modes.push(next_mode);
+                    continue;
                 }
 
                 let status_code = status.as_u16();
@@ -402,12 +402,11 @@ async fn request_turn_with_model(
                 }
                 if let Some(next_mode) =
                     adapt_payload_mode_for_error(payload_mode, &config.provider, &api_error)
+                    && !tried_payload_modes.contains(&next_mode)
                 {
-                    if !tried_payload_modes.contains(&next_mode) {
-                        payload_mode = next_mode;
-                        tried_payload_modes.push(next_mode);
-                        continue;
-                    }
+                    payload_mode = next_mode;
+                    tried_payload_modes.push(next_mode);
+                    continue;
                 }
 
                 let status_code = status.as_u16();
@@ -551,6 +550,7 @@ mod tests {
             .to_string();
         let memory_config = crate::memory::runtime_config::MemoryRuntimeConfig {
             sqlite_path: Some(config.memory.resolved_sqlite_path()),
+            sliding_window: Some(config.memory.sliding_window),
         };
         crate::memory::append_turn_direct(&session_id, "user", "hello", &memory_config)
             .expect("persist user turn");
@@ -632,6 +632,7 @@ mod tests {
             .to_string();
         let memory_config = crate::memory::runtime_config::MemoryRuntimeConfig {
             sqlite_path: Some(config.memory.resolved_sqlite_path()),
+            sliding_window: Some(config.memory.sliding_window),
         };
         crate::memory::append_turn_direct(&session_id, "user", "hello", &memory_config)
             .expect("persist user turn");

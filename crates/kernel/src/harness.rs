@@ -60,6 +60,6 @@ impl HarnessBroker {
             });
         }
 
-        adapter.execute(request).await
+        return adapter.execute(request).await;
     }
 }

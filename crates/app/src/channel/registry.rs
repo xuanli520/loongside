@@ -7,7 +7,7 @@ use crate::config::{
     ResolvedTelegramChannelConfig,
 };
 
-use super::{runtime_state, ChannelOperationRuntime, ChannelPlatform};
+use super::{ChannelOperationRuntime, ChannelPlatform, runtime_state};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ChannelCatalogOperation {
@@ -974,14 +974,18 @@ mod tests {
         assert_eq!(telegram.len(), 2);
         assert_eq!(telegram[0].configured_account_id, "personal");
         assert_eq!(telegram[1].configured_account_id, "work-bot");
-        assert!(telegram[1]
-            .notes
-            .iter()
-            .any(|note| note == "configured_account_id=work-bot"));
-        assert!(telegram[1]
-            .notes
-            .iter()
-            .any(|note| note == "account_id=ops-bot"));
+        assert!(
+            telegram[1]
+                .notes
+                .iter()
+                .any(|note| note == "configured_account_id=work-bot")
+        );
+        assert!(
+            telegram[1]
+                .notes
+                .iter()
+                .any(|note| note == "account_id=ops-bot")
+        );
     }
 
     #[test]
@@ -1012,10 +1016,12 @@ mod tests {
             .collect::<Vec<_>>();
         let encoded = serde_json::to_value(&telegram).expect("serialize telegram snapshots");
 
-        assert!(telegram[1]
-            .notes
-            .iter()
-            .any(|note| note == "default_account=true"));
+        assert!(
+            telegram[1]
+                .notes
+                .iter()
+                .any(|note| note == "default_account=true")
+        );
         assert_eq!(
             encoded[0]
                 .get("is_default_account")
@@ -1065,10 +1071,12 @@ mod tests {
             telegram[0].default_account_source,
             ChannelDefaultAccountSelectionSource::Fallback
         );
-        assert!(telegram[0]
-            .notes
-            .iter()
-            .any(|note| note == "default_account_source=fallback"));
+        assert!(
+            telegram[0]
+                .notes
+                .iter()
+                .any(|note| note == "default_account_source=fallback")
+        );
     }
 
     fn temp_runtime_dir(suffix: &str) -> std::path::PathBuf {

@@ -1,13 +1,13 @@
 use std::{process::Stdio, time::Duration};
 
 use loongclaw_protocol::{JsonLineTransport, OutboundFrame, Transport, TransportInfo};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::{io::AsyncReadExt, process::Command as TokioCommand, time::timeout};
 
 use super::{
+    BridgeRuntimePolicy, ConnectorProtocolContext, ProcessStdioRuntimeEvidenceKind,
     authorize_connector_protocol_context, is_process_command_allowed, parse_process_args,
-    parse_process_timeout_ms, process_stdio_runtime_evidence, BridgeRuntimePolicy,
-    ConnectorProtocolContext, ProcessStdioRuntimeEvidenceKind,
+    parse_process_timeout_ms, process_stdio_runtime_evidence,
 };
 use kernel::ConnectorCommand;
 

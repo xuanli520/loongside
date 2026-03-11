@@ -6,11 +6,11 @@ use std::{
 
 use loongclaw_contracts::{MemoryCoreOutcome, MemoryCoreRequest};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::{
-    build_append_turn_request, runtime_config::MemoryRuntimeConfig, MEMORY_OP_APPEND_TURN,
-    MEMORY_OP_CLEAR_SESSION, MEMORY_OP_WINDOW,
+    MEMORY_OP_APPEND_TURN, MEMORY_OP_CLEAR_SESSION, MEMORY_OP_WINDOW, build_append_turn_request,
+    runtime_config::MemoryRuntimeConfig,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,13 +87,17 @@ pub(super) fn load_window(
         .get("allow_extended_limit")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let hard_limit_cap = if allow_extended_limit { 512 } else { 128 };
+    let hard_limit_cap = if allow_extended_limit {
+        512_u64
+    } else {
+        128_u64
+    };
     let requested_limit = payload
         .get("limit")
         .and_then(Value::as_u64)
-        .unwrap_or_else(default_window_size_u64)
+        .unwrap_or_else(|| default_window_size_u64(config))
         .clamp(1, hard_limit_cap) as usize;
-    let default_window = default_window_size().max(1);
+    let default_window = default_window_size(config).max(1);
     let window_limit = if allow_extended_limit {
         requested_limit
     } else {
@@ -199,7 +203,7 @@ pub(super) fn window_direct(
     limit: usize,
     config: &MemoryRuntimeConfig,
 ) -> Result<Vec<ConversationTurn>, String> {
-    window_direct_with_options(session_id, limit, false, config)
+    window_direct_with_options(session_id, limit, true, config)
 }
 
 pub(super) fn window_direct_with_options(
@@ -231,16 +235,15 @@ pub(super) fn ensure_memory_db_ready(
     Ok(effective)
 }
 
-fn default_window_size() -> usize {
-    std::env::var("LOONGCLAW_SLIDING_WINDOW")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
+fn default_window_size(config: &MemoryRuntimeConfig) -> usize {
+    config
+        .sliding_window
         .filter(|value| *value > 0)
         .unwrap_or(12)
 }
 
-fn default_window_size_u64() -> u64 {
-    default_window_size() as u64
+fn default_window_size_u64(config: &MemoryRuntimeConfig) -> u64 {
+    default_window_size(config) as u64
 }
 
 fn unix_ts_now() -> i64 {
@@ -258,11 +261,11 @@ fn resolve_db_path(config: &MemoryRuntimeConfig) -> PathBuf {
 }
 
 fn ensure_sqlite_schema(path: &PathBuf) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("create sqlite parent directory failed: {error}"))?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create sqlite parent directory failed: {error}"))?;
     }
 
     let conn = rusqlite::Connection::open(path)
@@ -281,4 +284,24 @@ fn ensure_sqlite_schema(path: &PathBuf) -> Result<(), String> {
     )
     .map_err(|error| format!("initialize sqlite memory schema failed: {error}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_window_size_prefers_injected_config() {
+        let config = MemoryRuntimeConfig {
+            sqlite_path: None,
+            sliding_window: Some(24),
+        };
+
+        assert_eq!(default_window_size(&config), 24);
+    }
+
+    #[test]
+    fn default_window_size_falls_back_to_default_without_config() {
+        assert_eq!(default_window_size(&MemoryRuntimeConfig::default()), 12);
+    }
 }

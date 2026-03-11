@@ -56,11 +56,13 @@ async fn execute_spec_allows_execution_with_clean_architecture_guard() {
     assert_eq!(report.outcome["outcome"]["status"], "ok");
     assert!(report.blocked_reason.is_none());
     assert!(report.self_awareness.is_some());
-    assert!(report
-        .architecture_guard
-        .expect("guard report should be present")
-        .denied_paths
-        .is_empty());
+    assert!(
+        report
+            .architecture_guard
+            .expect("guard report should be present")
+            .denied_paths
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -121,8 +123,10 @@ async fn execute_spec_blocks_when_architecture_guard_detects_core_mutation() {
     assert_eq!(report.operation_kind, "blocked");
     assert_eq!(report.outcome["status"], "blocked");
     assert!(report.blocked_reason.is_some());
-    assert!(report
-        .architecture_guard
-        .expect("guard report should be present")
-        .has_denials());
+    assert!(
+        report
+            .architecture_guard
+            .expect("guard report should be present")
+            .has_denials()
+    );
 }

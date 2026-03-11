@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::config::{LoongClawConfig, ProviderConfig, ProviderKind, ReasoningEffort};
 
@@ -124,10 +124,10 @@ pub(super) fn build_completion_request_body(
         }
     }
 
-    if transport_mode == ProviderTransportMode::KimiApi {
-        if let Some(extra_body) = kimi_extra_body(config.provider.reasoning_effort) {
-            body.insert("extra_body".to_owned(), extra_body);
-        }
+    if transport_mode == ProviderTransportMode::KimiApi
+        && let Some(extra_body) = kimi_extra_body(config.provider.reasoning_effort)
+    {
+        body.insert("extra_body".to_owned(), extra_body);
     }
 
     Value::Object(body)
@@ -142,11 +142,12 @@ pub(super) fn build_turn_request_body(
     tool_definitions: &[Value],
 ) -> Value {
     let mut body = build_completion_request_body(config, messages, model, payload_mode);
-    if include_tool_schema && !tool_definitions.is_empty() {
-        if let Some(object) = body.as_object_mut() {
-            object.insert("tools".to_owned(), Value::Array(tool_definitions.to_vec()));
-            object.insert("tool_choice".to_owned(), json!("auto"));
-        }
+    if include_tool_schema
+        && !tool_definitions.is_empty()
+        && let Some(object) = body.as_object_mut()
+    {
+        object.insert("tools".to_owned(), Value::Array(tool_definitions.to_vec()));
+        object.insert("tool_choice".to_owned(), json!("auto"));
     }
     body
 }
@@ -197,13 +198,13 @@ pub(super) fn should_disable_tool_schema_for_error(error: &ProviderApiError) -> 
 }
 
 pub(super) fn should_try_next_model_on_error(error: &ProviderApiError) -> bool {
-    if let Some(code) = error.code.as_deref() {
-        if matches!(
+    if let Some(code) = error.code.as_deref()
+        && matches!(
             code,
             "model_not_found" | "unsupported_model" | "invalid_model" | "not_found_error"
-        ) {
-            return true;
-        }
+        )
+    {
+        return true;
     }
     if error.param.as_deref() == Some("model") {
         return true;

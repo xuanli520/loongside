@@ -14,11 +14,11 @@ use async_trait::async_trait;
 #[cfg(feature = "channel-telegram")]
 use tokio::time::sleep;
 
-#[cfg(any(feature = "channel-telegram", feature = "channel-feishu"))]
-use crate::context::{bootstrap_kernel_context, DEFAULT_TOKEN_TTL_S};
 use crate::CliResult;
 #[cfg(any(feature = "channel-telegram", feature = "channel-feishu"))]
 use crate::KernelContext;
+#[cfg(any(feature = "channel-telegram", feature = "channel-feishu"))]
+use crate::context::{DEFAULT_TOKEN_TTL_S, bootstrap_kernel_context};
 
 #[cfg(any(feature = "channel-telegram", feature = "channel-feishu"))]
 use super::config::{
@@ -36,9 +36,9 @@ mod runtime_state;
 mod telegram;
 
 pub use registry::{
-    channel_status_snapshots, list_channel_catalog, normalize_channel_platform,
     ChannelCatalogEntry, ChannelCatalogOperation, ChannelOperationHealth, ChannelOperationStatus,
-    ChannelStatusSnapshot,
+    ChannelStatusSnapshot, channel_status_snapshots, list_channel_catalog,
+    normalize_channel_platform,
 };
 pub use runtime_state::ChannelOperationRuntime;
 use runtime_state::ChannelOperationRuntimeTracker;
@@ -707,23 +707,6 @@ pub(super) async fn process_inbound_with_provider(
 
 #[cfg(any(feature = "channel-telegram", feature = "channel-feishu"))]
 fn apply_runtime_env(config: &LoongClawConfig) {
-    std::env::set_var(
-        "LOONGCLAW_SQLITE_PATH",
-        config.memory.resolved_sqlite_path().display().to_string(),
-    );
-    std::env::set_var(
-        "LOONGCLAW_SLIDING_WINDOW",
-        config.memory.sliding_window.to_string(),
-    );
-    std::env::set_var(
-        "LOONGCLAW_SHELL_ALLOWLIST",
-        config.tools.shell_allowlist.join(","),
-    );
-    std::env::set_var(
-        "LOONGCLAW_FILE_ROOT",
-        config.tools.resolved_file_root().display().to_string(),
-    );
-
     // Populate the typed tool runtime config so executors never hit env vars
     // on the hot path.  Ignore the error if already initialised.
     let tool_rt = crate::tools::runtime_config::ToolRuntimeConfig {
@@ -740,6 +723,7 @@ fn apply_runtime_env(config: &LoongClawConfig) {
     // Populate the typed memory runtime config (same pattern as tool config).
     let memory_rt = crate::memory::runtime_config::MemoryRuntimeConfig {
         sqlite_path: Some(config.memory.resolved_sqlite_path()),
+        sliding_window: Some(config.memory.sliding_window),
     };
     let _ = crate::memory::runtime_config::init_memory_runtime_config(memory_rt);
 }

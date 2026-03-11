@@ -5,10 +5,10 @@ use std::{
 };
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::config::{self, ResolvedTelegramChannelConfig};
 use crate::CliResult;
+use crate::config::{self, ResolvedTelegramChannelConfig};
 
 use super::{
     ChannelAdapter, ChannelDelivery, ChannelInboundMessage, ChannelOutboundTarget,
@@ -282,11 +282,11 @@ fn load_offset(path: &Path) -> Option<i64> {
 }
 
 fn save_offset(path: &Path, next_offset: i64) -> CliResult<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("create telegram offset directory failed: {error}"))?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create telegram offset directory failed: {error}"))?;
     }
     fs::write(path, next_offset.to_string())
         .map_err(|error| format!("write telegram offset file failed: {error}"))?;

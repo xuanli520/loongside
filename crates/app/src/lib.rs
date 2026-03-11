@@ -8,9 +8,5 @@ pub mod provider;
 pub mod tools;
 
 pub use context::KernelContext;
-
-#[cfg(test)]
-pub(crate) mod test_support;
-
 /// Result type for MVP CLI operations.
 pub type CliResult<T> = Result<T, String>;

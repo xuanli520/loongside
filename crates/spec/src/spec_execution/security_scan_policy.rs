@@ -1,11 +1,11 @@
 use std::{collections::BTreeSet, fs, io::Write, path::Path};
 
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ed25519_dalek::{Signature as Ed25519Signature, Verifier, VerifyingKey};
 use serde_json::json;
 
-use crate::spec_runtime::*;
 use crate::BUNDLED_SECURITY_SCAN_PROFILE;
+use crate::spec_runtime::*;
 
 use super::SecurityScanDelta;
 
@@ -74,10 +74,10 @@ fn validate_security_scan_policy(policy: &SecurityScanSpec) -> Result<(), String
             );
         }
     }
-    if let Some(export) = policy.siem_export.as_ref().filter(|value| value.enabled) {
-        if export.path.trim().is_empty() {
-            return Err("security scan siem_export.path cannot be empty when enabled".to_owned());
-        }
+    if let Some(export) = policy.siem_export.as_ref().filter(|value| value.enabled)
+        && export.path.trim().is_empty()
+    {
+        return Err("security scan siem_export.path cannot be empty when enabled".to_owned());
     }
     if policy.runtime.execute_wasm_component && policy.runtime.allowed_path_prefixes.is_empty() {
         return Err(
@@ -219,11 +219,11 @@ pub(super) fn emit_security_scan_siem_record(
     let mut truncated_findings = 0usize;
 
     if export.include_findings {
-        if let Some(limit) = export.max_findings_per_record {
-            if findings.len() > limit {
-                truncated_findings = findings.len().saturating_sub(limit);
-                findings.truncate(limit);
-            }
+        if let Some(limit) = export.max_findings_per_record
+            && findings.len() > limit
+        {
+            truncated_findings = findings.len().saturating_sub(limit);
+            findings.truncate(limit);
         }
     } else {
         truncated_findings = report.findings.len();
@@ -266,11 +266,11 @@ pub(super) fn emit_security_scan_siem_record(
     });
 
     let path = Path::new(&export.path);
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("create siem export directory failed: {error}"))?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create siem export directory failed: {error}"))?;
     }
 
     let mut file = fs::OpenOptions::new()

@@ -4,7 +4,7 @@ use kernel::{IntegrationCatalog, PluginBridgeKind, PluginScanReport, PluginTrans
 use serde_json::Value;
 
 use super::descriptor_bridge_kind;
-use crate::spec_runtime::{detect_provider_bridge_kind, ToolSearchEntry, ToolSearchResult};
+use crate::spec_runtime::{ToolSearchEntry, ToolSearchResult, detect_provider_bridge_kind};
 
 pub(super) fn execute_tool_search(
     integration_catalog: &IntegrationCatalog,
@@ -61,15 +61,13 @@ pub(super) fn execute_tool_search(
         if let (Some(source_path), Some(plugin_id)) = (
             provider.metadata.get("plugin_source_path"),
             provider.metadata.get("plugin_id"),
-        ) {
-            if let Some((bridge, adapter, entrypoint, language)) =
-                translation_by_key.get(&(source_path.clone(), plugin_id.clone()))
-            {
-                resolved_bridge_kind = *bridge;
-                adapter_family = Some(adapter.clone());
-                entrypoint_hint = Some(entrypoint.clone());
-                source_language = Some(language.clone());
-            }
+        ) && let Some((bridge, adapter, entrypoint, language)) =
+            translation_by_key.get(&(source_path.clone(), plugin_id.clone()))
+        {
+            resolved_bridge_kind = *bridge;
+            adapter_family = Some(adapter.clone());
+            entrypoint_hint = Some(entrypoint.clone());
+            source_language = Some(language.clone());
         }
 
         entries.insert(
@@ -225,10 +223,10 @@ pub(super) fn execute_tool_search(
 }
 
 fn metadata_tags(metadata: &BTreeMap<String, String>) -> Vec<String> {
-    if let Some(raw_json) = metadata.get("tags_json") {
-        if let Ok(values) = serde_json::from_str::<Vec<String>>(raw_json) {
-            return values;
-        }
+    if let Some(raw_json) = metadata.get("tags_json")
+        && let Ok(values) = serde_json::from_str::<Vec<String>>(raw_json)
+    {
+        return values;
     }
 
     metadata

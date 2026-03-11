@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use loongclaw_contracts::{
     AuditEventKind, Capability, ExecutionPlane, MemoryCoreRequest, PlaneTier, ToolCoreRequest,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use crate::CliResult;
@@ -13,8 +13,9 @@ use crate::KernelContext;
 use super::super::config::LoongClawConfig;
 #[cfg(feature = "memory-sqlite")]
 use super::super::memory;
+use super::ProviderErrorMode;
 use super::analytics::{
-    parse_conversation_event, summarize_safe_lane_events, SafeLaneEventSummary,
+    SafeLaneEventSummary, parse_conversation_event, summarize_safe_lane_events,
 };
 use super::lane_arbiter::{ExecutionLane, LaneArbiterPolicy, LaneDecision};
 use super::persistence::{
@@ -25,18 +26,17 @@ use super::plan_executor::{
     PlanExecutor, PlanNodeError, PlanNodeErrorKind, PlanNodeExecutor, PlanRunFailure, PlanRunStatus,
 };
 use super::plan_ir::{
-    PlanBudget, PlanEdge, PlanGraph, PlanNode, PlanNodeKind, RiskTier, PLAN_GRAPH_VERSION,
+    PLAN_GRAPH_VERSION, PlanBudget, PlanEdge, PlanGraph, PlanNode, PlanNodeKind, RiskTier,
 };
 use super::plan_verifier::{
-    verify_output, PlanVerificationContext, PlanVerificationFailureCode, PlanVerificationPolicy,
-    PlanVerificationReport,
+    PlanVerificationContext, PlanVerificationFailureCode, PlanVerificationPolicy,
+    PlanVerificationReport, verify_output,
 };
 use super::runtime::{ConversationRuntime, DefaultConversationRuntime};
 use super::turn_engine::{
-    classify_kernel_error, KernelFailureClass, ProviderTurn, ToolIntent, TurnEngine, TurnFailure,
-    TurnFailureKind, TurnResult,
+    KernelFailureClass, ProviderTurn, ToolIntent, TurnEngine, TurnFailure, TurnFailureKind,
+    TurnResult, classify_kernel_error,
 };
-use super::ProviderErrorMode;
 
 #[derive(Default)]
 pub struct ConversationTurnCoordinator;
@@ -1515,10 +1515,10 @@ fn push_anchor_candidate(text: &str, anchors: &mut BTreeSet<String>) {
         return;
     }
     anchors.insert(normalized.clone());
-    if let Some(last_segment) = normalized.rsplit('/').next() {
-        if last_segment.len() >= 3 {
-            anchors.insert(last_segment.to_owned());
-        }
+    if let Some(last_segment) = normalized.rsplit('/').next()
+        && last_segment.len() >= 3
+    {
+        anchors.insert(last_segment.to_owned());
     }
 }
 
@@ -1529,10 +1529,10 @@ async fn derive_replan_cursor(
 ) -> (usize, Vec<String>) {
     match failure {
         PlanRunFailure::NodeFailed { node_id, .. } => {
-            if let Ok(index) = parse_tool_node_index(node_id.as_str()) {
-                if index < tool_count {
-                    return (index, executor.tool_outputs_snapshot().await);
-                }
+            if let Ok(index) = parse_tool_node_index(node_id.as_str())
+                && index < tool_count
+            {
+                return (index, executor.tool_outputs_snapshot().await);
             }
             (0, Vec::new())
         }
@@ -2353,10 +2353,12 @@ mod tests {
         assert!(!decision.failed_threshold_triggered);
         assert!(!decision.backpressure_threshold_triggered);
         assert!(decision.trend_threshold_triggered);
-        assert!(decision
-            .trend_failure_ewma
-            .map(|value| value > 0.60)
-            .unwrap_or(false));
+        assert!(
+            decision
+                .trend_failure_ewma
+                .map(|value| value > 0.60)
+                .unwrap_or(false)
+        );
     }
 
     #[test]

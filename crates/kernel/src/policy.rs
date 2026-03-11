@@ -1,8 +1,8 @@
 use std::{
     collections::BTreeSet,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Mutex,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
@@ -106,7 +106,7 @@ impl PolicyEngine for StaticPolicyEngine {
         now_epoch_s: u64,
         ttl_s: u64,
     ) -> Result<CapabilityToken, PolicyError> {
-        let gen = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         Ok(CapabilityToken {
             token_id: self.next_token_id(),
             pack_id: pack.pack_id.clone(),
@@ -114,7 +114,7 @@ impl PolicyEngine for StaticPolicyEngine {
             allowed_capabilities: pack.granted_capabilities.clone(),
             issued_at_epoch_s: now_epoch_s,
             expires_at_epoch_s: now_epoch_s.saturating_add(ttl_s),
-            generation: gen,
+            generation,
             membrane: None,
         })
     }

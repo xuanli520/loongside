@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
 
 use async_trait::async_trait;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 use super::plan_ir::{PlanGraph, PlanNode};
 
@@ -331,7 +331,7 @@ mod tests {
 
     use super::*;
     use crate::conversation::plan_ir::{
-        PlanBudget, PlanEdge, PlanGraph, PlanNode, PlanNodeKind, RiskTier, PLAN_GRAPH_VERSION,
+        PLAN_GRAPH_VERSION, PlanBudget, PlanEdge, PlanGraph, PlanNode, PlanNodeKind, RiskTier,
     };
 
     fn sample_graph() -> PlanGraph {
@@ -523,10 +523,12 @@ mod tests {
                 && !event.success
                 && event.error_kind == Some(PlanNodeErrorKind::Retryable)
         }));
-        assert!(report
-            .attempt_events
-            .iter()
-            .any(|event| event.node_id == "n2" && event.attempt == 2 && event.success));
+        assert!(
+            report
+                .attempt_events
+                .iter()
+                .any(|event| event.node_id == "n2" && event.attempt == 2 && event.success)
+        );
     }
 
     #[tokio::test]
@@ -573,10 +575,12 @@ mod tests {
                     .map(|reason| reason.contains("node_timeout"))
                     .unwrap_or(false)
         }));
-        assert!(report
-            .attempt_events
-            .iter()
-            .any(|event| event.node_id == "n2" && event.attempt == 2 && event.success));
+        assert!(
+            report
+                .attempt_events
+                .iter()
+                .any(|event| event.node_id == "n2" && event.attempt == 2 && event.success)
+        );
     }
 
     #[tokio::test]

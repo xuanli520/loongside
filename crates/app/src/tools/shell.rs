@@ -3,7 +3,7 @@ use std::{path::PathBuf, process::Command};
 
 use loongclaw_contracts::{ToolCoreOutcome, ToolCoreRequest};
 #[cfg(feature = "tool-shell")]
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub(super) fn execute_shell_tool_with_config(
     request: ToolCoreRequest,
