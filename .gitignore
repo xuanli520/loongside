@@ -4,3 +4,4 @@
 /.loongclaw.local.toml
 /.env.local
 .worktrees/
+.claude/settings.local.json
