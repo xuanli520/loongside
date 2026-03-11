@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::ops::Deref;
 
-use loongclaw_contracts::{Capability, KernelError, ToolCoreRequest, ToolPlaneError};
+use loongclaw_contracts::{Capability, KernelError, PolicyError, ToolCoreRequest, ToolPlaneError};
 use serde::{Deserialize, Serialize};
 
 use crate::context::KernelContext;
@@ -169,12 +169,16 @@ impl TurnResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KernelFailureClass {
     PolicyDenied,
+    ApprovalRequired,
     RetryableExecution,
     NonRetryable,
 }
 
 pub(crate) fn classify_kernel_error(error: &KernelError) -> KernelFailureClass {
     match error {
+        KernelError::Policy(PolicyError::ToolCallApprovalRequired { .. }) => {
+            KernelFailureClass::ApprovalRequired
+        }
         KernelError::Policy(_)
         | KernelError::PackCapabilityBoundary { .. }
         | KernelError::ConnectorNotAllowed { .. } => KernelFailureClass::PolicyDenied,
@@ -282,6 +286,9 @@ impl TurnEngine {
                     return match classify_kernel_error(&e) {
                         KernelFailureClass::PolicyDenied => {
                             TurnResult::policy_denied("kernel_policy_denied", reason)
+                        }
+                        KernelFailureClass::ApprovalRequired => {
+                            TurnResult::needs_approval("kernel_approval_required", reason)
                         }
                         KernelFailureClass::RetryableExecution => {
                             TurnResult::retryable_tool_error("tool_execution_failed", reason)
