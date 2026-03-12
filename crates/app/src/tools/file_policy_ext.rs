@@ -240,4 +240,61 @@ mod tests {
         let ctx = make_context(&pack, &token, &caps, Some(&params));
         assert!(ext.authorize_extension(&ctx).is_ok());
     }
+
+    #[test]
+    fn claw_import_requires_filesystem_read() {
+        let ext = FilePolicyExtension::new(None);
+        let pack = test_pack();
+        let token = token_with_caps(BTreeSet::from([Capability::InvokeTool]));
+        let caps = BTreeSet::from([Capability::InvokeTool]);
+        let params = json!({"tool_name": "claw.import", "payload": {"path": "config.toml"}});
+        let ctx = make_context(&pack, &token, &caps, Some(&params));
+        assert!(matches!(
+            ext.authorize_extension(&ctx).unwrap_err(),
+            PolicyError::ExtensionDenied { .. }
+        ));
+    }
+
+    #[test]
+    fn claw_import_allowed_with_filesystem_read() {
+        let ext = FilePolicyExtension::new(None);
+        let pack = test_pack();
+        let token = token_with_caps(BTreeSet::from([
+            Capability::InvokeTool,
+            Capability::FilesystemRead,
+        ]));
+        let caps = BTreeSet::from([Capability::InvokeTool]);
+        let params = json!({"tool_name": "claw.import", "payload": {"path": "config.toml"}});
+        let ctx = make_context(&pack, &token, &caps, Some(&params));
+        assert!(ext.authorize_extension(&ctx).is_ok());
+    }
+
+    #[test]
+    fn normalizes_file_read_underscore_alias() {
+        let ext = FilePolicyExtension::new(None);
+        let pack = test_pack();
+        let token = token_with_caps(BTreeSet::from([Capability::InvokeTool]));
+        let caps = BTreeSet::from([Capability::InvokeTool]);
+        let params = json!({"tool_name": "file_read", "payload": {"path": "foo.txt"}});
+        let ctx = make_context(&pack, &token, &caps, Some(&params));
+        assert!(matches!(
+            ext.authorize_extension(&ctx).unwrap_err(),
+            PolicyError::ExtensionDenied { .. }
+        ));
+    }
+
+    #[test]
+    fn no_path_check_when_file_root_is_none() {
+        let ext = FilePolicyExtension::new(None);
+        let pack = test_pack();
+        let token = token_with_caps(BTreeSet::from([
+            Capability::InvokeTool,
+            Capability::FilesystemRead,
+        ]));
+        let caps = BTreeSet::from([Capability::InvokeTool]);
+        let params = json!({"tool_name": "file.read", "payload": {"path": "../../etc/passwd"}});
+        let ctx = make_context(&pack, &token, &caps, Some(&params));
+        // No file_root means no escape check — allowed
+        assert!(ext.authorize_extension(&ctx).is_ok());
+    }
 }

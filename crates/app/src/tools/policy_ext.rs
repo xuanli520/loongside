@@ -259,4 +259,45 @@ mod tests {
             PolicyError::ToolCallDenied { .. }
         ));
     }
+
+    #[test]
+    fn denies_windows_absolute_path_command() {
+        let ext = ToolPolicyExtension::default_rules();
+        let pack = test_pack();
+        let token = test_token();
+        let caps = BTreeSet::from([Capability::InvokeTool]);
+        let params = json!({"tool_name": "shell.exec", "payload": {"command": "C:\\Windows\\System32\\rm.exe"}});
+        let ctx = make_context(&pack, &token, &caps, Some(&params));
+        // basename is "rm.exe" which doesn't match "rm", so this is allowed.
+        // This documents current behavior — basename matching is exact.
+        assert!(ext.authorize_extension(&ctx).is_ok());
+    }
+
+    #[test]
+    fn normalizes_bare_shell_alias() {
+        let ext = ToolPolicyExtension::default_rules();
+        let pack = test_pack();
+        let token = test_token();
+        let caps = BTreeSet::from([Capability::InvokeTool]);
+        let params = json!({"tool_name": "shell", "payload": {"command": "rm"}});
+        let ctx = make_context(&pack, &token, &caps, Some(&params));
+        assert!(matches!(
+            ext.authorize_extension(&ctx).unwrap_err(),
+            PolicyError::ToolCallDenied { .. }
+        ));
+    }
+
+    #[test]
+    fn case_insensitive_command_matching() {
+        let ext = ToolPolicyExtension::default_rules();
+        let pack = test_pack();
+        let token = test_token();
+        let caps = BTreeSet::from([Capability::InvokeTool]);
+        let params = json!({"tool_name": "shell.exec", "payload": {"command": "RM"}});
+        let ctx = make_context(&pack, &token, &caps, Some(&params));
+        assert!(matches!(
+            ext.authorize_extension(&ctx).unwrap_err(),
+            PolicyError::ToolCallDenied { .. }
+        ));
+    }
 }

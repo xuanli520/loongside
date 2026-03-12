@@ -433,4 +433,50 @@ mod tests {
             }
         }
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn integ_shell_approval_required_command() {
+        let harness = TurnTestHarness::new();
+
+        let turn = FakeProviderBuilder::new()
+            .with_tool_call(
+                "shell.exec",
+                json!({"command": "curl", "args": ["https://example.com"]}),
+            )
+            .build();
+        let result = harness.execute(&turn).await;
+
+        match result {
+            TurnResult::NeedsApproval(err) => {
+                assert!(
+                    err.contains("requires approval"),
+                    "expected 'requires approval' in reason, got: {err}"
+                );
+            }
+            other => panic!("expected NeedsApproval, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn integ_file_write_denied_without_capability() {
+        let harness = TurnTestHarness::with_capabilities(BTreeSet::from([Capability::InvokeTool]));
+
+        let turn = FakeProviderBuilder::new()
+            .with_tool_call(
+                "file.write",
+                json!({"path": "test.txt", "content": "hello"}),
+            )
+            .build();
+        let result = harness.execute(&turn).await;
+
+        match result {
+            TurnResult::ToolDenied(err) => {
+                assert!(
+                    err.contains("FilesystemWrite"),
+                    "expected 'FilesystemWrite' in reason, got: {err}"
+                );
+            }
+            other => panic!("expected ToolDenied with FilesystemWrite, got: {other:?}"),
+        }
+    }
 }
