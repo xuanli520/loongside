@@ -115,6 +115,7 @@ impl ConversationTurnLoop {
                 None
             };
 
+            #[allow(clippy::wildcard_enum_match_arm)]
             let reply = match turn_result {
                 TurnResult::FinalText(tool_text) if had_tool_intents => {
                     let raw_reply =

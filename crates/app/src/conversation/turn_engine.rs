@@ -190,6 +190,7 @@ pub(crate) enum KernelFailureClass {
 }
 
 pub(crate) fn classify_kernel_error(error: &KernelError) -> KernelFailureClass {
+    #[allow(clippy::wildcard_enum_match_arm)]
     match error {
         KernelError::Policy(_)
         | KernelError::PackCapabilityBoundary { .. }

@@ -3688,6 +3688,7 @@ async fn execute_spec_security_scan_emits_audit_summary_when_not_blocking() {
     assert!(security.high_findings >= 1);
 
     let audit = report.audit_events.expect("audit events should exist");
+    #[allow(clippy::wildcard_enum_match_arm)]
     let summary = audit.iter().find_map(|event| match &event.kind {
         AuditEventKind::SecurityScanEvaluated {
             blocked,

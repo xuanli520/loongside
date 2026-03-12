@@ -852,6 +852,7 @@ async fn handle_turn_with_runtime_safe_lane_plan_emits_kernel_runtime_audit_even
         .expect("safe lane plan should produce a reply");
 
     let events = harness.audit.snapshot();
+    #[allow(clippy::wildcard_enum_match_arm)]
     let runtime_ops = events
         .iter()
         .filter_map(|event| match &event.kind {
@@ -2262,6 +2263,7 @@ fn turn_engine_no_tool_intents_returns_final_text() {
         raw_meta: serde_json::Value::Null,
     };
     let result = engine.evaluate_turn(&turn);
+    #[allow(clippy::wildcard_enum_match_arm)]
     match result {
         TurnResult::FinalText(text) => assert_eq!(text, "Hello!"),
         other => panic!("expected FinalText, got {:?}", other),
@@ -2295,6 +2297,7 @@ fn provider_tool_aliases_flow_through_parse_and_turn_validation() {
 
     let engine = TurnEngine::new(1);
     let result = engine.evaluate_turn(&turn);
+    #[allow(clippy::wildcard_enum_match_arm)]
     match result {
         TurnResult::NeedsApproval(reason) => {
             assert!(
@@ -2323,6 +2326,7 @@ fn turn_engine_unknown_tool_returns_tool_denied() {
         raw_meta: serde_json::Value::Null,
     };
     let result = engine.evaluate_turn(&turn);
+    #[allow(clippy::wildcard_enum_match_arm)]
     match result {
         TurnResult::ToolDenied(reason) => {
             assert!(reason.contains("tool_not_found"), "reason: {reason}")
@@ -2351,6 +2355,7 @@ fn turn_engine_unknown_tool_exposes_structured_policy_denial() {
     };
 
     let result = engine.evaluate_turn(&turn);
+    #[allow(clippy::wildcard_enum_match_arm)]
     match result {
         TurnResult::ToolDenied(failure) => {
             assert_eq!(failure.kind, TurnFailureKind::PolicyDenied);
@@ -2383,6 +2388,7 @@ fn turn_engine_exceeding_max_steps_returns_denied() {
         raw_meta: serde_json::Value::Null,
     };
     let result = engine.evaluate_turn(&turn);
+    #[allow(clippy::wildcard_enum_match_arm)]
     match result {
         TurnResult::ToolDenied(reason) => assert!(
             reason.contains("max_tool_steps_exceeded"),
@@ -2410,6 +2416,7 @@ fn turn_engine_known_tool_with_no_kernel_returns_tool_denied() {
     };
     // Without kernel context, known tools should be validated but flagged as needing execution
     let result = engine.evaluate_turn(&turn);
+    #[allow(clippy::wildcard_enum_match_arm)]
     match result {
         TurnResult::NeedsApproval(reason) => {
             assert!(
@@ -2438,6 +2445,7 @@ async fn turn_engine_execute_turn_no_kernel_returns_denied() {
         raw_meta: serde_json::Value::Null,
     };
     let result = engine.execute_turn(&turn, None).await;
+    #[allow(clippy::wildcard_enum_match_arm)]
     match result {
         TurnResult::ToolDenied(reason) => {
             assert!(reason.contains("no_kernel_context"), "reason: {reason}");
@@ -2516,6 +2524,7 @@ async fn turn_engine_tool_execution_error_is_marked_retryable() {
     };
 
     let result = engine.execute_turn(&turn, Some(&ctx)).await;
+    #[allow(clippy::wildcard_enum_match_arm)]
     match result {
         TurnResult::ToolError(failure) => {
             assert_eq!(failure.kind, TurnFailureKind::Retryable);
@@ -2655,6 +2664,7 @@ async fn turn_engine_executes_known_tool_with_kernel() {
     };
 
     let result = engine.execute_turn(&turn, Some(&ctx)).await;
+    #[allow(clippy::wildcard_enum_match_arm)]
     match result {
         TurnResult::FinalText(text) => {
             let line = text.lines().next().expect("tool result line should exist");
@@ -2775,6 +2785,7 @@ async fn turn_engine_truncates_oversized_tool_payload_summary() {
     };
 
     let result = engine.execute_turn(&turn, Some(&ctx)).await;
+    #[allow(clippy::wildcard_enum_match_arm)]
     match result {
         TurnResult::FinalText(text) => {
             let line = text.lines().next().expect("tool result line should exist");
@@ -2882,6 +2893,7 @@ async fn turn_engine_execute_turn_denied_without_capability() {
     };
 
     let result = engine.execute_turn(&turn, Some(&ctx)).await;
+    #[allow(clippy::wildcard_enum_match_arm)]
     match result {
         TurnResult::ToolDenied(reason) => {
             assert!(

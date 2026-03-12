@@ -1052,6 +1052,7 @@ fn register_dynamic_catalog_connectors(
 }
 
 fn operation_connector_name(operation: &OperationSpec) -> Option<String> {
+    #[allow(clippy::wildcard_enum_match_arm)]
     match operation {
         OperationSpec::ConnectorLegacy { connector_name, .. }
         | OperationSpec::ConnectorCore { connector_name, .. }

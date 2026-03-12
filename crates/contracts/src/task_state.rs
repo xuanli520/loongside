@@ -33,6 +33,7 @@ impl TaskState {
     }
 
     pub fn transition_to_in_send(self) -> Result<Self, String> {
+        #[allow(clippy::wildcard_enum_match_arm)]
         match self {
             Self::Runnable(intent) => Ok(Self::InSend {
                 task_id: intent.task_id,
@@ -44,6 +45,7 @@ impl TaskState {
     }
 
     pub fn transition_to_in_reply(self) -> Result<Self, String> {
+        #[allow(clippy::wildcard_enum_match_arm)]
         match self {
             Self::InSend { task_id } => Ok(Self::InReply { task_id }),
             other => Err(format!(
@@ -53,6 +55,7 @@ impl TaskState {
     }
 
     pub fn transition_to_completed(self, outcome: HarnessOutcome) -> Result<Self, String> {
+        #[allow(clippy::wildcard_enum_match_arm)]
         match self {
             Self::InReply { .. } => Ok(Self::Completed(outcome)),
             other => Err(format!(

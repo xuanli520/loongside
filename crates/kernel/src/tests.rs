@@ -1395,6 +1395,7 @@ async fn plane_audit_records_resolved_default_core_adapter_names() {
 
     let snapshot = audit.snapshot();
 
+    #[allow(clippy::wildcard_enum_match_arm)]
     let connector_ext_event = snapshot
         .iter()
         .find_map(|event| match &event.kind {
@@ -1411,6 +1412,7 @@ async fn plane_audit_records_resolved_default_core_adapter_names() {
     assert_eq!(connector_ext_event.0, "shielded-bridge");
     assert_eq!(connector_ext_event.1.as_deref(), Some("grpc-core"));
 
+    #[allow(clippy::wildcard_enum_match_arm)]
     let runtime_core_event = snapshot
         .iter()
         .find_map(|event| match &event.kind {
