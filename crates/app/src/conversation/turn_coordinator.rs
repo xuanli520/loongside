@@ -278,6 +278,7 @@ impl ConversationTurnCoordinator {
                     .execute_turn(&turn, kernel_ctx)
                     .await
                 };
+                #[allow(clippy::wildcard_enum_match_arm)]
                 let reply = match turn_result {
                     TurnResult::FinalText(tool_text) if had_tool_intents => {
                         let raw_reply = join_non_empty_lines(&[
@@ -1345,7 +1346,7 @@ async fn load_safe_lane_history_signals_for_governor(
         .safe_lane_session_governor_window_turns();
     if let Some(ctx) = kernel_ctx {
         let request = MemoryCoreRequest {
-            operation: "window".to_owned(),
+            operation: memory::MEMORY_OP_WINDOW.to_owned(),
             payload: json!({
                 "session_id": session_id,
                 "limit": window_turns,
@@ -1699,6 +1700,7 @@ fn collect_semantic_anchors(tool_intents: &[ToolIntent]) -> BTreeSet<String> {
 }
 
 fn collect_value_anchors(parent_key: Option<&str>, value: &Value, anchors: &mut BTreeSet<String>) {
+    #[allow(clippy::wildcard_enum_match_arm)]
     match value {
         Value::String(text) => {
             if parent_key.map(is_anchor_key_allowed).unwrap_or(false) {
@@ -1780,6 +1782,7 @@ async fn derive_replan_cursor(
     executor: &SafeLanePlanNodeExecutor<'_>,
     tool_count: usize,
 ) -> (usize, Vec<String>) {
+    #[allow(clippy::wildcard_enum_match_arm)]
     match failure {
         PlanRunFailure::NodeFailed { node_id, .. } => {
             if let Ok(index) = parse_tool_node_index(node_id.as_str())

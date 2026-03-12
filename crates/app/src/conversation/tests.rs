@@ -18,6 +18,7 @@ use super::runtime::DefaultConversationRuntime;
 use super::*;
 use crate::CliResult;
 use crate::KernelContext;
+use crate::memory::MEMORY_OP_WINDOW;
 
 struct FakeRuntime {
     seed_messages: Vec<Value>,
@@ -103,7 +104,6 @@ impl ConversationRuntime for FakeRuntime {
             .expect("completion response lock")
             .pop_front()
             .unwrap_or_else(|| Err("unexpected_completion_call".to_owned()))
-            .map_err(|error| error.to_owned())
     }
 
     async fn request_turn(
@@ -124,7 +124,6 @@ impl ConversationRuntime for FakeRuntime {
             .expect("turn response lock")
             .pop_front()
             .unwrap_or_else(|| Err("unexpected_turn_call".to_owned()))
-            .map_err(|error| error.to_owned())
     }
 
     async fn persist_turn(
@@ -853,6 +852,7 @@ async fn handle_turn_with_runtime_safe_lane_plan_emits_kernel_runtime_audit_even
         .expect("safe lane plan should produce a reply");
 
     let events = harness.audit.snapshot();
+    #[allow(clippy::wildcard_enum_match_arm)]
     let runtime_ops = events
         .iter()
         .filter_map(|event| match &event.kind {
@@ -1550,7 +1550,7 @@ async fn handle_turn_with_runtime_safe_lane_session_governor_forces_no_replan() 
             &self,
             request: MemoryCoreRequest,
         ) -> Result<MemoryCoreOutcome, MemoryPlaneError> {
-            if request.operation == "window" {
+            if request.operation == MEMORY_OP_WINDOW {
                 return Ok(MemoryCoreOutcome {
                     status: "ok".to_owned(),
                     payload: json!({
@@ -1798,7 +1798,7 @@ async fn handle_turn_with_runtime_safe_lane_session_governor_requests_extended_h
                 .lock()
                 .expect("memory invocations lock")
                 .push(request.clone());
-            if request.operation == "window" {
+            if request.operation == MEMORY_OP_WINDOW {
                 return Ok(MemoryCoreOutcome {
                     status: "ok".to_owned(),
                     payload: json!({
@@ -1895,7 +1895,7 @@ async fn handle_turn_with_runtime_safe_lane_session_governor_requests_extended_h
         .clone();
     let window_request = captured
         .iter()
-        .find(|request| request.operation == "window")
+        .find(|request| request.operation == MEMORY_OP_WINDOW)
         .expect("window request should be issued");
     assert_eq!(
         window_request.payload["session_id"],
@@ -2263,6 +2263,7 @@ fn turn_engine_no_tool_intents_returns_final_text() {
         raw_meta: serde_json::Value::Null,
     };
     let result = engine.evaluate_turn(&turn);
+    #[allow(clippy::wildcard_enum_match_arm)]
     match result {
         TurnResult::FinalText(text) => assert_eq!(text, "Hello!"),
         other => panic!("expected FinalText, got {:?}", other),
@@ -2296,6 +2297,7 @@ fn provider_tool_aliases_flow_through_parse_and_turn_validation() {
 
     let engine = TurnEngine::new(1);
     let result = engine.evaluate_turn(&turn);
+    #[allow(clippy::wildcard_enum_match_arm)]
     match result {
         TurnResult::NeedsApproval(reason) => {
             assert!(
@@ -2324,6 +2326,7 @@ fn turn_engine_unknown_tool_returns_tool_denied() {
         raw_meta: serde_json::Value::Null,
     };
     let result = engine.evaluate_turn(&turn);
+    #[allow(clippy::wildcard_enum_match_arm)]
     match result {
         TurnResult::ToolDenied(reason) => {
             assert!(reason.contains("tool_not_found"), "reason: {reason}")
@@ -2352,6 +2355,7 @@ fn turn_engine_unknown_tool_exposes_structured_policy_denial() {
     };
 
     let result = engine.evaluate_turn(&turn);
+    #[allow(clippy::wildcard_enum_match_arm)]
     match result {
         TurnResult::ToolDenied(failure) => {
             assert_eq!(failure.kind, TurnFailureKind::PolicyDenied);
@@ -2384,6 +2388,7 @@ fn turn_engine_exceeding_max_steps_returns_denied() {
         raw_meta: serde_json::Value::Null,
     };
     let result = engine.evaluate_turn(&turn);
+    #[allow(clippy::wildcard_enum_match_arm)]
     match result {
         TurnResult::ToolDenied(reason) => assert!(
             reason.contains("max_tool_steps_exceeded"),
@@ -2411,6 +2416,7 @@ fn turn_engine_known_tool_with_no_kernel_returns_tool_denied() {
     };
     // Without kernel context, known tools should be validated but flagged as needing execution
     let result = engine.evaluate_turn(&turn);
+    #[allow(clippy::wildcard_enum_match_arm)]
     match result {
         TurnResult::NeedsApproval(reason) => {
             assert!(
@@ -2439,6 +2445,7 @@ async fn turn_engine_execute_turn_no_kernel_returns_denied() {
         raw_meta: serde_json::Value::Null,
     };
     let result = engine.execute_turn(&turn, None).await;
+    #[allow(clippy::wildcard_enum_match_arm)]
     match result {
         TurnResult::ToolDenied(reason) => {
             assert!(reason.contains("no_kernel_context"), "reason: {reason}");
@@ -2517,6 +2524,7 @@ async fn turn_engine_tool_execution_error_is_marked_retryable() {
     };
 
     let result = engine.execute_turn(&turn, Some(&ctx)).await;
+    #[allow(clippy::wildcard_enum_match_arm)]
     match result {
         TurnResult::ToolError(failure) => {
             assert_eq!(failure.kind, TurnFailureKind::Retryable);
@@ -2656,6 +2664,7 @@ async fn turn_engine_executes_known_tool_with_kernel() {
     };
 
     let result = engine.execute_turn(&turn, Some(&ctx)).await;
+    #[allow(clippy::wildcard_enum_match_arm)]
     match result {
         TurnResult::FinalText(text) => {
             let line = text.lines().next().expect("tool result line should exist");
@@ -2776,6 +2785,7 @@ async fn turn_engine_truncates_oversized_tool_payload_summary() {
     };
 
     let result = engine.execute_turn(&turn, Some(&ctx)).await;
+    #[allow(clippy::wildcard_enum_match_arm)]
     match result {
         TurnResult::FinalText(text) => {
             let line = text.lines().next().expect("tool result line should exist");
@@ -2883,6 +2893,7 @@ async fn turn_engine_execute_turn_denied_without_capability() {
     };
 
     let result = engine.execute_turn(&turn, Some(&ctx)).await;
+    #[allow(clippy::wildcard_enum_match_arm)]
     match result {
         TurnResult::ToolDenied(reason) => {
             assert!(

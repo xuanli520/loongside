@@ -115,6 +115,7 @@ impl ConversationTurnLoop {
                 None
             };
 
+            #[allow(clippy::wildcard_enum_match_arm)]
             let reply = match turn_result {
                 TurnResult::FinalText(tool_text) if had_tool_intents => {
                     let raw_reply =
@@ -623,7 +624,7 @@ impl ToolLoopSupervisor {
         }
 
         self.recent_rounds.push_back(ToolLoopObservation {
-            pattern: pattern.clone(),
+            pattern,
             tool_name_signature: tool_name_signature.to_owned(),
             failed,
         });

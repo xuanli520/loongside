@@ -774,6 +774,7 @@ fn parse_skills_lock_entries(value: &Value) -> Vec<String> {
 }
 
 fn extract_skill_refs_from_lock_value(value: &Value, skills: &mut BTreeSet<String>) {
+    #[allow(clippy::wildcard_enum_match_arm)]
     match value {
         Value::Object(object) => {
             for (key, nested) in object {
@@ -800,6 +801,7 @@ fn extract_skill_refs_from_lock_value(value: &Value, skills: &mut BTreeSet<Strin
 }
 
 fn collect_skill_refs_from_value(value: &Value, skills: &mut BTreeSet<String>) {
+    #[allow(clippy::wildcard_enum_match_arm)]
     match value {
         Value::String(raw) => {
             if let Some(skill) = normalize_skill_reference(raw) {

@@ -280,7 +280,7 @@ mod tests {
 
         let config = ToolRuntimeConfig {
             shell_allowlist: Default::default(),
-            file_root: Some(root.clone()),
+            file_root: Some(root),
             external_skills: Default::default(),
         };
         let error =
@@ -304,7 +304,7 @@ mod tests {
 
         let config = ToolRuntimeConfig {
             shell_allowlist: Default::default(),
-            file_root: Some(root.clone()),
+            file_root: Some(root),
             external_skills: Default::default(),
         };
         let request = ToolCoreRequest {
