@@ -1067,7 +1067,7 @@ async fn run_spec_pressure_once(
     spec: &RunnerSpec,
     scenario: &ProgrammaticPressureScenario,
 ) -> CliResult<ScenarioRunSample> {
-    let report = execute_spec(spec.clone(), false).await;
+    let report = execute_spec(spec, false).await;
     let blocked = report.operation_kind == "blocked" || report.blocked_reason.is_some();
 
     let mut sample = ScenarioRunSample {

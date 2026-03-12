@@ -38,8 +38,7 @@ impl TaskState {
                 task_id: intent.task_id,
             }),
             other => Err(format!(
-                "invalid transition: cannot move to InSend from {:?}",
-                std::mem::discriminant(&other)
+                "invalid transition: cannot move to InSend from {other:?}"
             )),
         }
     }
@@ -48,8 +47,7 @@ impl TaskState {
         match self {
             Self::InSend { task_id } => Ok(Self::InReply { task_id }),
             other => Err(format!(
-                "invalid transition: cannot move to InReply from {:?}",
-                std::mem::discriminant(&other)
+                "invalid transition: cannot move to InReply from {other:?}"
             )),
         }
     }
@@ -58,8 +56,7 @@ impl TaskState {
         match self {
             Self::InReply { .. } => Ok(Self::Completed(outcome)),
             other => Err(format!(
-                "invalid transition: cannot move to Completed from {:?}",
-                std::mem::discriminant(&other)
+                "invalid transition: cannot move to Completed from {other:?}"
             )),
         }
     }

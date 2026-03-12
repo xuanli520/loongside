@@ -18,6 +18,7 @@ use super::runtime::DefaultConversationRuntime;
 use super::*;
 use crate::CliResult;
 use crate::KernelContext;
+use crate::memory::MEMORY_OP_WINDOW;
 
 struct FakeRuntime {
     seed_messages: Vec<Value>,
@@ -1550,7 +1551,7 @@ async fn handle_turn_with_runtime_safe_lane_session_governor_forces_no_replan() 
             &self,
             request: MemoryCoreRequest,
         ) -> Result<MemoryCoreOutcome, MemoryPlaneError> {
-            if request.operation == "window" {
+            if request.operation == MEMORY_OP_WINDOW {
                 return Ok(MemoryCoreOutcome {
                     status: "ok".to_owned(),
                     payload: json!({
@@ -1798,7 +1799,7 @@ async fn handle_turn_with_runtime_safe_lane_session_governor_requests_extended_h
                 .lock()
                 .expect("memory invocations lock")
                 .push(request.clone());
-            if request.operation == "window" {
+            if request.operation == MEMORY_OP_WINDOW {
                 return Ok(MemoryCoreOutcome {
                     status: "ok".to_owned(),
                     payload: json!({
@@ -1895,7 +1896,7 @@ async fn handle_turn_with_runtime_safe_lane_session_governor_requests_extended_h
         .clone();
     let window_request = captured
         .iter()
-        .find(|request| request.operation == "window")
+        .find(|request| request.operation == MEMORY_OP_WINDOW)
         .expect("window request should be issued");
     assert_eq!(
         window_request.payload["session_id"],

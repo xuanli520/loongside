@@ -641,7 +641,7 @@ fn init_spec_cli(output_path: &str) -> CliResult<()> {
 
 async fn run_spec_cli(spec_path: &str, print_audit: bool) -> CliResult<()> {
     let spec = read_spec_file(spec_path)?;
-    let report = execute_spec(spec, print_audit).await;
+    let report = execute_spec(&spec, print_audit).await;
     let pretty = serde_json::to_string_pretty(&report)
         .map_err(|error| format!("serialize spec run report failed: {error}"))?;
     println!("{pretty}");

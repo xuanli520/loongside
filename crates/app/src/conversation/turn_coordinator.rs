@@ -1345,7 +1345,7 @@ async fn load_safe_lane_history_signals_for_governor(
         .safe_lane_session_governor_window_turns();
     if let Some(ctx) = kernel_ctx {
         let request = MemoryCoreRequest {
-            operation: "window".to_owned(),
+            operation: memory::MEMORY_OP_WINDOW.to_owned(),
             payload: json!({
                 "session_id": session_id,
                 "limit": window_turns,
