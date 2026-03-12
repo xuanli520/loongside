@@ -104,7 +104,6 @@ impl ConversationRuntime for FakeRuntime {
             .expect("completion response lock")
             .pop_front()
             .unwrap_or_else(|| Err("unexpected_completion_call".to_owned()))
-            .map_err(|error| error.to_owned())
     }
 
     async fn request_turn(
@@ -125,7 +124,6 @@ impl ConversationRuntime for FakeRuntime {
             .expect("turn response lock")
             .pop_front()
             .unwrap_or_else(|| Err("unexpected_turn_call".to_owned()))
-            .map_err(|error| error.to_owned())
     }
 
     async fn persist_turn(

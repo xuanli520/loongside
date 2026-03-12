@@ -83,6 +83,13 @@ print_stderr = "deny"
 # Error quality
 map_err_ignore = "deny"
 
+# Exhaustiveness: catch-all match arms hide new enum variants.
+# Target: deny (104 existing instances need triage first — tracked for gradual adoption)
+wildcard_enum_match_arm = "allow"
+
+# Clone hygiene: flag unnecessary clones
+redundant_clone = "deny"
+
 # Missing docs (allow for now — large existing surface)
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"

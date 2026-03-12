@@ -623,7 +623,7 @@ impl ToolLoopSupervisor {
         }
 
         self.recent_rounds.push_back(ToolLoopObservation {
-            pattern: pattern.clone(),
+            pattern,
             tool_name_signature: tool_name_signature.to_owned(),
             failed,
         });

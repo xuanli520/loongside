@@ -440,7 +440,7 @@ pub fn run_programmatic_pressure_baseline_lint_cli(
     let report = ProgrammaticPressureBaselineLintReport {
         generated_at_epoch_s: current_epoch_seconds(),
         matrix_path: matrix_path.to_owned(),
-        baseline_path: baseline_path.clone(),
+        baseline_path,
         profile: matrix.profile.clone(),
         baseline_profile: baseline.profile.clone(),
         scenario_count: matrix.scenarios.len(),
@@ -460,7 +460,7 @@ pub fn run_programmatic_pressure_baseline_lint_cli(
         gate_passed,
         error_count: lint.error_count(),
         warning_count: lint.warning_count(),
-        issues: lint.issues.clone(),
+        issues: lint.issues,
     };
 
     write_json_file(output_path, &report)?;

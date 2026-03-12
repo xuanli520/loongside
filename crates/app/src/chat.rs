@@ -35,7 +35,7 @@ pub async fn run_cli_chat(config_path: Option<&str>, session_hint: Option<&str>)
     #[cfg(feature = "memory-sqlite")]
     {
         let sqlite_path = config.memory.resolved_sqlite_path();
-        let initialized = memory::ensure_memory_db_ready(Some(sqlite_path.clone()), &memory_config)
+        let initialized = memory::ensure_memory_db_ready(Some(sqlite_path), &memory_config)
             .map_err(|error| format!("failed to initialize sqlite memory: {error}"))?;
         println!(
             "loongclaw chat started (config={}, memory={})",
@@ -340,7 +340,7 @@ fn format_safe_lane_summary(
     };
     let health_payload = serde_json::json!({
         "severity": health_signal.severity,
-        "flags": health_signal.flags.clone(),
+        "flags": health_signal.flags,
     })
     .to_string();
     let latest_health_event_severity = summary
