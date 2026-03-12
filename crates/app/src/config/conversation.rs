@@ -76,13 +76,19 @@ pub struct ConversationConfig {
     pub safe_lane_backpressure_max_total_attempts: u64,
     #[serde(default = "default_safe_lane_backpressure_max_replans")]
     pub safe_lane_backpressure_max_replans: u32,
-    #[serde(alias = "safe_lane_risk_threshold", default = "default_safe_lane_routing_threshold")]
+    #[serde(
+        alias = "safe_lane_risk_threshold",
+        default = "default_safe_lane_routing_threshold"
+    )]
     pub safe_lane_routing_threshold: u32,
     #[serde(default = "default_safe_lane_complexity_threshold")]
     pub safe_lane_complexity_threshold: u32,
     #[serde(default = "default_fast_lane_max_input_chars")]
     pub fast_lane_max_input_chars: usize,
-    #[serde(alias = "high_risk_keywords", default = "default_high_complexity_keywords")]
+    #[serde(
+        alias = "high_risk_keywords",
+        default = "default_high_complexity_keywords"
+    )]
     pub high_complexity_keywords: Vec<String>,
 }
 
