@@ -294,20 +294,12 @@ impl ConversationTurnCoordinator {
                                 tool_text.as_str(),
                                 user_input,
                             );
-                            match runtime
-                                .request_completion(config, &follow_up_messages)
-                                .await
-                            {
-                                Ok(final_reply) => {
-                                    let trimmed = final_reply.trim();
-                                    if trimmed.is_empty() {
-                                        raw_reply
-                                    } else {
-                                        trimmed.to_owned()
-                                    }
-                                }
-                                Err(_) => raw_reply,
-                            }
+                            completion_or_fallback(
+                                runtime
+                                    .request_completion(config, &follow_up_messages)
+                                    .await,
+                                &raw_reply,
+                            )
                         }
                     }
                     TurnResult::ToolDenied(failure)
@@ -324,20 +316,12 @@ impl ConversationTurnCoordinator {
                             failure.reason.as_str(),
                             user_input,
                         );
-                        match runtime
-                            .request_completion(config, &follow_up_messages)
-                            .await
-                        {
-                            Ok(final_reply) => {
-                                let trimmed = final_reply.trim();
-                                if trimmed.is_empty() {
-                                    raw_reply
-                                } else {
-                                    trimmed.to_owned()
-                                }
-                            }
-                            Err(_) => raw_reply,
-                        }
+                        completion_or_fallback(
+                            runtime
+                                .request_completion(config, &follow_up_messages)
+                                .await,
+                            &raw_reply,
+                        )
                     }
                     TurnResult::ToolError(failure)
                         if had_tool_intents && !raw_tool_output_requested =>
@@ -353,20 +337,12 @@ impl ConversationTurnCoordinator {
                             failure.reason.as_str(),
                             user_input,
                         );
-                        match runtime
-                            .request_completion(config, &follow_up_messages)
-                            .await
-                        {
-                            Ok(final_reply) => {
-                                let trimmed = final_reply.trim();
-                                if trimmed.is_empty() {
-                                    raw_reply
-                                } else {
-                                    trimmed.to_owned()
-                                }
-                            }
-                            Err(_) => raw_reply,
-                        }
+                        completion_or_fallback(
+                            runtime
+                                .request_completion(config, &follow_up_messages)
+                                .await,
+                            &raw_reply,
+                        )
                     }
                     other => compose_assistant_reply(
                         turn.assistant_text.as_str(),
@@ -2066,6 +2042,28 @@ async fn execute_single_tool_intent(
         &outcome,
         payload_summary_limit_chars,
     ))
+}
+
+/// Resolve a follow-up completion result, falling back to the raw tool reply
+/// when the completion fails or returns empty.  Unlike the previous silent
+/// fallback (`Err(_) => raw_reply`) this surfaces the provider error so the
+/// user can diagnose why natural-language synthesis failed.
+fn completion_or_fallback(result: CliResult<String>, raw_reply: &str) -> String {
+    match result {
+        Ok(final_reply) => {
+            let trimmed = final_reply.trim();
+            if trimmed.is_empty() {
+                raw_reply.to_owned()
+            } else {
+                trimmed.to_owned()
+            }
+        }
+        Err(synthesis_error) => {
+            format!(
+                "{raw_reply}\n\n[synthesis_note] follow-up completion failed: {synthesis_error}"
+            )
+        }
+    }
 }
 
 fn build_tool_followup_messages(

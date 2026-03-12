@@ -436,7 +436,11 @@ async fn request_completion_with_raw_fallback<R: ConversationRuntime + ?Sized>(
                 trimmed.to_owned()
             }
         }
-        Err(_) => raw_reply.to_owned(),
+        Err(synthesis_error) => {
+            format!(
+                "{raw_reply}\n\n[synthesis_note] follow-up completion failed: {synthesis_error}"
+            )
+        }
     }
 }
 
