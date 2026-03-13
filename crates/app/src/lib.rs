@@ -1,3 +1,4 @@
+pub mod acp;
 pub mod channel;
 pub mod chat;
 pub mod config;
@@ -8,6 +9,9 @@ pub mod migration;
 pub mod prompt;
 pub mod provider;
 pub mod tools;
+
+#[cfg(test)]
+mod process_env;
 
 pub use context::KernelContext;
 /// Result type for MVP CLI operations.

@@ -11,7 +11,7 @@ use tokio::sync::{Mutex, mpsc};
 pub const PROTOCOL_VERSION: u32 = 1;
 
 fn default_frame_version() -> u32 {
-    1
+    PROTOCOL_VERSION
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -804,14 +804,17 @@ mod tests {
     fn frame_without_version_deserializes_with_default() {
         let json = r#"{"method":"ping","id":null,"payload":{}}"#;
         let frame: InboundFrame = serde_json::from_str(json).expect("should deserialize");
-        assert_eq!(frame.version, 1);
+        assert_eq!(frame.version, PROTOCOL_VERSION);
     }
 
     #[test]
     fn frame_with_explicit_version_is_preserved() {
-        let json = r#"{"method":"ping","id":null,"payload":{},"version":1}"#;
-        let frame: InboundFrame = serde_json::from_str(json).expect("should deserialize");
-        assert_eq!(frame.version, 1);
+        let json = format!(
+            r#"{{"method":"ping","id":null,"payload":{{}},"version":{}}}"#,
+            PROTOCOL_VERSION
+        );
+        let frame: InboundFrame = serde_json::from_str(&json).expect("should deserialize");
+        assert_eq!(frame.version, PROTOCOL_VERSION);
     }
 
     #[test]
