@@ -125,6 +125,8 @@ pub enum IntegrationError {
     AwarenessRootNotFound(String),
     #[error("failed to inspect awareness file {path}: {reason}")]
     AwarenessFileRead { path: String, reason: String },
+    #[error("plugin absorb failed for {plugin_id}: {reason}")]
+    PluginAbsorbFailed { plugin_id: String, reason: String },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
