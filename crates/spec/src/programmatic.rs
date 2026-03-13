@@ -1188,9 +1188,10 @@ async fn invoke_programmatic_connector_with_resilience(
         rate_wait_ms_total = rate_wait_ms_total.saturating_add(waited);
 
         let dispatch = kernel
-            .invoke_connector(
+            .execute_connector_core(
                 pack_id,
                 token,
+                None,
                 ConnectorCommand {
                     connector_name: connector_name.to_owned(),
                     operation: operation.to_owned(),

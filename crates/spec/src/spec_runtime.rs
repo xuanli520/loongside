@@ -11,15 +11,15 @@ use std::{
 use async_trait::async_trait;
 use kernel::{
     ArchitectureGuardReport, AuditEvent, BootstrapReport, Capability, CodebaseAwarenessSnapshot,
-    ConnectorAdapter, ConnectorCommand, ConnectorError, ConnectorOutcome, CoreConnectorAdapter,
-    CoreMemoryAdapter, CoreRuntimeAdapter, CoreToolAdapter, ExecutionRoute, HarnessAdapter,
-    HarnessError, HarnessKind, HarnessOutcome, HarnessRequest, IntegrationCatalog,
-    IntegrationHotfix, MemoryCoreOutcome, MemoryCoreRequest, MemoryExtensionAdapter,
-    MemoryExtensionOutcome, MemoryExtensionRequest, PluginAbsorbReport, PluginActivationPlan,
-    PluginBridgeKind, PluginScanReport, PluginTranslationReport, ProvisionPlan, RuntimeCoreOutcome,
-    RuntimeCoreRequest, RuntimeExtensionAdapter, RuntimeExtensionOutcome, RuntimeExtensionRequest,
-    ToolCoreOutcome, ToolCoreRequest, ToolExtensionAdapter, ToolExtensionOutcome,
-    ToolExtensionRequest, VerticalPackManifest,
+    ConnectorCommand, ConnectorError, ConnectorOutcome, CoreConnectorAdapter, CoreMemoryAdapter,
+    CoreRuntimeAdapter, CoreToolAdapter, ExecutionRoute, HarnessAdapter, HarnessError, HarnessKind,
+    HarnessOutcome, HarnessRequest, IntegrationCatalog, IntegrationHotfix, MemoryCoreOutcome,
+    MemoryCoreRequest, MemoryExtensionAdapter, MemoryExtensionOutcome, MemoryExtensionRequest,
+    PluginAbsorbReport, PluginActivationPlan, PluginBridgeKind, PluginScanReport,
+    PluginTranslationReport, ProvisionPlan, RuntimeCoreOutcome, RuntimeCoreRequest,
+    RuntimeExtensionAdapter, RuntimeExtensionOutcome, RuntimeExtensionRequest, ToolCoreOutcome,
+    ToolCoreRequest, ToolExtensionAdapter, ToolExtensionOutcome, ToolExtensionRequest,
+    VerticalPackManifest,
 };
 use loongclaw_protocol::{OutboundFrame, ProtocolRouter, RouteAuthorizationRequest};
 use serde::{Deserialize, Serialize};
@@ -1147,12 +1147,15 @@ impl HarnessAdapter for EmbeddedPiHarness {
 pub struct WebhookConnector;
 
 #[async_trait]
-impl ConnectorAdapter for WebhookConnector {
+impl CoreConnectorAdapter for WebhookConnector {
     fn name(&self) -> &str {
         "webhook"
     }
 
-    async fn invoke(&self, command: ConnectorCommand) -> Result<ConnectorOutcome, ConnectorError> {
+    async fn invoke_core(
+        &self,
+        command: ConnectorCommand,
+    ) -> Result<ConnectorOutcome, ConnectorError> {
         #[cfg(any(test, feature = "test-hooks"))]
         if let Some(test_config) = command
             .payload
@@ -1215,12 +1218,15 @@ pub struct DynamicCatalogConnector {
 }
 
 #[async_trait]
-impl ConnectorAdapter for DynamicCatalogConnector {
+impl CoreConnectorAdapter for DynamicCatalogConnector {
     fn name(&self) -> &str {
         &self.connector_name
     }
 
-    async fn invoke(&self, command: ConnectorCommand) -> Result<ConnectorOutcome, ConnectorError> {
+    async fn invoke_core(
+        &self,
+        command: ConnectorCommand,
+    ) -> Result<ConnectorOutcome, ConnectorError> {
         let requested_channel = command
             .payload
             .get("channel_id")
