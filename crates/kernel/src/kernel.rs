@@ -835,6 +835,10 @@ impl<P: PolicyEngine> LoongClawKernel<P> {
                 ))?;
                 Err(KernelError::Policy(error))
             }
+            _ => Err(KernelError::Policy(PolicyError::ExtensionDenied {
+                extension: "policy".to_owned(),
+                reason: format!("unexpected policy decision for tool `{tool_name}`"),
+            })),
         }
     }
 
