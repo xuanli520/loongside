@@ -1002,12 +1002,37 @@ fn format_milli_ratio(value: Option<u32>) -> String {
         .unwrap_or_else(|| "-".to_owned())
 }
 
+async fn with_graceful_shutdown<F>(serve_future: F) -> CliResult<()>
+where
+    F: std::future::Future<Output = CliResult<()>>,
+{
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .map_err(|error| format!("failed to register SIGTERM handler: {error}"))?;
+
+    tokio::select! {
+        result = serve_future => result,
+        _ = tokio::signal::ctrl_c() => {
+            eprintln!("\nReceived Ctrl-C, shutting down gracefully...");
+            Ok(())
+        }
+        _ = sigterm.recv() => {
+            eprintln!("\nReceived SIGTERM, shutting down gracefully...");
+            Ok(())
+        }
+    }
+}
+
 async fn run_telegram_serve_cli(
     config_path: Option<&str>,
     once: bool,
     account: Option<&str>,
 ) -> CliResult<()> {
-    mvp::channel::run_telegram_channel(config_path, once, account).await
+    with_graceful_shutdown(mvp::channel::run_telegram_channel(
+        config_path,
+        once,
+        account,
+    ))
+    .await
 }
 
 async fn run_feishu_send_cli(
@@ -1026,7 +1051,13 @@ async fn run_feishu_serve_cli(
     bind_override: Option<&str>,
     path_override: Option<&str>,
 ) -> CliResult<()> {
-    mvp::channel::run_feishu_channel(config_path, account, bind_override, path_override).await
+    with_graceful_shutdown(mvp::channel::run_feishu_channel(
+        config_path,
+        account,
+        bind_override,
+        path_override,
+    ))
+    .await
 }
 
 fn parse_json_payload(raw: &str, context: &str) -> CliResult<Value> {
