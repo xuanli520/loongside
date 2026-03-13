@@ -90,6 +90,20 @@ EOF
     echo "expected release_trace_path_matches_contract to reject dot path segments" >&2
     exit 1
   fi
+
+  mkdir -p "$tmp_dir/.docs/traces" "$tmp_dir/outside-target"
+  ln -s "$tmp_dir/outside-target" "$tmp_dir/.docs/traces/out"
+
+  if (
+    cd "$tmp_dir" &&
+      release_trace_path_matches_contract \
+        "v0.1.2" \
+        "020e2a67" \
+        ".docs/traces/out/20260309T053941Z-post-release-v0.1.2-020e2a67"
+  ); then
+    echo "expected release_trace_path_matches_contract to reject symlink-backed trace path prefixes" >&2
+    exit 1
+  fi
 }
 
 run_release_artifact_lib_tests

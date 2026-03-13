@@ -143,7 +143,9 @@ else
                 if [[ "$trace_path_field" != .docs/traces/* ]]; then
                     echo "FAIL: ${doc_path} Trace path must stay under .docs/traces/: ${trace_path_field}"
                 elif ! release_trace_path_segments_safe "$trace_path_field"; then
-                    echo "FAIL: ${doc_path} Trace path must stay under .docs/traces/ without '.' or '..' segments: ${trace_path_field}"
+                    echo "FAIL: ${doc_path} Trace path must stay under .docs/traces/ without '.' or '..' segments or symlink prefixes: ${trace_path_field}"
+                elif ! release_trace_path_symlink_prefixes_safe "$trace_path_field"; then
+                    echo "FAIL: ${doc_path} Trace path must stay under .docs/traces/ without '.' or '..' segments or symlink prefixes: ${trace_path_field}"
                 elif [[ "$trace_path_basename" != *"-post-release-"* ]]; then
                     echo "FAIL: ${doc_path} Trace path basename must include -post-release-"
                 else
