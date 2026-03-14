@@ -8,6 +8,7 @@ use loongclaw_contracts::{
 use serde::{Deserialize, Serialize};
 
 use crate::context::KernelContext;
+use crate::tools::{ToolView, runtime_tool_view, tool_catalog};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProviderTurn {
@@ -286,6 +287,10 @@ impl TurnEngine {
     /// Evaluate a provider turn and produce a deterministic result.
     /// Does NOT execute tools — just validates and gates.
     pub fn evaluate_turn(&self, turn: &ProviderTurn) -> TurnResult {
+        self.evaluate_turn_in_view(turn, &runtime_tool_view())
+    }
+
+    pub fn evaluate_turn_in_view(&self, turn: &ProviderTurn, tool_view: &ToolView) -> TurnResult {
         // No tool intents → just return the text
         if turn.tool_intents.is_empty() {
             return TurnResult::FinalText(turn.assistant_text.clone());
@@ -297,10 +302,15 @@ impl TurnEngine {
         }
 
         // Check each tool intent
+        let catalog = tool_catalog();
         for intent in &turn.tool_intents {
-            if !crate::tools::is_known_tool_name(&intent.tool_name) {
+            let Some(descriptor) = catalog.resolve(&intent.tool_name) else {
                 let reason = format!("tool_not_found: {}", intent.tool_name);
                 return TurnResult::policy_denied("tool_not_found", reason);
+            };
+            if !tool_view.contains(descriptor.name) {
+                let reason = format!("tool_not_visible: {}", intent.tool_name);
+                return TurnResult::policy_denied("tool_not_visible", reason);
             }
         }
 
@@ -322,6 +332,16 @@ impl TurnEngine {
         turn: &ProviderTurn,
         kernel_ctx: Option<&KernelContext>,
     ) -> TurnResult {
+        self.execute_turn_in_view(turn, &runtime_tool_view(), kernel_ctx)
+            .await
+    }
+
+    pub async fn execute_turn_in_view(
+        &self,
+        turn: &ProviderTurn,
+        tool_view: &ToolView,
+        kernel_ctx: Option<&KernelContext>,
+    ) -> TurnResult {
         // No tool intents → just return the text
         if turn.tool_intents.is_empty() {
             return TurnResult::FinalText(turn.assistant_text.clone());
@@ -333,10 +353,15 @@ impl TurnEngine {
         }
 
         // Check each tool intent is known
+        let catalog = tool_catalog();
         for intent in &turn.tool_intents {
-            if !crate::tools::is_known_tool_name(&intent.tool_name) {
+            let Some(descriptor) = catalog.resolve(&intent.tool_name) else {
                 let reason = format!("tool_not_found: {}", intent.tool_name);
                 return TurnResult::policy_denied("tool_not_found", reason);
+            };
+            if !tool_view.contains(descriptor.name) {
+                let reason = format!("tool_not_visible: {}", intent.tool_name);
+                return TurnResult::policy_denied("tool_not_visible", reason);
             }
         }
 

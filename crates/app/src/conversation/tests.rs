@@ -35,6 +35,7 @@ struct FakeRuntime {
     seed_messages: Vec<Value>,
     assembled_context_with_system_prompt: Option<AssembledConversationContext>,
     assembled_context_without_system_prompt: Option<AssembledConversationContext>,
+    tool_view: crate::tools::ToolView,
     completion_responses: Mutex<VecDeque<Result<String, String>>>,
     turn_responses: Mutex<VecDeque<Result<ProviderTurn, String>>>,
     after_turn_result: Result<(), String>,
@@ -47,6 +48,8 @@ struct FakeRuntime {
     requested_messages: Mutex<Vec<Value>>,
     turn_requested_messages: Mutex<Vec<Vec<Value>>>,
     completion_requested_messages: Mutex<Vec<Vec<Value>>>,
+    built_tool_views: Mutex<Vec<crate::tools::ToolView>>,
+    turn_requested_tool_views: Mutex<Vec<crate::tools::ToolView>>,
     build_context_calls: Mutex<Vec<(String, bool)>>,
     completion_calls: Mutex<usize>,
     turn_calls: Mutex<usize>,
@@ -322,6 +325,7 @@ impl FakeRuntime {
             seed_messages,
             assembled_context_with_system_prompt: None,
             assembled_context_without_system_prompt: None,
+            tool_view: crate::tools::runtime_tool_view(),
             completion_responses: Mutex::new(VecDeque::from(completions)),
             turn_responses: Mutex::new(VecDeque::from(turns)),
             after_turn_result: Ok(()),
@@ -334,12 +338,19 @@ impl FakeRuntime {
             requested_messages: Mutex::new(Vec::new()),
             turn_requested_messages: Mutex::new(Vec::new()),
             completion_requested_messages: Mutex::new(Vec::new()),
+            built_tool_views: Mutex::new(Vec::new()),
+            turn_requested_tool_views: Mutex::new(Vec::new()),
             build_context_calls: Mutex::new(Vec::new()),
             completion_calls: Mutex::new(0),
             turn_calls: Mutex::new(0),
             after_turn_calls: Mutex::new(Vec::new()),
             compact_calls: Mutex::new(Vec::new()),
         }
+    }
+
+    fn with_tool_view(mut self, tool_view: crate::tools::ToolView) -> Self {
+        self.tool_view = tool_view;
+        self
     }
 
     fn with_assembled_context(mut self, assembled_context: AssembledConversationContext) -> Self {
@@ -560,6 +571,15 @@ impl AcpRuntimeBackend for RoutedAcpBackend {
 
 #[async_trait]
 impl ConversationRuntime for FakeRuntime {
+    fn tool_view(
+        &self,
+        _config: &LoongClawConfig,
+        _session_id: &str,
+        _kernel_ctx: Option<&KernelContext>,
+    ) -> CliResult<crate::tools::ToolView> {
+        Ok(self.tool_view.clone())
+    }
+
     async fn bootstrap(
         &self,
         _config: &LoongClawConfig,
@@ -594,8 +614,13 @@ impl ConversationRuntime for FakeRuntime {
         _config: &LoongClawConfig,
         _session_id: &str,
         include_system_prompt: bool,
+        tool_view: &crate::tools::ToolView,
         _kernel_ctx: Option<&KernelContext>,
     ) -> CliResult<Vec<Value>> {
+        self.built_tool_views
+            .lock()
+            .expect("built tool views lock")
+            .push(tool_view.clone());
         let assembled = if include_system_prompt {
             self.assembled_context_with_system_prompt.as_ref()
         } else {
@@ -652,6 +677,7 @@ impl ConversationRuntime for FakeRuntime {
         &self,
         _config: &LoongClawConfig,
         messages: &[Value],
+        tool_view: &crate::tools::ToolView,
         _kernel_ctx: Option<&KernelContext>,
     ) -> CliResult<ProviderTurn> {
         let mut calls = self.turn_calls.lock().expect("turn calls lock");
@@ -661,6 +687,10 @@ impl ConversationRuntime for FakeRuntime {
             .lock()
             .expect("turn request lock")
             .push(messages.to_vec());
+        self.turn_requested_tool_views
+            .lock()
+            .expect("turn request tool views lock")
+            .push(tool_view.clone());
         drop(calls);
         self.turn_responses
             .lock()
@@ -741,8 +771,11 @@ fn test_config() -> LoongClawConfig {
 #[tokio::test]
 async fn default_runtime_supports_injected_context_engine() {
     let runtime = DefaultConversationRuntime::with_context_engine(StubContextEngine);
+    let tool_view = runtime
+        .tool_view(&test_config(), "session-injected", None)
+        .expect("default runtime tool view");
     let messages = runtime
-        .build_messages(&test_config(), "session-injected", true, None)
+        .build_messages(&test_config(), "session-injected", true, &tool_view, None)
         .await
         .expect("build messages via injected context engine");
 
@@ -757,8 +790,11 @@ async fn default_runtime_can_resolve_context_engine_from_registry() {
         .expect("register context engine");
     let runtime = DefaultConversationRuntime::from_engine_id(Some("stub-registry"))
         .expect("resolve context engine from registry");
+    let tool_view = runtime
+        .tool_view(&test_config(), "session-registry", None)
+        .expect("default runtime tool view");
     let messages = runtime
-        .build_messages(&test_config(), "session-registry", true, None)
+        .build_messages(&test_config(), "session-registry", true, &tool_view, None)
         .await
         .expect("build messages via registry context engine");
 
@@ -778,8 +814,11 @@ async fn default_runtime_prefers_configured_context_engine_when_env_not_set() {
 
     let runtime = DefaultConversationRuntime::from_config_or_env(&config)
         .expect("resolve context engine from config");
+    let tool_view = runtime
+        .tool_view(&config, "session-config", None)
+        .expect("configured runtime tool view");
     let messages = runtime
-        .build_messages(&config, "session-config", true, None)
+        .build_messages(&config, "session-config", true, &tool_view, None)
         .await
         .expect("build messages via configured context engine");
 
@@ -793,6 +832,101 @@ fn default_runtime_exposes_context_engine_metadata() {
     let metadata = runtime.context_engine_metadata();
     assert_eq!(metadata.id, DEFAULT_CONTEXT_ENGINE_ID);
     assert_eq!(metadata.api_version, CONTEXT_ENGINE_API_VERSION);
+}
+
+#[tokio::test]
+async fn default_runtime_build_messages_respects_restricted_tool_view() {
+    let runtime = DefaultConversationRuntime::default();
+    let view = crate::tools::ToolView::from_tool_names(["file.read"]);
+
+    let messages = runtime
+        .build_messages(&test_config(), "noop-session", true, &view, None)
+        .await
+        .expect("build messages");
+
+    assert!(!messages.is_empty());
+    let system_content = messages[0]["content"].as_str().expect("system content");
+    assert!(system_content.contains("- file.read:"));
+    assert!(!system_content.contains("- file.write:"));
+    assert!(!system_content.contains("- shell.exec:"));
+}
+
+#[cfg(feature = "memory-sqlite")]
+#[test]
+fn default_runtime_tool_view_uses_persisted_delegate_child_restrictions() {
+    let mut config = test_config();
+    config.tools.delegate.allow_shell_in_child = false;
+    let db_path = std::env::temp_dir().join(format!(
+        "{}.sqlite3",
+        unique_acp_test_id("conversation-tool-view", "persisted-child")
+    ));
+    let _ = std::fs::remove_file(&db_path);
+    config.memory.sqlite_path = db_path.display().to_string();
+    let memory_config =
+        crate::memory::runtime_config::MemoryRuntimeConfig::from_memory_config(&config.memory);
+    let repo = crate::session::repository::SessionRepository::new(&memory_config)
+        .expect("session repository");
+    repo.create_session(crate::session::repository::NewSessionRecord {
+        session_id: "root-session".to_owned(),
+        kind: crate::session::repository::SessionKind::Root,
+        parent_session_id: None,
+        label: Some("Root".to_owned()),
+        state: crate::session::repository::SessionState::Ready,
+    })
+    .expect("create root session");
+    repo.create_session(crate::session::repository::NewSessionRecord {
+        session_id: "child-session".to_owned(),
+        kind: crate::session::repository::SessionKind::DelegateChild,
+        parent_session_id: Some("root-session".to_owned()),
+        label: Some("Child".to_owned()),
+        state: crate::session::repository::SessionState::Ready,
+    })
+    .expect("create child session");
+
+    let runtime = DefaultConversationRuntime::default();
+    let child_view = runtime
+        .tool_view(&config, "child-session", None)
+        .expect("child tool view");
+
+    assert!(child_view.contains("file.read"));
+    assert!(child_view.contains("file.write"));
+    assert!(!child_view.contains("shell.exec"));
+}
+
+#[cfg(feature = "memory-sqlite")]
+#[test]
+fn default_runtime_tool_view_falls_back_to_restricted_child_view_when_lineage_is_broken() {
+    let mut config = test_config();
+    config.tools.delegate.allow_shell_in_child = false;
+    let db_path = std::env::temp_dir().join(format!(
+        "{}.sqlite3",
+        unique_acp_test_id("conversation-tool-view", "broken-lineage")
+    ));
+    let _ = std::fs::remove_file(&db_path);
+    config.memory.sqlite_path = db_path.display().to_string();
+    let memory_config =
+        crate::memory::runtime_config::MemoryRuntimeConfig::from_memory_config(&config.memory);
+    let repo = crate::session::repository::SessionRepository::new(&memory_config)
+        .expect("session repository");
+    repo.create_session(crate::session::repository::NewSessionRecord {
+        session_id: "child-session".to_owned(),
+        kind: crate::session::repository::SessionKind::DelegateChild,
+        parent_session_id: Some("missing-parent".to_owned()),
+        label: Some("Child".to_owned()),
+        state: crate::session::repository::SessionState::Ready,
+    })
+    .expect("create child session");
+
+    let runtime = DefaultConversationRuntime::default();
+    let child_view = runtime
+        .tool_view(&config, "child-session", None)
+        .expect("child tool view");
+
+    assert!(child_view.contains("file.read"));
+    assert!(child_view.contains("file.write"));
+    assert!(!child_view.contains("shell.exec"));
+    assert!(!child_view.contains("delegate"));
+    assert!(!child_view.contains("delegate_async"));
 }
 
 #[tokio::test]
@@ -958,8 +1092,11 @@ async fn default_runtime_prefers_env_context_engine_over_config() {
 
     let runtime = DefaultConversationRuntime::from_config_or_env(&config)
         .expect("resolve context engine from env override");
+    let tool_view = runtime
+        .tool_view(&config, "session-env-priority", None)
+        .expect("env-selected runtime tool view");
     let messages = runtime
-        .build_messages(&config, "session-env-priority", true, None)
+        .build_messages(&config, "session-env-priority", true, &tool_view, None)
         .await
         .expect("build messages via env-selected context engine");
 
@@ -5112,6 +5249,49 @@ async fn turn_engine_execute_turn_no_kernel_returns_denied() {
     }
 }
 
+#[test]
+fn turn_engine_denies_known_tool_outside_restricted_view() {
+    use crate::conversation::turn_engine::{
+        ProviderTurn, ToolIntent, TurnEngine, TurnFailureKind, TurnResult,
+    };
+
+    let engine = TurnEngine::new(1);
+    let turn = ProviderTurn {
+        assistant_text: "".to_owned(),
+        tool_intents: vec![ToolIntent {
+            tool_name: "shell.exec".to_owned(),
+            args_json: serde_json::json!({"command": "echo", "args": ["hidden"]}),
+            source: "provider_tool_call".to_owned(),
+            session_id: "delegate-child".to_owned(),
+            turn_id: "t1".to_owned(),
+            tool_call_id: "c-hidden".to_owned(),
+        }],
+        raw_meta: serde_json::Value::Null,
+    };
+
+    let result = engine.evaluate_turn_in_view(
+        &turn,
+        &crate::tools::ToolView::from_tool_names(["file.read"]),
+    );
+
+    match result {
+        TurnResult::ToolDenied(failure) => {
+            assert_eq!(failure.kind, TurnFailureKind::PolicyDenied);
+            assert_eq!(failure.code, "tool_not_visible");
+            assert!(
+                failure.reason.contains("tool_not_visible"),
+                "failure={failure:?}"
+            );
+        }
+        other @ TurnResult::FinalText(_)
+        | other @ TurnResult::NeedsApproval(_)
+        | other @ TurnResult::ToolError(_)
+        | other @ TurnResult::ProviderError(_) => {
+            panic!("expected ToolDenied, got {:?}", other)
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn turn_engine_tool_execution_error_is_marked_retryable() {
     use crate::conversation::turn_engine::{
@@ -5940,8 +6120,11 @@ async fn build_messages_routes_memory_window_through_kernel_when_context_provide
     let (ctx, invocations) = build_kernel_context(audit.clone());
     let runtime = DefaultConversationRuntime::default();
     let config = test_config();
+    let tool_view = runtime
+        .tool_view(&config, "session-k-window", Some(&ctx))
+        .expect("kernel window tool view");
     let messages = runtime
-        .build_messages(&config, "session-k-window", true, Some(&ctx))
+        .build_messages(&config, "session-k-window", true, &tool_view, Some(&ctx))
         .await
         .expect("build messages via kernel");
 
@@ -6174,7 +6357,13 @@ async fn persisted_turn_checkpoint_events_survive_reload_without_polluting_promp
     .expect("persist finalized checkpoint");
 
     let messages = runtime
-        .build_messages(&config, session_id, true, None)
+        .build_messages(
+            &config,
+            session_id,
+            true,
+            &crate::tools::runtime_tool_view_for_config(&config.tools),
+            None,
+        )
         .await
         .expect("reload prompt history");
     assert!(
@@ -7792,6 +7981,39 @@ async fn load_turn_checkpoint_diagnostics_uses_single_kernel_window_snapshot_for
             .expect("build context lock")
             .as_slice(),
         &[(session_id.to_owned(), true)]
+    );
+}
+
+#[tokio::test]
+async fn handle_turn_with_runtime_passes_restricted_tool_view_into_provider_request() {
+    let child_view = crate::tools::ToolView::from_tool_names(["file.read"]);
+    let runtime = FakeRuntime::new(
+        vec![json!({"role": "system", "content": "sys"})],
+        Ok("assistant-reply".to_owned()),
+    )
+    .with_tool_view(child_view.clone());
+    let coordinator = ConversationTurnCoordinator::new();
+
+    let reply = coordinator
+        .handle_turn_with_runtime(
+            &test_config(),
+            "delegate-child-session",
+            "hello",
+            ProviderErrorMode::Propagate,
+            &runtime,
+            None,
+        )
+        .await
+        .expect("handle turn success");
+
+    assert_eq!(reply, "assistant-reply");
+    assert_eq!(
+        runtime
+            .turn_requested_tool_views
+            .lock()
+            .expect("turn request tool views lock")
+            .as_slice(),
+        &[child_view]
     );
 }
 

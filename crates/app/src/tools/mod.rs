@@ -19,7 +19,9 @@ pub mod shell_policy_ext;
 
 pub use catalog::{
     ToolAvailability, ToolCatalog, ToolDescriptor, ToolExecutionKind, ToolView,
-    planned_root_tool_view, runtime_tool_view, tool_catalog,
+    delegate_child_tool_view_for_config, delegate_child_tool_view_for_config_with_delegate,
+    planned_delegate_child_tool_view, planned_root_tool_view, runtime_tool_view,
+    runtime_tool_view_for_config, tool_catalog,
 };
 pub use kernel_adapter::MvpToolAdapter;
 
@@ -198,7 +200,7 @@ pub fn capability_snapshot_for_view(view: &ToolView) -> String {
     capability_snapshot_for_view_with_config(view, runtime_config::get_tool_runtime_config())
 }
 
-fn capability_snapshot_for_view_with_config(
+pub(crate) fn capability_snapshot_for_view_with_config(
     view: &ToolView,
     config: &runtime_config::ToolRuntimeConfig,
 ) -> String {
@@ -484,6 +486,29 @@ mod tests {
 
         assert!(err.contains("tool_not_advertisable"), "error: {err}");
         assert!(err.contains("delegate"), "error: {err}");
+    }
+
+    #[cfg(all(feature = "tool-file", feature = "tool-shell"))]
+    #[test]
+    fn delegate_child_tool_view_hides_shell_by_default() {
+        let view = delegate_child_tool_view_for_config(&crate::config::ToolConfig::default());
+
+        assert!(view.contains("file.read"));
+        assert!(view.contains("file.write"));
+        assert!(!view.contains("shell.exec"));
+    }
+
+    #[cfg(all(feature = "tool-file", feature = "tool-shell"))]
+    #[test]
+    fn delegate_child_tool_view_can_allow_shell_when_enabled() {
+        let mut config = crate::config::ToolConfig::default();
+        config.delegate.allow_shell_in_child = true;
+
+        let view = delegate_child_tool_view_for_config(&config);
+
+        assert!(view.contains("file.read"));
+        assert!(view.contains("file.write"));
+        assert!(view.contains("shell.exec"));
     }
 
     #[cfg(all(feature = "tool-file", feature = "tool-shell"))]

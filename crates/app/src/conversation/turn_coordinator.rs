@@ -1765,6 +1765,7 @@ impl ConversationTurnCoordinator {
         }
 
         runtime.bootstrap(config, session_id, kernel_ctx).await?;
+        let tool_view = runtime.tool_view(config, session_id, kernel_ctx)?;
         let preparation = ProviderTurnPreparation::from_assembled_context(
             config,
             runtime
@@ -1779,7 +1780,12 @@ impl ConversationTurnCoordinator {
             user_input,
             &preparation,
             runtime
-                .request_turn(config, &preparation.session.messages, kernel_ctx)
+                .request_turn(
+                    config,
+                    &preparation.session.messages,
+                    &tool_view,
+                    kernel_ctx,
+                )
                 .await,
             error_mode,
             kernel_ctx,

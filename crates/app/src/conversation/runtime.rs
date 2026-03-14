@@ -6,6 +6,10 @@ use serde_json::{Value, json};
 
 use crate::CliResult;
 use crate::KernelContext;
+use crate::tools::{
+    ToolView, delegate_child_tool_view_for_config,
+    delegate_child_tool_view_for_config_with_delegate, runtime_tool_view_for_config,
+};
 
 use super::super::memory;
 use super::super::{config::LoongClawConfig, provider};
@@ -18,6 +22,37 @@ use super::context_engine_registry::{
     list_context_engine_metadata, resolve_context_engine,
 };
 use super::turn_engine::ProviderTurn;
+
+#[cfg(feature = "memory-sqlite")]
+use crate::memory::runtime_config::MemoryRuntimeConfig;
+#[cfg(feature = "memory-sqlite")]
+use crate::session::repository::{SessionKind, SessionRepository};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionContext {
+    pub session_id: String,
+    pub parent_session_id: Option<String>,
+    pub tool_view: ToolView,
+}
+
+impl SessionContext {
+    pub fn root_with_tool_view(session_id: impl Into<String>, tool_view: ToolView) -> Self {
+        Self {
+            session_id: normalize_session_id(session_id.into()),
+            parent_session_id: None,
+            tool_view,
+        }
+    }
+}
+
+fn normalize_session_id(session_id: String) -> String {
+    let trimmed = session_id.trim();
+    if trimmed.is_empty() {
+        "default".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
 
 pub struct DefaultConversationRuntime<E = DefaultContextEngine> {
     context_engine: E,
@@ -147,6 +182,28 @@ impl DefaultConversationRuntime<Box<dyn ConversationContextEngine>> {
 
 #[async_trait]
 pub trait ConversationRuntime: Send + Sync {
+    fn session_context(
+        &self,
+        config: &LoongClawConfig,
+        session_id: &str,
+        kernel_ctx: Option<&KernelContext>,
+    ) -> CliResult<SessionContext> {
+        Ok(SessionContext::root_with_tool_view(
+            session_id,
+            self.tool_view(config, session_id, kernel_ctx)?,
+        ))
+    }
+
+    fn tool_view(
+        &self,
+        config: &LoongClawConfig,
+        session_id: &str,
+        kernel_ctx: Option<&KernelContext>,
+    ) -> CliResult<ToolView> {
+        let _ = (session_id, kernel_ctx);
+        Ok(runtime_tool_view_for_config(&config.tools))
+    }
+
     async fn bootstrap(
         &self,
         _config: &LoongClawConfig,
@@ -172,15 +229,23 @@ pub trait ConversationRuntime: Send + Sync {
         include_system_prompt: bool,
         kernel_ctx: Option<&KernelContext>,
     ) -> CliResult<AssembledConversationContext> {
-        self.build_messages(config, session_id, include_system_prompt, kernel_ctx)
-            .await
-            .map(AssembledConversationContext::from_messages)
+        let tool_view = self.tool_view(config, session_id, kernel_ctx)?;
+        self.build_messages(
+            config,
+            session_id,
+            include_system_prompt,
+            &tool_view,
+            kernel_ctx,
+        )
+        .await
+        .map(AssembledConversationContext::from_messages)
     }
     async fn build_messages(
         &self,
         config: &LoongClawConfig,
         session_id: &str,
         include_system_prompt: bool,
+        tool_view: &ToolView,
         kernel_ctx: Option<&KernelContext>,
     ) -> CliResult<Vec<Value>>;
 
@@ -195,6 +260,7 @@ pub trait ConversationRuntime: Send + Sync {
         &self,
         config: &LoongClawConfig,
         messages: &[Value],
+        tool_view: &ToolView,
         kernel_ctx: Option<&KernelContext>,
     ) -> CliResult<ProviderTurn>;
 
@@ -251,6 +317,56 @@ impl<E> ConversationRuntime for DefaultConversationRuntime<E>
 where
     E: ConversationContextEngine,
 {
+    fn tool_view(
+        &self,
+        config: &LoongClawConfig,
+        session_id: &str,
+        _kernel_ctx: Option<&KernelContext>,
+    ) -> CliResult<ToolView> {
+        #[cfg(feature = "memory-sqlite")]
+        {
+            let memory_config = MemoryRuntimeConfig::from_memory_config(&config.memory);
+            if let Ok(repo) = SessionRepository::new(&memory_config) {
+                if let Some(session) = repo
+                    .load_session(session_id)
+                    .map_err(|error| format!("load session tool-view context failed: {error}"))?
+                {
+                    if session.parent_session_id.is_some() {
+                        let depth = match repo.session_lineage_depth(session_id) {
+                            Ok(depth) => depth,
+                            Err(error)
+                                if error.starts_with("session_lineage_broken:")
+                                    || error.starts_with("session_lineage_cycle_detected:") =>
+                            {
+                                0
+                            }
+                            Err(error) => {
+                                return Err(format!(
+                                    "compute session lineage depth for tool view failed: {error}"
+                                ));
+                            }
+                        };
+                        let allow_nested_delegate = depth < config.tools.delegate.max_depth;
+                        return Ok(delegate_child_tool_view_for_config_with_delegate(
+                            &config.tools,
+                            allow_nested_delegate,
+                        ));
+                    }
+                } else if repo
+                    .load_session_summary_with_legacy_fallback(session_id)
+                    .map_err(|error| {
+                        format!("load legacy session tool-view context failed: {error}")
+                    })?
+                    .is_some_and(|session| session.kind == SessionKind::DelegateChild)
+                {
+                    return Ok(delegate_child_tool_view_for_config(&config.tools));
+                }
+            }
+        }
+
+        Ok(runtime_tool_view_for_config(&config.tools))
+    }
+
     async fn bootstrap(
         &self,
         config: &LoongClawConfig,
@@ -288,6 +404,14 @@ where
             &mut assembled.messages,
             assembled.system_prompt_addition.as_deref(),
         );
+        if include_system_prompt {
+            let session_tool_view = self.tool_view(config, session_id, kernel_ctx)?;
+            apply_tool_view_to_system_prompt_if_needed(
+                &mut assembled.messages,
+                &runtime_tool_view_for_config(&config.tools),
+                &session_tool_view,
+            );
+        }
         Ok(assembled)
     }
 
@@ -296,11 +420,19 @@ where
         config: &LoongClawConfig,
         session_id: &str,
         include_system_prompt: bool,
+        tool_view: &ToolView,
         kernel_ctx: Option<&KernelContext>,
     ) -> CliResult<Vec<Value>> {
         self.build_context(config, session_id, include_system_prompt, kernel_ctx)
             .await
-            .map(|assembled| assembled.messages)
+            .map(|mut assembled| {
+                apply_tool_view_to_system_prompt_if_needed(
+                    &mut assembled.messages,
+                    &runtime_tool_view_for_config(&config.tools),
+                    tool_view,
+                );
+                assembled.messages
+            })
     }
 
     async fn request_completion(
@@ -316,9 +448,10 @@ where
         &self,
         config: &LoongClawConfig,
         messages: &[Value],
+        tool_view: &ToolView,
         kernel_ctx: Option<&KernelContext>,
     ) -> CliResult<ProviderTurn> {
-        provider::request_turn(config, messages, kernel_ctx).await
+        provider::request_turn_in_view(config, messages, tool_view, kernel_ctx).await
     }
 
     async fn persist_turn(
@@ -444,4 +577,47 @@ fn apply_system_prompt_addition(messages: &mut Vec<Value>, addition: Option<&str
             "content": addition,
         }),
     );
+}
+
+fn apply_tool_view_to_system_prompt_if_needed(
+    messages: &mut [Value],
+    runtime_tool_view: &ToolView,
+    requested_tool_view: &ToolView,
+) {
+    if requested_tool_view != runtime_tool_view {
+        apply_tool_view_to_system_prompt(messages, requested_tool_view);
+    }
+}
+
+fn apply_tool_view_to_system_prompt(messages: &mut [Value], tool_view: &ToolView) {
+    for message in messages.iter_mut() {
+        let is_system = message.get("role").and_then(Value::as_str) == Some("system");
+        if !is_system {
+            continue;
+        }
+
+        let Some(content) = message
+            .get("content")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let Some(snapshot_start) = content.find("[available_tools]") else {
+            continue;
+        };
+        let snapshot = crate::tools::capability_snapshot_for_view(tool_view);
+
+        let prefix = content[..snapshot_start].trim_end();
+        let rewritten = if prefix.is_empty() {
+            snapshot
+        } else {
+            format!("{prefix}\n\n{snapshot}")
+        };
+
+        if let Some(object) = message.as_object_mut() {
+            object.insert("content".to_owned(), Value::String(rewritten));
+        }
+        return;
+    }
 }

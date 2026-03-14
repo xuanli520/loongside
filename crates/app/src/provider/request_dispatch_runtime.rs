@@ -2,9 +2,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::Value;
 
-use crate::config::LoongClawConfig;
-use crate::tools;
-
 use super::capability_profile_runtime::ProviderCapabilityProfile;
 use super::contracts::{ProviderRuntimeContract, should_disable_tool_schema_for_error};
 use super::failover::ModelRequestError;
@@ -14,6 +11,7 @@ use super::request_payload_runtime::{
     build_completion_request_body_with_capability, build_turn_request_body_with_capability,
 };
 use super::shape;
+use crate::config::LoongClawConfig;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn request_completion_with_model(
@@ -69,13 +67,13 @@ pub(super) async fn request_turn_with_model(
     runtime_contract: ProviderRuntimeContract,
     capability_profile: &ProviderCapabilityProfile,
     auto_model_mode: bool,
+    tool_definitions: &[Value],
     authorization_header: Option<String>,
     endpoint: &str,
     headers: &reqwest::header::HeaderMap,
     request_policy: &policy::ProviderRequestPolicy,
     client: &reqwest::Client,
 ) -> Result<crate::conversation::turn_engine::ProviderTurn, ModelRequestError> {
-    let tool_definitions = tools::provider_tool_definitions();
     let capability = capability_profile.resolve_for_model(model.as_str());
     let include_tool_schema =
         AtomicBool::new(capability.turn_tool_schema_enabled() && !tool_definitions.is_empty());
@@ -102,7 +100,7 @@ pub(super) async fn request_turn_with_model(
                 payload_mode,
                 capability,
                 include_tool_schema.load(Ordering::Relaxed),
-                &tool_definitions,
+                tool_definitions,
             )
         },
         shape::extract_provider_turn,

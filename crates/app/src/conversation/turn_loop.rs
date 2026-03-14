@@ -106,9 +106,10 @@ impl ConversationTurnLoop {
         kernel_ctx: Option<&KernelContext>,
     ) -> CliResult<String> {
         let policy = TurnLoopPolicy::from_config(config);
+        let tool_view = runtime.tool_view(config, session_id, kernel_ctx)?;
         let mut session = initialize_turn_loop_session(
             runtime
-                .build_messages(config, session_id, true, kernel_ctx)
+                .build_messages(config, session_id, true, &tool_view, kernel_ctx)
                 .await?,
             user_input,
             &policy,
@@ -117,7 +118,7 @@ impl ConversationTurnLoop {
         for round_index in 0..policy.max_rounds {
             let turn = match decide_provider_turn_request_action(
                 runtime
-                    .request_turn(config, &session.messages, kernel_ctx)
+                    .request_turn(config, &session.messages, &tool_view, kernel_ctx)
                     .await,
                 error_mode,
             ) {
@@ -151,6 +152,7 @@ impl ConversationTurnLoop {
                 config,
                 &policy,
                 &turn,
+                &tool_view,
                 kernel_ctx,
                 &mut session.loop_supervisor,
             )
@@ -296,6 +298,7 @@ async fn evaluate_round_kernel(
     config: &LoongClawConfig,
     policy: &TurnLoopPolicy,
     turn: &ProviderTurn,
+    tool_view: &crate::tools::ToolView,
     kernel_ctx: Option<&KernelContext>,
     loop_supervisor: &mut ToolLoopSupervisor,
 ) -> RoundKernelEvaluation {
@@ -310,7 +313,7 @@ async fn evaluate_round_kernel(
             .conversation
             .tool_result_payload_summary_limit_chars(),
     )
-    .execute_turn(turn, kernel_ctx)
+    .execute_turn_in_view(turn, tool_view, kernel_ctx)
     .await;
     let loop_verdict = if let (Some(signature), Some(name_signature)) = (
         current_tool_signature.as_deref(),

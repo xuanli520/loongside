@@ -2,6 +2,8 @@ use std::collections::BTreeSet;
 
 use serde_json::{Value, json};
 
+use crate::config::ToolConfig;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolExecutionKind {
     Core,
@@ -307,12 +309,17 @@ pub fn tool_catalog() -> ToolCatalog {
 }
 
 pub fn runtime_tool_view() -> ToolView {
+    runtime_tool_view_for_config(&ToolConfig::default())
+}
+
+pub fn runtime_tool_view_for_config(config: &ToolConfig) -> ToolView {
     let catalog = tool_catalog();
     ToolView::from_tool_names(
         catalog
             .descriptors()
             .iter()
             .filter(|descriptor| descriptor.availability == ToolAvailability::Runtime)
+            .filter(|descriptor| tool_is_enabled_for_runtime_view(descriptor.name, config))
             .map(|descriptor| descriptor.name),
     )
 }
@@ -325,6 +332,77 @@ pub fn planned_root_tool_view() -> ToolView {
             .iter()
             .map(|descriptor| descriptor.name),
     )
+}
+
+pub fn planned_delegate_child_tool_view() -> ToolView {
+    delegate_child_tool_view_for_config(&ToolConfig::default())
+}
+
+pub fn delegate_child_tool_view_for_config(config: &ToolConfig) -> ToolView {
+    delegate_child_tool_view_for_config_with_delegate(config, false)
+}
+
+pub fn delegate_child_tool_view_for_config_with_delegate(
+    config: &ToolConfig,
+    allow_delegate: bool,
+) -> ToolView {
+    let catalog = tool_catalog();
+    let mut names = Vec::new();
+    let allowlist = BTreeSet::<&str>::from_iter(
+        config
+            .delegate
+            .child_tool_allowlist
+            .iter()
+            .map(String::as_str),
+    );
+
+    for descriptor in catalog.descriptors().iter().filter(|descriptor| {
+        descriptor.execution_kind == ToolExecutionKind::Core
+            && descriptor.availability == ToolAvailability::Runtime
+    }) {
+        match descriptor.name {
+            "shell.exec" =>
+            {
+                #[cfg(feature = "tool-shell")]
+                if config.delegate.allow_shell_in_child {
+                    names.push(descriptor.name);
+                }
+            }
+            name if allowlist.contains(name) => names.push(name),
+            _ => {}
+        }
+    }
+
+    if allow_delegate
+        && config.delegate.enabled
+        && catalog
+            .descriptor("delegate")
+            .is_some_and(|descriptor| descriptor.availability == ToolAvailability::Runtime)
+    {
+        names.push("delegate");
+    }
+    if allow_delegate
+        && config.delegate.enabled
+        && catalog
+            .descriptor("delegate_async")
+            .is_some_and(|descriptor| descriptor.availability == ToolAvailability::Runtime)
+    {
+        names.push("delegate_async");
+    }
+
+    ToolView::from_tool_names(names)
+}
+
+fn tool_is_enabled_for_runtime_view(tool_name: &str, config: &ToolConfig) -> bool {
+    match tool_name {
+        "sessions_list" | "sessions_history" | "session_status" | "session_events"
+        | "session_archive" | "session_cancel" | "session_recover" | "session_wait" => {
+            config.sessions.enabled
+        }
+        "sessions_send" => config.messages.enabled,
+        "delegate" | "delegate_async" => config.delegate.enabled,
+        _ => true,
+    }
 }
 
 fn claw_import_definition(descriptor: &ToolDescriptor) -> Value {
