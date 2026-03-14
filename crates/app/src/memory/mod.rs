@@ -210,18 +210,17 @@ pub fn load_prompt_context_with_diagnostics(
     if let Some(profile) = profile_entry.take() {
         entries.push(profile);
     }
-    if matches!(config.mode, crate::config::MemoryMode::WindowPlusSummary) {
-        if let Some(summary) = snapshot
+    if matches!(config.mode, crate::config::MemoryMode::WindowPlusSummary)
+        && let Some(summary) = snapshot
             .summary_body
             .as_deref()
             .and_then(sqlite::format_summary_block)
-        {
-            entries.push(MemoryContextEntry {
-                kind: MemoryContextKind::Summary,
-                role: "system".to_owned(),
-                content: summary,
-            });
-        }
+    {
+        entries.push(MemoryContextEntry {
+            kind: MemoryContextKind::Summary,
+            role: "system".to_owned(),
+            content: summary,
+        });
     }
     for turn in snapshot.window_turns {
         entries.push(MemoryContextEntry {

@@ -63,18 +63,17 @@ pub fn load_prompt_context(
     #[cfg(feature = "memory-sqlite")]
     {
         let snapshot = sqlite::load_context_snapshot(session_id, config)?;
-        if matches!(config.mode, MemoryMode::WindowPlusSummary) {
-            if let Some(summary) = snapshot
+        if matches!(config.mode, MemoryMode::WindowPlusSummary)
+            && let Some(summary) = snapshot
                 .summary_body
                 .as_deref()
                 .and_then(sqlite::format_summary_block)
-            {
-                entries.push(MemoryContextEntry {
-                    kind: MemoryContextKind::Summary,
-                    role: "system".to_owned(),
-                    content: summary,
-                });
-            }
+        {
+            entries.push(MemoryContextEntry {
+                kind: MemoryContextKind::Summary,
+                role: "system".to_owned(),
+                content: summary,
+            });
         }
         for turn in snapshot.window_turns {
             entries.push(MemoryContextEntry {

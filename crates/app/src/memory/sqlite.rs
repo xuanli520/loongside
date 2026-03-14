@@ -368,10 +368,9 @@ impl SqliteRuntime {
         operation: &'static str,
         callback: impl FnOnce(&Connection) -> Result<T, String>,
     ) -> Result<T, String> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| format!("lock sqlite runtime for {operation} failed: mutex poisoned"))?;
+        let connection = self.connection.lock().map_err(|poisoned| {
+            format!("lock sqlite runtime for {operation} failed: {poisoned}")
+        })?;
         callback(&connection)
     }
 
@@ -380,10 +379,9 @@ impl SqliteRuntime {
         operation: &'static str,
         callback: impl FnOnce(&mut Connection) -> Result<T, String>,
     ) -> Result<T, String> {
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| format!("lock sqlite runtime for {operation} failed: mutex poisoned"))?;
+        let mut connection = self.connection.lock().map_err(|poisoned| {
+            format!("lock sqlite runtime for {operation} failed: {poisoned}")
+        })?;
         callback(&mut connection)
     }
 }
@@ -676,7 +674,9 @@ fn lexical_normalize_runtime_db_path(path: &Path) -> PathBuf {
             Component::ParentDir => {
                 let _ = normalized.pop();
             }
-            _ => normalized.push(component.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::Normal(part) => normalized.push(part),
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
         }
     }
 
@@ -691,7 +691,7 @@ fn normalize_runtime_db_path(path: &Path) -> Result<PathBuf, String> {
     let absolute = lexical_normalize_runtime_db_path(&absolutize_runtime_db_path(path)?);
     if let Some(normalized_path) = sqlite_runtime_path_alias_registry()
         .lock()
-        .map_err(|_| "lock sqlite runtime path alias registry failed: mutex poisoned".to_owned())?
+        .map_err(|poisoned| format!("lock sqlite runtime path alias registry failed: {poisoned}"))?
         .get(&absolute)
         .cloned()
     {
@@ -723,7 +723,9 @@ fn normalize_runtime_db_path(path: &Path) -> Result<PathBuf, String> {
 
     let mut alias_registry = sqlite_runtime_path_alias_registry()
         .lock()
-        .map_err(|_| "lock sqlite runtime path alias registry failed: mutex poisoned".to_owned())?;
+        .map_err(|poisoned| {
+            format!("lock sqlite runtime path alias registry failed: {poisoned}")
+        })?;
     alias_registry.insert(absolute, normalized.clone());
     alias_registry.insert(normalized.clone(), normalized.clone());
     Ok(normalized)
@@ -878,7 +880,7 @@ fn acquire_sqlite_runtime_with_diagnostics(
     let registry_lock_started_at = StdInstant::now();
     let mut registry = sqlite_runtime_registry()
         .lock()
-        .map_err(|_| "lock sqlite runtime registry failed: mutex poisoned".to_owned())?;
+        .map_err(|poisoned| format!("lock sqlite runtime registry failed: {poisoned}"))?;
     diagnostics.registry_lock_ms = elapsed_ms(registry_lock_started_at);
 
     let registry_lookup_started_at = StdInstant::now();
@@ -1394,7 +1396,7 @@ pub(super) fn drop_cached_sqlite_runtime(path: &Path) -> Result<bool, String> {
     let normalized_path = normalize_runtime_db_path(path)?;
     let mut registry = sqlite_runtime_registry()
         .lock()
-        .map_err(|_| "lock sqlite runtime registry failed: mutex poisoned".to_owned())?;
+        .map_err(|poisoned| format!("lock sqlite runtime registry failed: {poisoned}"))?;
     Ok(registry.remove(&normalized_path).is_some())
 }
 
@@ -1651,12 +1653,12 @@ fn query_recent_prompt_turns_with_payload_overflow_probe_fallback(
     conn: &Connection,
     session_id: &str,
     limit: usize,
-    mut diagnostics: Option<&mut PromptWindowQueryDiagnostics>,
+    diagnostics: Option<&mut PromptWindowQueryDiagnostics>,
 ) -> Result<RecentPromptWindowTurns, String> {
     let fetch_limit = limit.saturating_add(1);
     let fallback_query_started_at = StdInstant::now();
     let mut recent_rows = query_recent_prompt_turn_rows_with_ids(conn, session_id, fetch_limit)?;
-    if let Some(diagnostics) = diagnostics.as_deref_mut() {
+    if let Some(diagnostics) = diagnostics {
         diagnostics.fallback_rows_query_ms = elapsed_ms(fallback_query_started_at);
     }
     recent_rows.reverse();
@@ -2591,7 +2593,7 @@ fn rebuild_summary_checkpoint_with_diagnostics(
     let checkpoint_upsert_diagnostics =
         upsert_summary_checkpoint_with_diagnostics(conn, session_id, &checkpoint)?;
     let checkpoint_upsert_elapsed_ms = elapsed_ms(checkpoint_upsert_started_at);
-    if let Some(diagnostics) = diagnostics.as_deref_mut() {
+    if let Some(diagnostics) = diagnostics {
         diagnostics.summary_rebuild_checkpoint_upsert_ms += checkpoint_upsert_elapsed_ms;
         diagnostics.summary_rebuild_checkpoint_metadata_upsert_ms +=
             checkpoint_upsert_diagnostics.metadata_upsert_ms;
@@ -4102,7 +4104,7 @@ mod tests {
         reset_summary_materialization_metrics_for_tests();
         let config_window_three = MemoryRuntimeConfig {
             sliding_window: 3,
-            ..config_window_two.clone()
+            ..config_window_two
         };
         let _snapshot =
             load_context_snapshot("summary-streaming-rebuild-session", &config_window_three)
@@ -4269,7 +4271,7 @@ mod tests {
         reset_summary_materialization_metrics_for_tests();
         let config_window_three = MemoryRuntimeConfig {
             sliding_window: 3,
-            ..config_window_two.clone()
+            ..config_window_two
         };
         let snapshot =
             load_context_snapshot("summary-saturation-rebuild-session", &config_window_three)
@@ -4353,7 +4355,7 @@ mod tests {
         reset_summary_materialization_metrics_for_tests();
         let config_window_four = MemoryRuntimeConfig {
             sliding_window: 4,
-            ..config_window_two.clone()
+            ..config_window_two
         };
         let snapshot = load_context_snapshot(
             "summary-frontier-fast-forward-rebuild-session",
@@ -4435,7 +4437,7 @@ mod tests {
 
         let config_window_three = MemoryRuntimeConfig {
             sliding_window: 3,
-            ..config_window_two.clone()
+            ..config_window_two
         };
         let (_snapshot, diagnostics) = load_context_snapshot_with_diagnostics(
             "summary-rebuild-diagnostics-session",
@@ -4649,7 +4651,7 @@ mod tests {
         reset_summary_materialization_metrics_for_tests();
         let config_window_one = MemoryRuntimeConfig {
             sliding_window: 1,
-            ..config_window_two.clone()
+            ..config_window_two
         };
         let snapshot =
             load_context_snapshot("summary-fused-append-rebuild-session", &config_window_one)
@@ -4902,7 +4904,7 @@ mod tests {
 
         let config_window_three = MemoryRuntimeConfig {
             sliding_window: 3,
-            ..config_window_two.clone()
+            ..config_window_two
         };
         let snapshot = load_context_snapshot("window-rebuild-session", &config_window_three)
             .expect("load context snapshot after window change");
@@ -5178,7 +5180,7 @@ mod tests {
         reset_summary_materialization_metrics_for_tests();
         let config_window_two = MemoryRuntimeConfig {
             sliding_window: 2,
-            ..config_window_three.clone()
+            ..config_window_three
         };
         let snapshot = load_context_snapshot("window-shrink-catch-up-session", &config_window_two)
             .expect("load context snapshot after shrinking window");
@@ -5288,7 +5290,7 @@ mod tests {
         reset_summary_materialization_metrics_for_tests();
         let config_window_two = MemoryRuntimeConfig {
             sliding_window: 2,
-            ..config_window_three.clone()
+            ..config_window_three
         };
         let snapshot = load_context_snapshot(
             "window-shrink-saturated-catch-up-session",
@@ -5443,7 +5445,7 @@ mod tests {
 
         let config_large_budget = MemoryRuntimeConfig {
             summary_max_chars: 512,
-            ..config_small_budget.clone()
+            ..config_small_budget
         };
         reset_cached_prepare_metrics_for_tests();
         let _metrics = begin_sqlite_metric_capture_for_tests();
@@ -5548,7 +5550,7 @@ mod tests {
 
         let config_large_budget = MemoryRuntimeConfig {
             summary_max_chars: 512,
-            ..config_small_budget.clone()
+            ..config_small_budget
         };
         reset_cached_prepare_metrics_for_tests();
         reset_summary_materialization_metrics_for_tests();
@@ -5649,7 +5651,7 @@ mod tests {
 
         let config_large_budget = MemoryRuntimeConfig {
             summary_max_chars: 512,
-            ..config_small_budget.clone()
+            ..config_small_budget
         };
         let (snapshot, diagnostics) = load_context_snapshot_with_diagnostics(
             "budget-load-diagnostics-session",

@@ -888,7 +888,7 @@ pub fn run_programmatic_pressure_baseline_lint_cli(
     let report = ProgrammaticPressureBaselineLintReport {
         generated_at_epoch_s: current_epoch_seconds(),
         matrix_path: matrix_path.to_owned(),
-        baseline_path: baseline_path.clone(),
+        baseline_path,
         profile: matrix.profile.clone(),
         baseline_profile: baseline.profile.clone(),
         scenario_count: matrix.scenarios.len(),
@@ -908,7 +908,7 @@ pub fn run_programmatic_pressure_baseline_lint_cli(
         gate_passed,
         error_count: lint.error_count(),
         warning_count: lint.warning_count(),
-        issues: lint.issues.clone(),
+        issues: lint.issues,
     };
 
     write_json_file(output_path, &report)?;
@@ -1005,7 +1005,7 @@ pub fn run_memory_context_benchmark_cli(
             warmup_iterations,
         )?);
     }
-    let report = build_memory_context_benchmark_report(
+    let report = try_build_memory_context_benchmark_report(
         output_path,
         &temp_root,
         history_turns,
@@ -1020,7 +1020,7 @@ pub fn run_memory_context_benchmark_cli(
         suite_repetitions,
         enforce_gate,
         normalized_min_speedup_ratio,
-    );
+    )?;
 
     write_json_file(output_path, &report)?;
     println!("memory context benchmark report written to {output_path}");
@@ -1304,11 +1304,7 @@ pub fn run_memory_context_benchmark_cli(
     if enforce_gate && !report.gate.passed {
         return Err(format!(
             "memory context benchmark regression gate failed: {}",
-            report
-                .gate
-                .reason
-                .clone()
-                .unwrap_or_else(|| "gate failed".to_owned())
+            report.gate.reason.as_deref().unwrap_or("gate failed")
         ));
     }
 
@@ -1538,7 +1534,7 @@ fn run_memory_context_benchmark_suite(
     result
 }
 
-fn build_memory_context_benchmark_report(
+fn try_build_memory_context_benchmark_report(
     output_path: &str,
     benchmark_temp_root: &ResolvedMemoryContextBenchmarkTempRoot,
     history_turns: usize,
@@ -1553,10 +1549,10 @@ fn build_memory_context_benchmark_report(
     suite_repetitions: usize,
     enforce_gate: bool,
     normalized_min_speedup_ratio: f64,
-) -> MemoryContextBenchmarkReport {
+) -> CliResult<MemoryContextBenchmarkReport> {
     let representative = suite_runs
         .last()
-        .expect("memory context benchmark requires at least one suite run");
+        .ok_or_else(|| "memory context benchmark requires at least one suite run".to_owned())?;
     let suite_p95_summaries = suite_runs
         .iter()
         .map(summarize_memory_context_suite_p95)
@@ -1954,7 +1950,7 @@ fn build_memory_context_benchmark_report(
         true
     };
 
-    MemoryContextBenchmarkReport {
+    Ok(MemoryContextBenchmarkReport {
         generated_at_epoch_s: current_epoch_seconds(),
         profile: "memory_context".to_owned(),
         output_path: output_path.to_owned(),
@@ -2053,7 +2049,7 @@ fn build_memory_context_benchmark_report(
             .payload_chars,
         flattened_sample_ratios,
         aggregated_p95_median_ms,
-        aggregated_ratios: aggregated_ratios.clone(),
+        aggregated_ratios,
         gate: MemoryContextBenchmarkGateSummary {
             enforced: enforce_gate,
             passed: gate_passed,
@@ -2076,7 +2072,43 @@ fn build_memory_context_benchmark_report(
             warnings: soft_warnings,
             reason: gate_reason,
         },
-    }
+    })
+}
+
+#[cfg(test)]
+fn build_memory_context_benchmark_report(
+    output_path: &str,
+    benchmark_temp_root: &ResolvedMemoryContextBenchmarkTempRoot,
+    history_turns: usize,
+    sliding_window: usize,
+    window_shrink_source_window: usize,
+    summary_max_chars: usize,
+    words_per_turn: usize,
+    rebuild_iterations: usize,
+    hot_iterations: usize,
+    warmup_iterations: usize,
+    suite_runs: &[MemoryContextBenchmarkSuiteSamples],
+    suite_repetitions: usize,
+    enforce_gate: bool,
+    normalized_min_speedup_ratio: f64,
+) -> MemoryContextBenchmarkReport {
+    try_build_memory_context_benchmark_report(
+        output_path,
+        benchmark_temp_root,
+        history_turns,
+        sliding_window,
+        window_shrink_source_window,
+        summary_max_chars,
+        words_per_turn,
+        rebuild_iterations,
+        hot_iterations,
+        warmup_iterations,
+        suite_runs,
+        suite_repetitions,
+        enforce_gate,
+        normalized_min_speedup_ratio,
+    )
+    .expect("memory context benchmark report should build")
 }
 
 fn summarize_memory_context_suite_p95(
@@ -4388,7 +4420,7 @@ fn append_benchmark_turn(
     turn_index: usize,
     words_per_turn: usize,
 ) -> CliResult<()> {
-    let role = if turn_index % 2 == 0 {
+    let role = if turn_index.is_multiple_of(2) {
         "user"
     } else {
         "assistant"
@@ -4566,37 +4598,37 @@ fn build_memory_context_soft_warnings(
             ));
         }
     }
-    if sample_count >= DEFAULT_MEMORY_CONTEXT_WINDOW_COVER_SOFT_WARNING_MIN_SAMPLES {
-        if let (Some(ratio_p95), Some(overhead_p95_ms)) = (
+    if sample_count >= DEFAULT_MEMORY_CONTEXT_WINDOW_COVER_SOFT_WARNING_MIN_SAMPLES
+        && let (Some(ratio_p95), Some(overhead_p95_ms)) = (
             summary_window_cover_vs_window_only_ratio_p95,
             summary_window_cover_overhead_p95_ms,
-        ) {
-            let marginal_cover_regression_under_suite_noise =
-                summary_window_cover_comparison_suite_is_noisy
+        )
+    {
+        let marginal_cover_regression_under_suite_noise =
+            summary_window_cover_comparison_suite_is_noisy
                 && ratio_p95 <= DEFAULT_MEMORY_CONTEXT_WINDOW_COVER_NOISY_SUPPRESSION_MAX_RATIO_P95
                 && overhead_p95_ms
                     <= DEFAULT_MEMORY_CONTEXT_WINDOW_COVER_NOISY_SUPPRESSION_MAX_OVERHEAD_P95_MS;
-            if ratio_p95 > DEFAULT_MEMORY_CONTEXT_WINDOW_COVER_SOFT_MAX_RATIO_P95
-                && overhead_p95_ms > DEFAULT_MEMORY_CONTEXT_WINDOW_COVER_SOFT_MAX_OVERHEAD_P95_MS
-                && !marginal_cover_regression_under_suite_noise
-            {
-                if summary_window_cover_comparison_suite_is_noisy {
-                    warnings.push(format!(
-                        "summary_window_cover p95 overhead {:.3}ms and ratio {:.3} exceeded soft thresholds {:.3}ms/{:.3}, but the cover-versus-window comparison is suite-noisy; rerun on a quieter host before treating the cover-path gap as actionable",
-                        overhead_p95_ms,
-                        ratio_p95,
-                        DEFAULT_MEMORY_CONTEXT_WINDOW_COVER_SOFT_MAX_OVERHEAD_P95_MS,
-                        DEFAULT_MEMORY_CONTEXT_WINDOW_COVER_SOFT_MAX_RATIO_P95
-                    ));
-                } else {
-                    warnings.push(format!(
-                        "summary_window_cover p95 overhead {:.3}ms and ratio {:.3} exceeded soft thresholds {:.3}ms/{:.3}; expected near-window-only cost when the active window already covers the session, so investigate redundant summary materialization or checkpoint work",
-                        overhead_p95_ms,
-                        ratio_p95,
-                        DEFAULT_MEMORY_CONTEXT_WINDOW_COVER_SOFT_MAX_OVERHEAD_P95_MS,
-                        DEFAULT_MEMORY_CONTEXT_WINDOW_COVER_SOFT_MAX_RATIO_P95
-                    ));
-                }
+        if ratio_p95 > DEFAULT_MEMORY_CONTEXT_WINDOW_COVER_SOFT_MAX_RATIO_P95
+            && overhead_p95_ms > DEFAULT_MEMORY_CONTEXT_WINDOW_COVER_SOFT_MAX_OVERHEAD_P95_MS
+            && !marginal_cover_regression_under_suite_noise
+        {
+            if summary_window_cover_comparison_suite_is_noisy {
+                warnings.push(format!(
+                    "summary_window_cover p95 overhead {:.3}ms and ratio {:.3} exceeded soft thresholds {:.3}ms/{:.3}, but the cover-versus-window comparison is suite-noisy; rerun on a quieter host before treating the cover-path gap as actionable",
+                    overhead_p95_ms,
+                    ratio_p95,
+                    DEFAULT_MEMORY_CONTEXT_WINDOW_COVER_SOFT_MAX_OVERHEAD_P95_MS,
+                    DEFAULT_MEMORY_CONTEXT_WINDOW_COVER_SOFT_MAX_RATIO_P95
+                ));
+            } else {
+                warnings.push(format!(
+                    "summary_window_cover p95 overhead {:.3}ms and ratio {:.3} exceeded soft thresholds {:.3}ms/{:.3}; expected near-window-only cost when the active window already covers the session, so investigate redundant summary materialization or checkpoint work",
+                    overhead_p95_ms,
+                    ratio_p95,
+                    DEFAULT_MEMORY_CONTEXT_WINDOW_COVER_SOFT_MAX_OVERHEAD_P95_MS,
+                    DEFAULT_MEMORY_CONTEXT_WINDOW_COVER_SOFT_MAX_RATIO_P95
+                ));
             }
         }
     }
