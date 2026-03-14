@@ -316,7 +316,17 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn integ_shell_exec_echo() {
-        let harness = TurnTestHarness::new();
+        let harness = TurnTestHarness::with_tool_config(
+            BTreeSet::from([
+                Capability::InvokeTool,
+                Capability::FilesystemRead,
+                Capability::FilesystemWrite,
+            ]),
+            ToolRuntimeConfig {
+                shell_allow: BTreeSet::from(["echo".to_owned()]),
+                ..ToolRuntimeConfig::default()
+            },
+        );
 
         let turn = FakeProviderBuilder::new()
             .with_tool_call("shell.exec", json!({"command": "echo", "args": ["hello"]}))
@@ -407,7 +417,17 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn integ_audit_captures_tool_plane_invocation() {
-        let harness = TurnTestHarness::new();
+        let harness = TurnTestHarness::with_tool_config(
+            BTreeSet::from([
+                Capability::InvokeTool,
+                Capability::FilesystemRead,
+                Capability::FilesystemWrite,
+            ]),
+            ToolRuntimeConfig {
+                shell_allow: BTreeSet::from(["echo".to_owned()]),
+                ..ToolRuntimeConfig::default()
+            },
+        );
 
         let turn = FakeProviderBuilder::new()
             .with_tool_call("shell.exec", json!({"command": "echo", "args": ["audit"]}))

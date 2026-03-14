@@ -149,16 +149,6 @@ mod tests {
         assert!(config.external_skills.auto_expose_installed);
     }
 
-    /// The default allow list must mirror the serde default in `ToolConfig` so
-    /// that the runtime fallback path and a freshly-parsed config file agree.
-    #[test]
-    fn default_shell_allow_contains_four_initial_commands() {
-        let config = ToolRuntimeConfig::default();
-        let mut allow: Vec<_> = config.shell_allow.iter().cloned().collect();
-        allow.sort();
-        assert_eq!(allow, vec!["cargo", "echo", "git", "ls"]);
-    }
-
     /// Deny and approval-required start empty so users are not forced to carry
     /// any hardcoded restriction they did not opt into.
     #[test]
@@ -213,6 +203,7 @@ mod tests {
     fn injected_config_overrides_global() {
         let config = ToolRuntimeConfig {
             file_root: Some(PathBuf::from("/tmp/injected-root")),
+            shell_allow: BTreeSet::from(["echo".to_owned()]),
             ..ToolRuntimeConfig::default()
         };
         let result = crate::tools::execute_tool_core_with_config(

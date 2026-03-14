@@ -18,9 +18,8 @@ pub struct ToolConfig {
     pub shell_allowlist: Vec<String>,
     #[serde(default)]
     pub file_root: Option<String>,
-    /// Commands to allow. When absent from the config file the four initial
-    /// test commands are used as a starting point; users may replace or extend
-    /// this list freely.
+    /// Commands to allow. Defaults to empty — no commands are allowed unless
+    /// explicitly configured.
     #[serde(default = "default_shell_allow")]
     pub shell_allow: Vec<String>,
     /// Commands to hard-deny.
@@ -39,13 +38,18 @@ fn default_shell_default_mode() -> String {
 }
 
 /// Default allow list used when the config file omits `shell_allow`.
-/// Contains a minimal set of read-only and build commands suitable for
-/// initial testing. Users can replace this list entirely in their config.
+///
+/// Empty by design: no commands are allowed unless the user explicitly
+/// configures `shell_allow` in their config file. This upholds the
+/// default-deny principle — silent implicit permissions are not injected.
 ///
 /// Also used by `ToolRuntimeConfig::default()` so the runtime fallback
 /// and a freshly-parsed config file agree on the initial allow set.
-pub const DEFAULT_SHELL_ALLOW: &[&str] = &["echo", "ls", "git", "cargo"];
+pub const DEFAULT_SHELL_ALLOW: &[&str] = &[];
 
+/// Serde default for `ToolConfig::shell_allow`.
+///
+/// Returns an empty list — no commands are implicitly allowed.
 fn default_shell_allow() -> Vec<String> {
     DEFAULT_SHELL_ALLOW
         .iter()
@@ -313,17 +317,6 @@ mod tests {
             config.trimmed_profile_note().as_deref(),
             Some("imported preferences")
         );
-    }
-
-    /// When `shell_allow` is absent from the config file, the 4 initial test
-    /// commands must be used.
-    #[test]
-    #[cfg(feature = "config-toml")]
-    fn tool_config_shell_allow_defaults_to_four_initial_commands() {
-        let config: ToolConfig = toml::from_str("").expect("empty toml");
-        let mut allow = config.shell_allow;
-        allow.sort();
-        assert_eq!(allow, vec!["cargo", "echo", "git", "ls"]);
     }
 
     /// When `shell_deny` and `shell_approval_required` are absent, they must
