@@ -6,6 +6,8 @@ use loongclaw_contracts::{Capability, ToolCoreOutcome, ToolCoreRequest};
 use serde_json::{Value, json};
 
 use crate::KernelContext;
+use crate::config::ToolConfig;
+use crate::memory::runtime_config::MemoryRuntimeConfig;
 
 mod catalog;
 mod claw_import;
@@ -14,6 +16,7 @@ mod file;
 pub mod file_policy_ext;
 mod kernel_adapter;
 pub mod runtime_config;
+mod session;
 mod shell;
 pub mod shell_policy_ext;
 
@@ -51,6 +54,35 @@ pub async fn execute_tool(
 
 pub fn execute_tool_core(request: ToolCoreRequest) -> Result<ToolCoreOutcome, String> {
     execute_tool_core_with_config(request, runtime_config::get_tool_runtime_config())
+}
+
+pub fn execute_app_tool_with_config(
+    request: ToolCoreRequest,
+    current_session_id: &str,
+    memory_config: &MemoryRuntimeConfig,
+    tool_config: &ToolConfig,
+) -> Result<ToolCoreOutcome, String> {
+    let canonical_name = canonical_tool_name(request.tool_name.as_str());
+    let request = ToolCoreRequest {
+        tool_name: canonical_name.to_owned(),
+        payload: request.payload,
+    };
+
+    match canonical_name {
+        "sessions_list" | "sessions_history" | "session_status" | "session_events"
+        | "session_archive" | "session_cancel" | "session_recover" => {
+            session::execute_session_tool_with_policies(
+                request,
+                current_session_id,
+                memory_config,
+                tool_config,
+            )
+        }
+        _ => Err(format!(
+            "app_tool_not_found: unknown app tool `{}`",
+            request.tool_name
+        )),
+    }
 }
 
 /// Normalize a path by resolving `.` and `..` components without filesystem access.
@@ -385,7 +417,11 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
-    #[cfg(all(feature = "tool-file", feature = "tool-shell"))]
+    #[cfg(all(
+        feature = "tool-file",
+        feature = "tool-shell",
+        feature = "memory-sqlite"
+    ))]
     #[test]
     fn capability_snapshot_lists_all_tools_when_all_features_enabled() {
         let snapshot = capability_snapshot();
@@ -413,11 +449,30 @@ mod tests {
         ));
         assert!(snapshot.contains("- file.read: Read file contents"));
         assert!(snapshot.contains("- file.write: Write file contents"));
+        assert!(snapshot.contains(
+            "- session_archive: Archive a visible terminal session from default session listings"
+        ));
+        assert!(
+            snapshot.contains("- session_cancel: Cancel a visible async delegate child session")
+        );
+        assert!(snapshot.contains("- session_events: Fetch session events for a visible session"));
+        assert!(snapshot.contains(
+            "- session_recover: Recover an overdue queued async delegate child session by marking it failed"
+        ));
+        assert!(
+            snapshot.contains("- session_status: Inspect the current status of a visible session")
+        );
+        assert!(
+            snapshot.contains("- sessions_history: Fetch transcript history for a visible session")
+        );
+        assert!(
+            snapshot.contains("- sessions_list: List visible sessions and their high-level state")
+        );
         assert!(snapshot.contains("- shell.exec: Execute shell commands"));
 
-        // Verify sorted order: claw.import < external_skills.* < file.* < shell.exec
+        // Verify sorted order: claw.import < external_skills.* < file.* < session_* < sessions_* < shell.exec
         let lines: Vec<&str> = snapshot.lines().skip(1).collect();
-        assert_eq!(lines.len(), 11);
+        assert_eq!(lines.len(), 18);
         assert!(lines[0].starts_with("- claw.import"));
         assert!(lines[1].starts_with("- external_skills.fetch"));
         assert!(lines[2].starts_with("- external_skills.inspect"));
@@ -428,14 +483,25 @@ mod tests {
         assert!(lines[7].starts_with("- external_skills.remove"));
         assert!(lines[8].starts_with("- file.read"));
         assert!(lines[9].starts_with("- file.write"));
-        assert!(lines[10].starts_with("- shell.exec"));
+        assert!(lines[10].starts_with("- session_archive"));
+        assert!(lines[11].starts_with("- session_cancel"));
+        assert!(lines[12].starts_with("- session_events"));
+        assert!(lines[13].starts_with("- session_recover"));
+        assert!(lines[14].starts_with("- session_status"));
+        assert!(lines[15].starts_with("- sessions_history"));
+        assert!(lines[16].starts_with("- sessions_list"));
+        assert!(lines[17].starts_with("- shell.exec"));
     }
 
-    #[cfg(all(feature = "tool-file", feature = "tool-shell"))]
+    #[cfg(all(
+        feature = "tool-file",
+        feature = "tool-shell",
+        feature = "memory-sqlite"
+    ))]
     #[test]
     fn tool_registry_returns_all_known_tools() {
         let entries = tool_registry();
-        assert_eq!(entries.len(), 11);
+        assert_eq!(entries.len(), 18);
         let names: Vec<&str> = entries.iter().map(|e| e.name).collect();
         assert!(names.contains(&"claw.import"));
         assert!(names.contains(&"external_skills.fetch"));
@@ -448,6 +514,13 @@ mod tests {
         assert!(names.contains(&"shell.exec"));
         assert!(names.contains(&"file.read"));
         assert!(names.contains(&"file.write"));
+        assert!(names.contains(&"session_archive"));
+        assert!(names.contains(&"session_cancel"));
+        assert!(names.contains(&"session_events"));
+        assert!(names.contains(&"session_recover"));
+        assert!(names.contains(&"session_status"));
+        assert!(names.contains(&"sessions_history"));
+        assert!(names.contains(&"sessions_list"));
     }
 
     #[cfg(all(feature = "tool-file", feature = "tool-shell"))]
@@ -488,6 +561,39 @@ mod tests {
         assert!(err.contains("delegate"), "error: {err}");
     }
 
+    #[cfg(feature = "memory-sqlite")]
+    #[test]
+    fn runtime_tool_view_includes_sync_session_tools_but_hides_planned_ones() {
+        let view = runtime_tool_view_for_config(&crate::config::ToolConfig::default());
+
+        for tool_name in [
+            "session_archive",
+            "session_cancel",
+            "session_events",
+            "session_recover",
+            "session_status",
+            "sessions_history",
+            "sessions_list",
+        ] {
+            assert!(
+                view.contains(tool_name),
+                "expected runtime view to include `{tool_name}`"
+            );
+        }
+
+        for tool_name in [
+            "session_wait",
+            "sessions_send",
+            "delegate",
+            "delegate_async",
+        ] {
+            assert!(
+                !view.contains(tool_name),
+                "expected runtime view to keep `{tool_name}` hidden"
+            );
+        }
+    }
+
     #[cfg(all(feature = "tool-file", feature = "tool-shell"))]
     #[test]
     fn delegate_child_tool_view_hides_shell_by_default() {
@@ -511,11 +617,15 @@ mod tests {
         assert!(view.contains("shell.exec"));
     }
 
-    #[cfg(all(feature = "tool-file", feature = "tool-shell"))]
+    #[cfg(all(
+        feature = "tool-file",
+        feature = "tool-shell",
+        feature = "memory-sqlite"
+    ))]
     #[test]
     fn provider_tool_definitions_are_stable_and_complete() {
         let defs = provider_tool_definitions();
-        assert_eq!(defs.len(), 11);
+        assert_eq!(defs.len(), 18);
 
         let names: Vec<&str> = defs
             .iter()
@@ -536,6 +646,13 @@ mod tests {
                 "external_skills_remove",
                 "file_read",
                 "file_write",
+                "session_archive",
+                "session_cancel",
+                "session_events",
+                "session_recover",
+                "session_status",
+                "sessions_history",
+                "sessions_list",
                 "shell_exec"
             ]
         );

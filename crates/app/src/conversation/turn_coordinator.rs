@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use async_trait::async_trait;
-use loongclaw_contracts::{AuditEventKind, Capability, ExecutionPlane, PlaneTier, ToolCoreRequest};
+use loongclaw_contracts::{AuditEventKind, ExecutionPlane, PlaneTier};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -14,7 +14,6 @@ use crate::acp::{
     AcpConversationTurnOptions, AcpTurnEventSink, evaluate_acp_conversation_turn_entry_for_address,
     execute_acp_conversation_turn_for_address,
 };
-#[cfg(feature = "memory-sqlite")]
 use crate::memory::runtime_config::MemoryRuntimeConfig;
 
 use super::super::config::LoongClawConfig;
@@ -42,7 +41,7 @@ use super::plan_verifier::{
     PlanVerificationContext, PlanVerificationFailureCode, PlanVerificationPolicy,
     PlanVerificationReport, verify_output,
 };
-use super::runtime::{ConversationRuntime, DefaultConversationRuntime};
+use super::runtime::{ConversationRuntime, DefaultConversationRuntime, SessionContext};
 use super::safe_lane_failure::{
     SafeLaneFailureCode, SafeLaneFailureRouteDecision, SafeLaneFailureRouteSource,
     classify_safe_lane_plan_failure,
@@ -57,8 +56,8 @@ use super::turn_budget::{
     SafeLaneFailureRouteReason, SafeLaneReplanBudget,
 };
 use super::turn_engine::{
-    KernelFailureClass, ProviderTurn, ToolIntent, TurnEngine, TurnFailure, TurnFailureKind,
-    TurnResult, classify_kernel_error,
+    AppToolDispatcher, DefaultAppToolDispatcher, ProviderTurn, ToolIntent, TurnEngine, TurnFailure,
+    TurnFailureKind, TurnResult,
 };
 use super::turn_shared::{
     ProviderTurnRequestAction, ReplyPersistenceMode, ReplyResolutionMode, ToolDrivenFollowupKind,
@@ -1765,7 +1764,8 @@ impl ConversationTurnCoordinator {
         }
 
         runtime.bootstrap(config, session_id, kernel_ctx).await?;
-        let tool_view = runtime.tool_view(config, session_id, kernel_ctx)?;
+        let session_context = runtime.session_context(config, session_id, kernel_ctx)?;
+        let tool_view = session_context.tool_view.clone();
         let preparation = ProviderTurnPreparation::from_assembled_context(
             config,
             runtime
@@ -2713,6 +2713,23 @@ async fn execute_provider_turn_lane<R: ConversationRuntime + ?Sized>(
     let had_tool_intents = !turn.tool_intents.is_empty();
     let assistant_preface = turn.assistant_text.clone();
     let lane = preparation.lane_plan.decision.lane;
+    let session_context = match runtime.session_context(config, session_id, kernel_ctx) {
+        Ok(session_context) => session_context,
+        Err(error) => {
+            return ProviderTurnLaneExecution {
+                lane,
+                assistant_preface,
+                had_tool_intents,
+                raw_tool_output_requested: preparation.raw_tool_output_requested,
+                turn_result: TurnResult::non_retryable_tool_error("session_context_failed", error),
+                safe_lane_terminal_route: None,
+            };
+        }
+    };
+    let app_dispatcher = DefaultAppToolDispatcher::new(
+        MemoryRuntimeConfig::from_memory_config(&config.memory),
+        config.tools.clone(),
+    );
     let (turn_result, safe_lane_terminal_route) = if preparation
         .lane_plan
         .should_use_safe_lane_plan_path(config, &turn)
@@ -2723,6 +2740,8 @@ async fn execute_provider_turn_lane<R: ConversationRuntime + ?Sized>(
             session_id,
             &preparation.lane_plan.decision,
             &turn,
+            &session_context,
+            &app_dispatcher,
             kernel_ctx,
         )
         .await;
@@ -2735,7 +2754,7 @@ async fn execute_provider_turn_lane<R: ConversationRuntime + ?Sized>(
                     .conversation
                     .tool_result_payload_summary_limit_chars(),
             )
-            .execute_turn(&turn, kernel_ctx)
+            .execute_turn_in_context(&turn, &session_context, &app_dispatcher, kernel_ctx)
             .await,
             None,
         )
@@ -2757,6 +2776,8 @@ async fn execute_turn_with_safe_lane_plan<R: ConversationRuntime + ?Sized>(
     session_id: &str,
     lane_decision: &LaneDecision,
     turn: &ProviderTurn,
+    session_context: &SessionContext,
+    app_dispatcher: &dyn AppToolDispatcher,
     kernel_ctx: Option<&KernelContext>,
 ) -> SafeLaneTurnOutcome {
     let governor_history_signals =
@@ -2824,8 +2845,16 @@ async fn execute_turn_with_safe_lane_plan<R: ConversationRuntime + ?Sized>(
         )
         .await;
 
-        let round_execution =
-            evaluate_safe_lane_round(config, lane_decision, turn, kernel_ctx, &state).await;
+        let round_execution = evaluate_safe_lane_round(
+            config,
+            lane_decision,
+            turn,
+            session_context,
+            app_dispatcher,
+            kernel_ctx,
+            &state,
+        )
+        .await;
         state.record_round_execution(&round_execution.report, round_execution.tool_output_stats);
 
         match round_execution.report.status.clone() {
@@ -3146,6 +3175,8 @@ async fn evaluate_safe_lane_round(
     config: &LoongClawConfig,
     lane_decision: &LaneDecision,
     turn: &ProviderTurn,
+    session_context: &SessionContext,
+    app_dispatcher: &dyn AppToolDispatcher,
     kernel_ctx: Option<&KernelContext>,
     state: &SafeLanePlanLoopState,
 ) -> SafeLaneRoundExecution {
@@ -3158,6 +3189,8 @@ async fn evaluate_safe_lane_round(
     );
     let executor = SafeLanePlanNodeExecutor::new(
         turn.tool_intents.as_slice(),
+        session_context,
+        app_dispatcher,
         kernel_ctx,
         config.conversation.safe_lane_verify_output_non_empty,
         state.seed_tool_outputs.clone(),
@@ -4277,6 +4310,8 @@ fn decide_safe_lane_plan_failure_action(
 
 struct SafeLanePlanNodeExecutor<'a> {
     tool_intents: &'a [ToolIntent],
+    session_context: &'a SessionContext,
+    app_dispatcher: &'a dyn AppToolDispatcher,
     kernel_ctx: Option<&'a KernelContext>,
     verify_output_non_empty: bool,
     tool_outputs: Mutex<Vec<String>>,
@@ -4286,6 +4321,8 @@ struct SafeLanePlanNodeExecutor<'a> {
 impl<'a> SafeLanePlanNodeExecutor<'a> {
     fn new(
         tool_intents: &'a [ToolIntent],
+        session_context: &'a SessionContext,
+        app_dispatcher: &'a dyn AppToolDispatcher,
         kernel_ctx: Option<&'a KernelContext>,
         verify_output_non_empty: bool,
         seed_tool_outputs: Vec<String>,
@@ -4293,6 +4330,8 @@ impl<'a> SafeLanePlanNodeExecutor<'a> {
     ) -> Self {
         Self {
             tool_intents,
+            session_context,
+            app_dispatcher,
             kernel_ctx,
             verify_output_non_empty,
             tool_outputs: Mutex::new(seed_tool_outputs),
@@ -4319,6 +4358,8 @@ impl PlanNodeExecutor for SafeLanePlanNodeExecutor<'_> {
                 })?;
                 let output = execute_single_tool_intent(
                     intent,
+                    self.session_context,
+                    self.app_dispatcher,
                     self.kernel_ctx,
                     self.tool_result_payload_summary_limit_chars,
                 )
@@ -4360,42 +4401,41 @@ fn parse_tool_node_index(node_id: &str) -> Result<usize, PlanNodeError> {
 
 async fn execute_single_tool_intent(
     intent: &ToolIntent,
+    session_context: &SessionContext,
+    app_dispatcher: &dyn AppToolDispatcher,
     kernel_ctx: Option<&KernelContext>,
     payload_summary_limit_chars: usize,
 ) -> Result<String, PlanNodeError> {
-    if !crate::tools::is_known_tool_name(&intent.tool_name) {
-        return Err(PlanNodeError::policy_denied(format!(
-            "tool_not_found: {}",
-            intent.tool_name
-        )));
-    }
-    let ctx =
-        kernel_ctx.ok_or_else(|| PlanNodeError::policy_denied("no_kernel_context".to_owned()))?;
-    let request = ToolCoreRequest {
-        tool_name: intent.tool_name.clone(),
-        payload: intent.args_json.clone(),
+    let engine = TurnEngine::with_tool_result_payload_summary_limit(1, payload_summary_limit_chars);
+    let turn = ProviderTurn {
+        assistant_text: String::new(),
+        tool_intents: vec![intent.clone()],
+        raw_meta: Value::Null,
     };
-    let caps = BTreeSet::from([Capability::InvokeTool]);
-    let outcome = ctx
-        .kernel
-        .execute_tool_core(ctx.pack_id(), &ctx.token, &caps, None, request)
+
+    match engine
+        .execute_turn_in_context(&turn, session_context, app_dispatcher, kernel_ctx)
         .await
-        .map_err(|error| {
-            let kind = match classify_kernel_error(&error) {
-                KernelFailureClass::PolicyDenied => PlanNodeErrorKind::PolicyDenied,
-                KernelFailureClass::RetryableExecution => PlanNodeErrorKind::Retryable,
-                KernelFailureClass::NonRetryable => PlanNodeErrorKind::NonRetryable,
-            };
-            PlanNodeError {
-                kind,
-                message: format!("{error}"),
-            }
-        })?;
-    Ok(super::turn_engine::format_tool_result_line_with_limit(
-        intent,
-        &outcome,
-        payload_summary_limit_chars,
-    ))
+    {
+        TurnResult::FinalText(output) => Ok(output),
+        TurnResult::NeedsApproval(failure) | TurnResult::ToolDenied(failure) => {
+            Err(PlanNodeError::policy_denied(failure.reason))
+        }
+        TurnResult::ToolError(failure) => Err(PlanNodeError {
+            kind: match failure.kind {
+                TurnFailureKind::Retryable => PlanNodeErrorKind::Retryable,
+                TurnFailureKind::ApprovalRequired
+                | TurnFailureKind::PolicyDenied
+                | TurnFailureKind::NonRetryable
+                | TurnFailureKind::Provider => PlanNodeErrorKind::NonRetryable,
+            },
+            message: failure.reason,
+        }),
+        TurnResult::ProviderError(failure) => Err(PlanNodeError {
+            kind: PlanNodeErrorKind::NonRetryable,
+            message: failure.reason,
+        }),
+    }
 }
 
 #[cfg(test)]

@@ -76,6 +76,16 @@ pub struct ToolCatalog {
     descriptors: Vec<ToolDescriptor>,
 }
 
+#[cfg(feature = "memory-sqlite")]
+const fn sync_session_tool_availability() -> ToolAvailability {
+    ToolAvailability::Runtime
+}
+
+#[cfg(not(feature = "memory-sqlite"))]
+const fn sync_session_tool_availability() -> ToolAvailability {
+    ToolAvailability::Planned
+}
+
 impl ToolCatalog {
     pub fn descriptor(&self, tool_name: &str) -> Option<&ToolDescriptor> {
         self.descriptors
@@ -192,7 +202,7 @@ pub fn tool_catalog() -> ToolCatalog {
             aliases: &[],
             description: "Archive a visible terminal session from default session listings",
             execution_kind: ToolExecutionKind::App,
-            availability: ToolAvailability::Planned,
+            availability: sync_session_tool_availability(),
             provider_definition_builder: session_archive_definition,
         },
         ToolDescriptor {
@@ -201,7 +211,7 @@ pub fn tool_catalog() -> ToolCatalog {
             aliases: &[],
             description: "Cancel a visible async delegate child session",
             execution_kind: ToolExecutionKind::App,
-            availability: ToolAvailability::Planned,
+            availability: sync_session_tool_availability(),
             provider_definition_builder: session_cancel_definition,
         },
         ToolDescriptor {
@@ -210,7 +220,7 @@ pub fn tool_catalog() -> ToolCatalog {
             aliases: &[],
             description: "Fetch session events for a visible session",
             execution_kind: ToolExecutionKind::App,
-            availability: ToolAvailability::Planned,
+            availability: sync_session_tool_availability(),
             provider_definition_builder: session_events_definition,
         },
         ToolDescriptor {
@@ -219,7 +229,7 @@ pub fn tool_catalog() -> ToolCatalog {
             aliases: &[],
             description: "Recover an overdue queued async delegate child session by marking it failed",
             execution_kind: ToolExecutionKind::App,
-            availability: ToolAvailability::Planned,
+            availability: sync_session_tool_availability(),
             provider_definition_builder: session_recover_definition,
         },
         ToolDescriptor {
@@ -228,7 +238,7 @@ pub fn tool_catalog() -> ToolCatalog {
             aliases: &[],
             description: "Inspect the current status of a visible session",
             execution_kind: ToolExecutionKind::App,
-            availability: ToolAvailability::Planned,
+            availability: sync_session_tool_availability(),
             provider_definition_builder: session_status_definition,
         },
         ToolDescriptor {
@@ -246,7 +256,7 @@ pub fn tool_catalog() -> ToolCatalog {
             aliases: &[],
             description: "Fetch transcript history for a visible session",
             execution_kind: ToolExecutionKind::App,
-            availability: ToolAvailability::Planned,
+            availability: sync_session_tool_availability(),
             provider_definition_builder: sessions_history_definition,
         },
         ToolDescriptor {
@@ -255,7 +265,7 @@ pub fn tool_catalog() -> ToolCatalog {
             aliases: &[],
             description: "List visible sessions and their high-level state",
             execution_kind: ToolExecutionKind::App,
-            availability: ToolAvailability::Planned,
+            availability: sync_session_tool_availability(),
             provider_definition_builder: sessions_list_definition,
         },
         ToolDescriptor {

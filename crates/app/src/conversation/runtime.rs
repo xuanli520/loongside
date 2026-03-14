@@ -43,6 +43,18 @@ impl SessionContext {
             tool_view,
         }
     }
+
+    pub fn child(
+        session_id: impl Into<String>,
+        parent_session_id: impl Into<String>,
+        tool_view: ToolView,
+    ) -> Self {
+        Self {
+            session_id: normalize_session_id(session_id.into()),
+            parent_session_id: Some(normalize_session_id(parent_session_id.into())),
+            tool_view,
+        }
+    }
 }
 
 fn normalize_session_id(session_id: String) -> String {
@@ -229,12 +241,12 @@ pub trait ConversationRuntime: Send + Sync {
         include_system_prompt: bool,
         kernel_ctx: Option<&KernelContext>,
     ) -> CliResult<AssembledConversationContext> {
-        let tool_view = self.tool_view(config, session_id, kernel_ctx)?;
+        let session_context = self.session_context(config, session_id, kernel_ctx)?;
         self.build_messages(
             config,
             session_id,
             include_system_prompt,
-            &tool_view,
+            &session_context.tool_view,
             kernel_ctx,
         )
         .await
@@ -317,6 +329,46 @@ impl<E> ConversationRuntime for DefaultConversationRuntime<E>
 where
     E: ConversationContextEngine,
 {
+    fn session_context(
+        &self,
+        config: &LoongClawConfig,
+        session_id: &str,
+        kernel_ctx: Option<&KernelContext>,
+    ) -> CliResult<SessionContext> {
+        let tool_view = self.tool_view(config, session_id, kernel_ctx)?;
+
+        #[cfg(feature = "memory-sqlite")]
+        {
+            let memory_config = MemoryRuntimeConfig::from_memory_config(&config.memory);
+            if let Ok(repo) = SessionRepository::new(&memory_config) {
+                if let Some(session) = repo
+                    .load_session(session_id)
+                    .map_err(|error| format!("load session context failed: {error}"))?
+                {
+                    if let Some(parent_session_id) = session.parent_session_id {
+                        return Ok(SessionContext::child(
+                            session.session_id,
+                            parent_session_id,
+                            tool_view,
+                        ));
+                    }
+                } else if let Some(summary) = repo
+                    .load_session_summary_with_legacy_fallback(session_id)
+                    .map_err(|error| format!("load legacy session context failed: {error}"))?
+                    && let Some(parent_session_id) = summary.parent_session_id
+                {
+                    return Ok(SessionContext::child(
+                        summary.session_id,
+                        parent_session_id,
+                        tool_view,
+                    ));
+                }
+            }
+        }
+
+        Ok(SessionContext::root_with_tool_view(session_id, tool_view))
+    }
+
     fn tool_view(
         &self,
         config: &LoongClawConfig,
@@ -396,6 +448,7 @@ where
         include_system_prompt: bool,
         kernel_ctx: Option<&KernelContext>,
     ) -> CliResult<AssembledConversationContext> {
+        let session_context = self.session_context(config, session_id, kernel_ctx)?;
         let mut assembled = self
             .context_engine
             .assemble_context(config, session_id, include_system_prompt, kernel_ctx)
@@ -405,11 +458,10 @@ where
             assembled.system_prompt_addition.as_deref(),
         );
         if include_system_prompt {
-            let session_tool_view = self.tool_view(config, session_id, kernel_ctx)?;
             apply_tool_view_to_system_prompt_if_needed(
                 &mut assembled.messages,
                 &runtime_tool_view_for_config(&config.tools),
-                &session_tool_view,
+                &session_context.tool_view,
             );
         }
         Ok(assembled)

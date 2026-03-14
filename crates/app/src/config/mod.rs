@@ -37,7 +37,7 @@ pub use shared::expand_path;
 #[allow(unused_imports)]
 pub use tools_memory::{
     DEFAULT_SHELL_ALLOW, ExternalSkillsConfig, MemoryBackendKind, MemoryConfig, MemoryMode,
-    MemoryProfile, ToolConfig,
+    MemoryProfile, SessionVisibility, ToolConfig,
 };
 
 #[cfg(test)]
