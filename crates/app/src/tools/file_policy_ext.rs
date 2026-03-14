@@ -11,6 +11,17 @@ pub struct FilePolicyExtension {
 impl FilePolicyExtension {
     pub fn new(file_root: Option<PathBuf>) -> Self {
         let canon_root = file_root.as_ref().and_then(|r| r.canonicalize().ok());
+        if file_root.is_some() && canon_root.is_none() {
+            #[cfg(feature = "tool-file")]
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!(
+                    "warning: file_root {:?} could not be canonicalized; \
+                     symlink-aware path checks will use raw path comparison",
+                    file_root.as_deref().unwrap_or(Path::new("")),
+                );
+            }
+        }
         Self {
             file_root,
             canon_root,
@@ -77,7 +88,7 @@ impl FilePolicyExtension {
                 let resolved = if target.is_absolute() {
                     target
                 } else {
-                    combined.parent().unwrap_or(Path::new("")).join(&target)
+                    combined.parent().unwrap_or(root).join(&target)
                 };
                 let normalized_target = super::normalize_without_fs(&resolved);
                 return !normalized_target.starts_with(effective_root);
@@ -450,10 +461,11 @@ mod tests {
 
     #[test]
     fn denies_dangling_symlink_pointing_outside_root() {
+        let outside = tempfile::tempdir().unwrap();
         let root_dir = tempfile::tempdir().unwrap();
         let link = root_dir.path().join("dangling_link");
         // Target does not exist and is outside root.
-        let nonexistent_outside = PathBuf::from("/tmp/loongclaw_nonexistent_target_xyzzy");
+        let nonexistent_outside = outside.path().join("nonexistent_target");
         if !try_symlink(&nonexistent_outside, &link) {
             return;
         }
