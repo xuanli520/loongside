@@ -42,10 +42,6 @@ pub fn compose_assistant_reply(
                 text
             }
         }
-        TurnResult::NeedsApproval(failure) => {
-            let inline = format!("[tool_approval_required] {}", failure.reason);
-            join_non_empty_lines(&[assistant_preface, inline.as_str()])
-        }
         TurnResult::ToolDenied(failure) => {
             join_non_empty_lines(&[assistant_preface, failure.reason.as_str()])
         }

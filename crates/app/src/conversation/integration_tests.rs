@@ -482,38 +482,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn integ_shell_approval_required_command() {
-        let harness = TurnTestHarness::with_tool_config(
-            BTreeSet::from([Capability::InvokeTool]),
-            ToolRuntimeConfig {
-                shell_approval_required: BTreeSet::from(["curl".to_owned()]),
-                ..ToolRuntimeConfig::default()
-            },
-        );
-
-        let turn = FakeProviderBuilder::new()
-            .with_tool_call(
-                "shell.exec",
-                json!({"command": "curl", "args": ["https://example.com"]}),
-            )
-            .build();
-        let result = harness.execute(&turn).await;
-
-        match result {
-            TurnResult::NeedsApproval(err) => {
-                assert!(
-                    err.contains("requires approval"),
-                    "expected 'requires approval' in reason, got: {err}"
-                );
-            }
-            other @ (TurnResult::FinalText(_)
-            | TurnResult::ToolDenied(_)
-            | TurnResult::ToolError(_)
-            | TurnResult::ProviderError(_)) => panic!("expected NeedsApproval, got: {other:?}"),
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn integ_file_write_denied_without_capability() {
         let harness = TurnTestHarness::with_capabilities(BTreeSet::from([Capability::InvokeTool]));
 
@@ -533,7 +501,6 @@ mod tests {
                 );
             }
             other @ (TurnResult::FinalText(_)
-            | TurnResult::NeedsApproval(_)
             | TurnResult::ToolError(_)
             | TurnResult::ProviderError(_)) => {
                 panic!("expected ToolDenied with FilesystemWrite, got: {other:?}")

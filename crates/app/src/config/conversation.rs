@@ -568,11 +568,15 @@ const fn default_safe_lane_health_replan_warn_threshold() -> f64 {
 
 fn default_high_risk_keywords() -> Vec<String> {
     [
+        "rm -rf",
         "drop table",
         "delete",
         "prod",
         "production",
         "deploy",
+        "credential",
+        "token",
+        "secret",
         "payment",
         "wallet",
     ]

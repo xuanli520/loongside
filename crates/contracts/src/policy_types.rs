@@ -25,5 +25,4 @@ pub struct PolicyRequest {
 pub enum PolicyDecision {
     Allow,
     Deny(String),
-    RequireApproval(String),
 }

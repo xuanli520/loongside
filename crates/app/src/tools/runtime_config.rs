@@ -36,7 +36,6 @@ pub struct ToolRuntimeConfig {
     pub file_root: Option<PathBuf>,
     pub shell_allow: BTreeSet<String>,
     pub shell_deny: BTreeSet<String>,
-    pub shell_approval_required: BTreeSet<String>,
     pub shell_default_mode: ShellPolicyDefault,
     pub external_skills: ExternalSkillsRuntimePolicy,
 }
@@ -50,7 +49,6 @@ impl Default for ToolRuntimeConfig {
                 .map(|s| (*s).to_owned())
                 .collect(),
             shell_deny: BTreeSet::new(),
-            shell_approval_required: BTreeSet::new(),
             shell_default_mode: ShellPolicyDefault::Deny,
             external_skills: ExternalSkillsRuntimePolicy::default(),
         }
@@ -149,13 +147,12 @@ mod tests {
         assert!(config.external_skills.auto_expose_installed);
     }
 
-    /// Deny and approval-required start empty so users are not forced to carry
+    /// Deny starts empty so users are not forced to carry
     /// any hardcoded restriction they did not opt into.
     #[test]
-    fn default_deny_and_approval_are_empty() {
+    fn default_deny_is_empty() {
         let config = ToolRuntimeConfig::default();
         assert!(config.shell_deny.is_empty());
-        assert!(config.shell_approval_required.is_empty());
     }
 
     /// Explicit config injection overrides defaults — verifies that

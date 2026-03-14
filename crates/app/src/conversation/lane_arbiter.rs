@@ -137,11 +137,15 @@ const fn default_fast_lane_max_input_chars() -> usize {
 
 fn default_high_risk_keywords() -> BTreeSet<String> {
     [
+        "rm -rf",
         "drop table",
         "delete",
         "prod",
         "production",
         "deploy",
+        "credential",
+        "token",
+        "secret",
         "payment",
         "wallet",
     ]
@@ -195,14 +199,14 @@ mod tests {
     #[test]
     fn high_risk_keywords_route_to_safe_lane() {
         let policy = LaneArbiterPolicy::default();
-        let decision = policy.decide("connect to production and deploy the update");
+        let decision = policy.decide("connect to production and deploy with secret token");
         assert_eq!(decision.lane, ExecutionLane::Safe);
         assert!(
             decision
                 .reasons
                 .iter()
                 .any(|reason| reason.contains("risk_score_exceeded")),
-            "expected routing reason, got: {:?}",
+            "expected risk reason, got: {:?}",
             decision.reasons
         );
     }

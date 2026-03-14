@@ -682,12 +682,6 @@ fn export_runtime_env(config: &LoongClawConfig) {
             .iter()
             .map(|s| s.to_ascii_lowercase())
             .collect(),
-        shell_approval_required: config
-            .tools
-            .shell_approval_required
-            .iter()
-            .map(|s| s.to_ascii_lowercase())
-            .collect(),
         shell_default_mode: crate::tools::policy_ext::ShellPolicyDefault::parse(
             &config.tools.shell_default_mode,
         ),

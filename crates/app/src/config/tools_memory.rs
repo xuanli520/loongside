@@ -25,9 +25,6 @@ pub struct ToolConfig {
     /// Commands to hard-deny.
     #[serde(default)]
     pub shell_deny: Vec<String>,
-    /// Commands requiring approval before execution.
-    #[serde(default)]
-    pub shell_approval_required: Vec<String>,
     /// Default policy for unknown commands: "deny" (default) or "allow".
     #[serde(default = "default_shell_default_mode")]
     pub shell_default_mode: String,
@@ -162,7 +159,6 @@ impl Default for ToolConfig {
             file_root: None,
             shell_allow: default_shell_allow(),
             shell_deny: Vec::new(),
-            shell_approval_required: Vec::new(),
             shell_default_mode: default_shell_default_mode(),
         }
     }
@@ -339,15 +335,13 @@ mod tests {
         );
     }
 
-    /// When `shell_deny` and `shell_approval_required` are absent, they must
-    /// default to empty — users start with no blocked or approval-gated
-    /// commands beyond the default-deny fallback.
+    /// When `shell_deny` is absent, it must default to empty — users start
+    /// with no blocked commands beyond the default-deny fallback.
     #[test]
     #[cfg(feature = "config-toml")]
-    fn tool_config_deny_and_approval_default_to_empty() {
+    fn tool_config_deny_defaults_to_empty() {
         let config: ToolConfig = toml::from_str("").expect("empty toml");
         assert!(config.shell_deny.is_empty());
-        assert!(config.shell_approval_required.is_empty());
     }
 
     /// An explicit `shell_allow = []` in the config file must produce an empty

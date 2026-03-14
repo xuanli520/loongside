@@ -2005,10 +2005,6 @@ fn route_safe_lane_failure(
             decision: SafeLaneFailureRouteDecision::Terminal,
             reason: "non_retryable_failure",
         },
-        TurnFailureKind::ApprovalRequired => SafeLaneFailureRoute {
-            decision: SafeLaneFailureRouteDecision::Terminal,
-            reason: "approval_required",
-        },
         TurnFailureKind::Provider => SafeLaneFailureRoute {
             decision: SafeLaneFailureRouteDecision::Terminal,
             reason: "provider_failure",
@@ -2225,7 +2221,6 @@ fn summarize_plan_failure(failure: &PlanRunFailure) -> String {
 
 fn format_turn_failure_kind(kind: TurnFailureKind) -> &'static str {
     match kind {
-        TurnFailureKind::ApprovalRequired => "approval_required",
         TurnFailureKind::PolicyDenied => "policy_denied",
         TurnFailureKind::Retryable => "retryable",
         TurnFailureKind::NonRetryable => "non_retryable",
@@ -2448,9 +2443,7 @@ async fn execute_single_tool_intent(
         .await
         .map_err(|error| {
             let kind = match classify_kernel_error(&error) {
-                KernelFailureClass::PolicyDenied | KernelFailureClass::ApprovalRequired => {
-                    PlanNodeErrorKind::PolicyDenied
-                }
+                KernelFailureClass::PolicyDenied => PlanNodeErrorKind::PolicyDenied,
                 KernelFailureClass::RetryableExecution => PlanNodeErrorKind::Retryable,
                 KernelFailureClass::NonRetryable => PlanNodeErrorKind::NonRetryable,
             };

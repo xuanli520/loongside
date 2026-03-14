@@ -493,7 +493,6 @@ File access is sandboxed to the working directory by default.
 shell_default_mode = "deny"                          # "deny" | "allow"
 shell_allow = ["echo", "ls", "git", "cargo"]         # permitted commands
 shell_deny = []                                      # hard-blocked commands
-shell_approval_required = []                         # require user approval
 # file_root = "/home/user/project"                   # defaults to CWD
 ```
 

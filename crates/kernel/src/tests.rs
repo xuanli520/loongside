@@ -1013,7 +1013,6 @@ impl PolicyExtension for NoNetworkEgressPolicyExtension {
 #[derive(Debug, Clone, Copy)]
 enum ToolGateMode {
     Deny,
-    RequireApproval,
 }
 
 #[derive(Debug)]
@@ -1051,10 +1050,6 @@ impl PolicyExtension for ToolGatePolicyExtension {
             ToolGateMode::Deny => Err(PolicyError::ToolCallDenied {
                 tool_name: tool_name.to_owned(),
                 reason: "blocked by deterministic policy rule".to_owned(),
-            }),
-            ToolGateMode::RequireApproval => Err(PolicyError::ToolCallApprovalRequired {
-                tool_name: tool_name.to_owned(),
-                prompt: "manual approval required for this tool".to_owned(),
             }),
         }
     }
@@ -1602,70 +1597,6 @@ async fn tool_core_call_is_denied_when_policy_engine_rejects_rule_of_two_gate() 
             if pack_id == "tool-gate-deny"
                 && token_id == &token.token_id
                 && reason.contains("tool call denied by policy")
-    ));
-}
-
-#[tokio::test]
-async fn tool_extension_call_reports_approval_required_when_policy_requires_human_gate() {
-    let clock: Arc<FixedClock> = Arc::new(FixedClock::new(1_700_003_000));
-    let audit = Arc::new(InMemoryAuditSink::default());
-    let mut kernel =
-        LoongClawKernel::with_runtime(StaticPolicyEngine::default(), clock.clone(), audit.clone());
-    kernel
-        .register_pack(VerticalPackManifest {
-            pack_id: "tool-gate-approval".to_owned(),
-            domain: "finance".to_owned(),
-            version: "0.1.0".to_owned(),
-            default_route: ExecutionRoute {
-                harness_kind: HarnessKind::EmbeddedPi,
-                adapter: Some("pi-local".to_owned()),
-            },
-            allowed_connectors: BTreeSet::new(),
-            granted_capabilities: BTreeSet::from([Capability::InvokeTool]),
-            metadata: BTreeMap::new(),
-        })
-        .expect("pack should register");
-    kernel.register_core_tool_adapter(MockCoreTool);
-    kernel.register_tool_extension_adapter(MockToolExtension);
-    kernel.register_policy_extension(ToolGatePolicyExtension::new(
-        "query_ledger",
-        ToolGateMode::RequireApproval,
-    ));
-
-    let token = kernel
-        .issue_token("tool-gate-approval", "agent-approval", 120)
-        .expect("token should issue");
-    let required = BTreeSet::from([Capability::InvokeTool]);
-
-    let error = kernel
-        .execute_tool_extension(
-            "tool-gate-approval",
-            &token,
-            &required,
-            "sql-analytics",
-            None,
-            ToolExtensionRequest {
-                extension_action: "query_ledger".to_owned(),
-                payload: json!({"sql": "select * from ledger"}),
-            },
-        )
-        .await
-        .expect_err("tool extension should require approval before execution");
-
-    assert!(matches!(
-        error,
-        KernelError::Policy(PolicyError::ToolCallApprovalRequired { tool_name, .. })
-            if tool_name == "query_ledger"
-    ));
-
-    let events = audit.snapshot();
-    assert_eq!(events.len(), 2);
-    assert!(matches!(
-        &events[1].kind,
-        AuditEventKind::AuthorizationDenied { pack_id, token_id, reason }
-            if pack_id == "tool-gate-approval"
-                && token_id == &token.token_id
-                && reason.contains("requires approval")
     ));
 }
 
