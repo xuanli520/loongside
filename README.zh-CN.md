@@ -344,7 +344,7 @@ cargo build -p loongclaw-daemon --no-default-features --features "channel-cli,pr
 | [架构](ARCHITECTURE.md) | Crate 结构和分层执行模型 |
 | [核心信念](docs/design-docs/core-beliefs.md) | 10 条核心工程原则 |
 | [分层内核设计](docs/design-docs/layered-kernel-design.md) | 完整 L0-L9 层规格 |
-| [路线图](docs/roadmap.md) | 阶段里程碑和验收标准 |
+| [路线图](docs/ROADMAP.md) | 阶段里程碑和验收标准 |
 | [可靠性](docs/RELIABILITY.md) | 构建和内核不变量 |
 | [示例](examples/README.md) | Spec 文件、插件示例、基准测试 |
 | [产品规格](docs/product-specs/index.md) | 面向用户的需求（进行中） |
@@ -375,6 +375,19 @@ chat_completions_path = "/api/v3/chat/completions"
 ```
 
 `kind = "volcengine"` 已经内置了上面的火山默认 endpoint，所以只有在你希望把这些值明确写进配置时，才需要额外保留 `base_url` 和 `chat_completions_path`。
+
+### 工具策略
+
+Shell 执行默认采用**未知命令拒绝**策略——只有明确列入允许名单的命令才能运行。
+文件访问默认沙箱为进程工作目录。
+
+```toml
+[tools]
+shell_default_mode = "deny"                          # "deny" | "allow"
+shell_allow = ["echo", "ls", "git", "cargo"]         # 允许的命令
+shell_deny = []                                      # 硬拒绝的命令
+# file_root = "/home/user/project"                   # 默认为 CWD
+```
 
 验证配置：
 

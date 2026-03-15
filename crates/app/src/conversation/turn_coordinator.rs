@@ -938,7 +938,6 @@ enum TurnCheckpointResultKind {
     FinalText,
     ToolDenied,
     ToolError,
-    NeedsApproval,
     ProviderError,
 }
 
@@ -2065,7 +2064,6 @@ fn turn_checkpoint_result_kind(result: &TurnResult) -> TurnCheckpointResultKind 
         TurnResult::FinalText(_) => TurnCheckpointResultKind::FinalText,
         TurnResult::ToolDenied(_) => TurnCheckpointResultKind::ToolDenied,
         TurnResult::ToolError(_) => TurnCheckpointResultKind::ToolError,
-        TurnResult::NeedsApproval(_) => TurnCheckpointResultKind::NeedsApproval,
         TurnResult::ProviderError(_) => TurnCheckpointResultKind::ProviderError,
     }
 }
@@ -3824,9 +3822,6 @@ impl SafeLaneFailureRoute {
             TurnFailureKind::NonRetryable => {
                 Self::terminal(SafeLaneFailureRouteReason::NonRetryableFailure)
             }
-            TurnFailureKind::ApprovalRequired => {
-                Self::terminal(SafeLaneFailureRouteReason::ApprovalRequired)
-            }
             TurnFailureKind::Provider => {
                 Self::terminal(SafeLaneFailureRouteReason::ProviderFailure)
             }
@@ -4160,7 +4155,6 @@ fn summarize_plan_failure(failure: &PlanRunFailure) -> String {
 
 fn format_turn_failure_kind(kind: TurnFailureKind) -> &'static str {
     match kind {
-        TurnFailureKind::ApprovalRequired => "approval_required",
         TurnFailureKind::PolicyDenied => "policy_denied",
         TurnFailureKind::Retryable => "retryable",
         TurnFailureKind::NonRetryable => "non_retryable",
@@ -4233,10 +4227,12 @@ fn terminal_turn_failure_from_verify_failure(
 
 fn turn_result_from_plan_failure(failure: PlanRunFailure) -> TurnResult {
     let failure_meta = turn_failure_from_plan_failure(&failure);
-    if matches!(failure_meta.kind, TurnFailureKind::PolicyDenied) {
-        TurnResult::ToolDenied(failure_meta)
-    } else {
-        TurnResult::ToolError(failure_meta)
+    match failure_meta.kind {
+        TurnFailureKind::PolicyDenied => TurnResult::ToolDenied(failure_meta),
+        TurnFailureKind::Retryable | TurnFailureKind::NonRetryable => {
+            TurnResult::ToolError(failure_meta)
+        }
+        TurnFailureKind::Provider => TurnResult::ProviderError(failure_meta),
     }
 }
 

@@ -11,7 +11,7 @@
 ## Hotspot Metrics
 | Key | File | Lines | Max Lines | Line Headroom | Functions | Max Functions | Fn Headroom | Prev Lines | Line Growth | Growth SLO | Prev Functions |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|
-| spec_runtime | `crates/spec/src/spec_runtime.rs` | 2926 | 3600 | 674 | 47 | 65 | 18 | n/a | n/a | N/A | n/a |
+| spec_runtime | `crates/spec/src/spec_runtime.rs` | 2927 | 3600 | 673 | 47 | 65 | 18 | n/a | n/a | N/A | n/a |
 | spec_execution | `crates/spec/src/spec_execution.rs` | 1467 | 3700 | 2233 | 22 | 80 | 58 | n/a | n/a | N/A | n/a |
 | provider_mod | `crates/app/src/provider/mod.rs` | 234 | 1000 | 766 | 5 | 20 | 15 | n/a | n/a | N/A | n/a |
 | memory_mod | `crates/app/src/memory/mod.rs` | 286 | 650 | 364 | 15 | 16 | 1 | n/a | n/a | N/A | n/a |
@@ -37,7 +37,7 @@
 - [Release template](TEMPLATE.md)
 - [CI workflow](../../.github/workflows/ci.yml)
 
-<!-- arch-hotspot key=spec_runtime lines=2926 functions=47 -->
+<!-- arch-hotspot key=spec_runtime lines=2927 functions=47 -->
 <!-- arch-hotspot key=spec_execution lines=1467 functions=22 -->
 <!-- arch-hotspot key=provider_mod lines=234 functions=5 -->
 <!-- arch-hotspot key=memory_mod lines=286 functions=15 -->

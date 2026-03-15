@@ -80,20 +80,33 @@ pub(crate) struct TurnTestHarness {
 
 impl TurnTestHarness {
     pub fn new() -> Self {
-        Self::with_capabilities(BTreeSet::from([Capability::InvokeTool]))
+        Self::with_capabilities(BTreeSet::from([
+            Capability::InvokeTool,
+            Capability::FilesystemRead,
+            Capability::FilesystemWrite,
+        ]))
     }
 
     pub fn with_capabilities(capabilities: BTreeSet<Capability>) -> Self {
+        Self::with_tool_config(capabilities, ToolRuntimeConfig::default())
+    }
+
+    /// Construct a harness with a caller-supplied `ToolRuntimeConfig`.
+    /// Use this when a test needs specific allow/deny/approval lists rather
+    /// than the generic defaults.
+    pub fn with_tool_config(
+        capabilities: BTreeSet<Capability>,
+        tool_config_override: ToolRuntimeConfig,
+    ) -> Self {
         let id = HARNESS_COUNTER.fetch_add(1, Ordering::SeqCst);
         let temp_dir =
             std::env::temp_dir().join(format!("loongclaw-integ-{}-{id}", std::process::id()));
         std::fs::create_dir_all(&temp_dir).expect("create temp dir");
 
-        // Inject config so tests don't race on the global OnceLock
+        // Merge the caller's overrides with the unique temp dir as file_root.
         let tool_config = ToolRuntimeConfig {
-            shell_allowlist: BTreeSet::from(["echo".to_owned(), "cat".to_owned(), "ls".to_owned()]),
             file_root: Some(temp_dir.clone()),
-            external_skills: Default::default(),
+            ..tool_config_override
         };
 
         let audit = Arc::new(InMemoryAuditSink::default());
@@ -114,10 +127,20 @@ impl TurnTestHarness {
             metadata: BTreeMap::new(),
         };
         kernel.register_pack(pack).expect("register pack");
-        kernel.register_core_tool_adapter(MvpToolAdapter::with_config(tool_config));
+        kernel.register_core_tool_adapter(MvpToolAdapter::with_config(tool_config.clone()));
         kernel
             .set_default_core_tool_adapter("mvp-tools")
             .expect("set default adapter");
+
+        // Register policy extensions for unified security enforcement.
+        // Policy rules come exclusively from the runtime config; no hardcoded
+        // lists are injected here.
+        kernel.register_policy_extension(
+            crate::tools::shell_policy_ext::ToolPolicyExtension::from_config(&tool_config),
+        );
+        kernel.register_policy_extension(crate::tools::file_policy_ext::FilePolicyExtension::new(
+            tool_config.file_root,
+        ));
 
         #[cfg(feature = "memory-sqlite")]
         {
@@ -293,7 +316,17 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn integ_shell_exec_echo() {
-        let harness = TurnTestHarness::new();
+        let harness = TurnTestHarness::with_tool_config(
+            BTreeSet::from([
+                Capability::InvokeTool,
+                Capability::FilesystemRead,
+                Capability::FilesystemWrite,
+            ]),
+            ToolRuntimeConfig {
+                shell_allow: BTreeSet::from(["echo".to_owned()]),
+                ..ToolRuntimeConfig::default()
+            },
+        );
 
         let turn = FakeProviderBuilder::new()
             .with_tool_call("shell.exec", json!({"command": "echo", "args": ["hello"]}))
@@ -314,7 +347,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn integ_shell_exec_blocked_command() {
-        let harness = TurnTestHarness::new();
+        let harness = TurnTestHarness::with_tool_config(
+            BTreeSet::from([Capability::InvokeTool]),
+            ToolRuntimeConfig {
+                shell_deny: BTreeSet::from(["rm".to_owned()]),
+                ..ToolRuntimeConfig::default()
+            },
+        );
 
         let turn = FakeProviderBuilder::new()
             .with_tool_call("shell.exec", json!({"command": "rm", "args": ["-rf", "/"]}))
@@ -325,7 +364,7 @@ mod tests {
         match result {
             TurnResult::ToolDenied(err) => {
                 assert!(
-                    err.contains("blocked by default shell policy"),
+                    err.contains("blocked by shell policy"),
                     "expected policy-block reason, got: {err}"
                 );
             }
@@ -344,13 +383,13 @@ mod tests {
 
         #[allow(clippy::wildcard_enum_match_arm)]
         match result {
-            TurnResult::ToolError(err) => {
+            TurnResult::ToolDenied(err) => {
                 assert!(
                     err.contains("escapes"),
                     "expected 'escapes' in error, got: {err}"
                 );
             }
-            other => panic!("expected ToolError with 'escapes', got: {other:?}"),
+            other => panic!("expected ToolDenied with 'escapes', got: {other:?}"),
         }
     }
 
@@ -378,7 +417,17 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn integ_audit_captures_tool_plane_invocation() {
-        let harness = TurnTestHarness::new();
+        let harness = TurnTestHarness::with_tool_config(
+            BTreeSet::from([
+                Capability::InvokeTool,
+                Capability::FilesystemRead,
+                Capability::FilesystemWrite,
+            ]),
+            ToolRuntimeConfig {
+                shell_allow: BTreeSet::from(["echo".to_owned()]),
+                ..ToolRuntimeConfig::default()
+            },
+        );
 
         let turn = FakeProviderBuilder::new()
             .with_tool_call("shell.exec", json!({"command": "echo", "args": ["audit"]}))
@@ -428,6 +477,33 @@ mod tests {
             }
             other => {
                 panic!("expected ToolError with 'payload must be an object', got: {other:?}");
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn integ_file_write_denied_without_capability() {
+        let harness = TurnTestHarness::with_capabilities(BTreeSet::from([Capability::InvokeTool]));
+
+        let turn = FakeProviderBuilder::new()
+            .with_tool_call(
+                "file.write",
+                json!({"path": "test.txt", "content": "hello"}),
+            )
+            .build();
+        let result = harness.execute(&turn).await;
+
+        match result {
+            TurnResult::ToolDenied(err) => {
+                assert!(
+                    err.contains("FilesystemWrite"),
+                    "expected 'FilesystemWrite' in reason, got: {err}"
+                );
+            }
+            other @ (TurnResult::FinalText(_)
+            | TurnResult::ToolError(_)
+            | TurnResult::ProviderError(_)) => {
+                panic!("expected ToolDenied with FilesystemWrite, got: {other:?}")
             }
         }
     }

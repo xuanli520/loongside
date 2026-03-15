@@ -30,7 +30,6 @@ pub struct ToolIntent {
 pub struct ToolDecision {
     pub allow: bool,
     pub deny: bool,
-    pub approval_required: bool,
     pub reason: String,
     pub rule_id: String,
 }
@@ -61,7 +60,6 @@ const MAX_TOOL_RESULT_PAYLOAD_SUMMARY_LIMIT_CHARS: usize = 64_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnFailureKind {
-    ApprovalRequired,
     PolicyDenied,
     Retryable,
     NonRetryable,
@@ -77,15 +75,6 @@ pub struct TurnFailure {
 }
 
 impl TurnFailure {
-    pub fn approval_required(code: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self {
-            kind: TurnFailureKind::ApprovalRequired,
-            code: code.into(),
-            reason: reason.into(),
-            retryable: false,
-        }
-    }
-
     pub fn policy_denied(code: impl Into<String>, reason: impl Into<String>) -> Self {
         Self {
             kind: TurnFailureKind::PolicyDenied,
@@ -144,17 +133,12 @@ impl fmt::Display for TurnFailure {
 #[derive(Debug, Clone)]
 pub enum TurnResult {
     FinalText(String),
-    NeedsApproval(TurnFailure),
     ToolDenied(TurnFailure),
     ToolError(TurnFailure),
     ProviderError(TurnFailure),
 }
 
 impl TurnResult {
-    pub fn needs_approval(code: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self::NeedsApproval(TurnFailure::approval_required(code, reason))
-    }
-
     pub fn policy_denied(code: impl Into<String>, reason: impl Into<String>) -> Self {
         Self::ToolDenied(TurnFailure::policy_denied(code, reason))
     }
@@ -174,8 +158,7 @@ impl TurnResult {
     pub fn failure(&self) -> Option<&TurnFailure> {
         match self {
             TurnResult::FinalText(_) => None,
-            TurnResult::NeedsApproval(failure)
-            | TurnResult::ToolDenied(failure)
+            TurnResult::ToolDenied(failure)
             | TurnResult::ToolError(failure)
             | TurnResult::ProviderError(failure) => Some(failure),
         }
@@ -322,7 +305,7 @@ impl TurnEngine {
         }
 
         // All tools validated — execution requires a kernel context
-        TurnResult::needs_approval("kernel_context_required", "kernel_context_required")
+        TurnResult::policy_denied("kernel_context_required", "kernel_context_required")
     }
 
     /// Execute a provider turn with policy-gated tool execution through the kernel.
@@ -332,7 +315,7 @@ impl TurnEngine {
     /// 2. Too many intents → `ToolDenied("max_tool_steps_exceeded")`
     /// 3. Unknown tool → `ToolDenied("tool_not_found: ...")`
     /// 4. No kernel context → `ToolDenied("no_kernel_context")`
-    /// 5. Policy/capability check via kernel → `ToolDenied` with reason if denied
+    /// 5. Policy/capability check via kernel → `NeedsApproval` or `ToolDenied`
     /// 6. Execute tool → map result to `TurnResult`
     pub async fn execute_turn(
         &self,

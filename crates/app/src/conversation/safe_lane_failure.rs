@@ -181,9 +181,6 @@ impl SafeLaneFailureCode {
         reason: impl Into<String>,
     ) -> TurnFailure {
         match kind {
-            TurnFailureKind::ApprovalRequired => {
-                TurnFailure::approval_required(self.as_str(), reason)
-            }
             TurnFailureKind::PolicyDenied => TurnFailure::policy_denied(self.as_str(), reason),
             TurnFailureKind::Retryable => TurnFailure::retryable(self.as_str(), reason),
             TurnFailureKind::NonRetryable => TurnFailure::non_retryable(self.as_str(), reason),

@@ -4957,13 +4957,13 @@ fn provider_tool_aliases_flow_through_parse_and_turn_validation() {
     let result = engine.evaluate_turn(&turn);
     #[allow(clippy::wildcard_enum_match_arm)]
     match result {
-        TurnResult::NeedsApproval(reason) => {
+        TurnResult::ToolDenied(reason) => {
             assert!(
                 reason.contains("kernel_context_required"),
                 "reason: {reason}"
             );
         }
-        other => panic!("expected NeedsApproval, got {:?}", other),
+        other => panic!("expected ToolDenied, got {:?}", other),
     }
 }
 
@@ -5076,13 +5076,13 @@ fn turn_engine_known_tool_with_no_kernel_returns_tool_denied() {
     let result = engine.evaluate_turn(&turn);
     #[allow(clippy::wildcard_enum_match_arm)]
     match result {
-        TurnResult::NeedsApproval(reason) => {
+        TurnResult::ToolDenied(reason) => {
             assert!(
                 reason.contains("kernel_context_required"),
                 "reason: {reason}"
             );
         }
-        other => panic!("expected NeedsApproval, got {:?}", other),
+        other => panic!("expected ToolDenied, got {:?}", other),
     }
 }
 
@@ -5572,8 +5572,7 @@ async fn turn_engine_keeps_external_skill_invoke_payloads_intact() {
                 "payload summary should keep invoke instructions intact: {envelope:?}"
             );
         }
-        other @ TurnResult::NeedsApproval(_)
-        | other @ TurnResult::ToolDenied(_)
+        other @ TurnResult::ToolDenied(_)
         | other @ TurnResult::ToolError(_)
         | other @ TurnResult::ProviderError(_) => panic!("unexpected result: {other:?}"),
     }
@@ -5678,7 +5677,6 @@ async fn turn_engine_persists_tool_lifecycle_events() {
     let decision = ToolDecision {
         allow: true,
         deny: false,
-        approval_required: false,
         reason: "policy_ok".to_owned(),
         rule_id: "rule-42".to_owned(),
     };
