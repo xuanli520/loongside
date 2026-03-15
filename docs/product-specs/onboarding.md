@@ -12,7 +12,9 @@ next.
 - [ ] Onboarding detects reusable provider, channel, or workspace settings when
       available and explains what it found before writing config.
 - [ ] The happy path ends with explicit next-step guidance for:
-      `loongclaw ask --message "..."` and `loongclaw chat`.
+      a concrete `loongclaw ask --message "..."` example and `loongclaw chat`.
+- [ ] The primary post-onboard handoff prefers a one-shot `ask` example before
+      interactive `chat`, so first success does not require learning the REPL.
 - [ ] Rerunning onboarding does not silently overwrite an existing config unless
       the user explicitly opts into a destructive path such as `--force`.
 - [ ] Onboarding uses the same provider, memory, and channel configuration
@@ -22,6 +24,7 @@ next.
 
 ## Out of Scope
 
-- Packaging and installer distribution strategy
+- Package-manager distribution strategy beyond the documented bootstrap installer;
+  see [Installation](installation.md)
 - Full channel pairing or browser-based setup UIs
 - Arbitrary advanced config editing during first run

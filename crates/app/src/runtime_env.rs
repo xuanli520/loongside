@@ -50,6 +50,34 @@ pub fn initialize_runtime_environment(
         config.tools.resolved_file_root().display().to_string(),
     );
     set_env_var(
+        "LOONGCLAW_TOOL_SESSIONS_ENABLED",
+        bool_env(config.tools.sessions.enabled),
+    );
+    set_env_var(
+        "LOONGCLAW_TOOL_MESSAGES_ENABLED",
+        bool_env(config.tools.messages.enabled),
+    );
+    set_env_var(
+        "LOONGCLAW_TOOL_DELEGATE_ENABLED",
+        bool_env(config.tools.delegate.enabled),
+    );
+    set_env_var(
+        "LOONGCLAW_BROWSER_ENABLED",
+        bool_env(config.tools.browser.enabled),
+    );
+    set_env_var(
+        "LOONGCLAW_BROWSER_MAX_SESSIONS",
+        config.tools.browser.max_sessions.to_string(),
+    );
+    set_env_var(
+        "LOONGCLAW_BROWSER_MAX_LINKS",
+        config.tools.browser.max_links.to_string(),
+    );
+    set_env_var(
+        "LOONGCLAW_BROWSER_MAX_TEXT_CHARS",
+        config.tools.browser.max_text_chars.to_string(),
+    );
+    set_env_var(
         "LOONGCLAW_WEB_FETCH_ENABLED",
         bool_env(config.tools.web.enabled),
     );
@@ -129,6 +157,15 @@ pub fn initialize_runtime_environment(
         shell_default_mode: crate::tools::shell_policy_ext::ShellPolicyDefault::parse(
             &config.tools.shell_default_mode,
         ),
+        sessions_enabled: config.tools.sessions.enabled,
+        messages_enabled: config.tools.messages.enabled,
+        delegate_enabled: config.tools.delegate.enabled,
+        browser: crate::tools::runtime_config::BrowserRuntimePolicy {
+            enabled: config.tools.browser.enabled,
+            max_sessions: config.tools.browser.max_sessions,
+            max_links: config.tools.browser.max_links,
+            max_text_chars: config.tools.browser.max_text_chars,
+        },
         web_fetch: crate::tools::runtime_config::WebFetchRuntimePolicy {
             enabled: config.tools.web.enabled,
             allow_private_hosts: config.tools.web.allow_private_hosts,
@@ -205,6 +242,10 @@ mod tests {
         config.memory.summary_max_chars = 900;
         config.memory.profile_note = Some("Imported NanoBot preferences".to_owned());
         config.tools.file_root = Some("/tmp/loongclaw-runtime-file-root".to_owned());
+        config.tools.browser.enabled = false;
+        config.tools.browser.max_sessions = 4;
+        config.tools.browser.max_links = 12;
+        config.tools.browser.max_text_chars = 2048;
         config.tools.web.enabled = false;
         config.tools.web.allow_private_hosts = true;
         config.tools.web.allowed_domains = vec!["docs.example.com".to_owned()];
@@ -253,6 +294,26 @@ mod tests {
                 .ok()
                 .as_deref(),
             Some("skills.sh")
+        );
+        assert_eq!(
+            std::env::var("LOONGCLAW_BROWSER_ENABLED").ok().as_deref(),
+            Some("false")
+        );
+        assert_eq!(
+            std::env::var("LOONGCLAW_BROWSER_MAX_SESSIONS")
+                .ok()
+                .as_deref(),
+            Some("4")
+        );
+        assert_eq!(
+            std::env::var("LOONGCLAW_BROWSER_MAX_LINKS").ok().as_deref(),
+            Some("12")
+        );
+        assert_eq!(
+            std::env::var("LOONGCLAW_BROWSER_MAX_TEXT_CHARS")
+                .ok()
+                .as_deref(),
+            Some("2048")
         );
         assert_eq!(
             std::env::var("LOONGCLAW_WEB_FETCH_ENABLED").ok().as_deref(),
@@ -312,6 +373,10 @@ mod tests {
         crate::process_env::remove_var("LOONGCLAW_EXTERNAL_SKILLS_BLOCKED_DOMAINS");
         crate::process_env::remove_var("LOONGCLAW_EXTERNAL_SKILLS_INSTALL_ROOT");
         crate::process_env::remove_var("LOONGCLAW_EXTERNAL_SKILLS_AUTO_EXPOSE_INSTALLED");
+        crate::process_env::remove_var("LOONGCLAW_BROWSER_ENABLED");
+        crate::process_env::remove_var("LOONGCLAW_BROWSER_MAX_SESSIONS");
+        crate::process_env::remove_var("LOONGCLAW_BROWSER_MAX_LINKS");
+        crate::process_env::remove_var("LOONGCLAW_BROWSER_MAX_TEXT_CHARS");
         crate::process_env::remove_var("LOONGCLAW_WEB_FETCH_ENABLED");
         crate::process_env::remove_var("LOONGCLAW_WEB_FETCH_ALLOW_PRIVATE_HOSTS");
         crate::process_env::remove_var("LOONGCLAW_WEB_FETCH_ALLOWED_DOMAINS");

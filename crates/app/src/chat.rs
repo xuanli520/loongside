@@ -34,6 +34,8 @@ use super::memory;
 #[cfg(feature = "memory-sqlite")]
 use super::memory::runtime_config::MemoryRuntimeConfig;
 
+const DEFAULT_FIRST_CHAT_PROMPT: &str = "Summarize this repository and suggest the best next step.";
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CliChatOptions {
     pub acp_requested: bool,
@@ -64,6 +66,25 @@ struct CliTurnRuntime {
     memory_label: String,
     #[cfg(feature = "memory-sqlite")]
     memory_config: MemoryRuntimeConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CliChatStartupSummary {
+    config_path: String,
+    memory_label: String,
+    session_id: String,
+    context_engine_id: String,
+    context_engine_source: String,
+    acp_enabled: bool,
+    dispatch_enabled: bool,
+    conversation_routing: String,
+    allowed_channels: Vec<String>,
+    acp_backend_id: String,
+    acp_backend_source: String,
+    explicit_acp_request: bool,
+    event_stream_enabled: bool,
+    bootstrap_mcp_servers: Vec<String>,
+    working_directory: Option<String>,
 }
 
 #[allow(clippy::print_stdout)] // CLI REPL output
@@ -261,7 +282,7 @@ pub async fn run_cli_ask(
             .map(|printer| printer as &dyn AcpTurnEventSink),
     )
     .await?;
-    println!("loongclaw> {assistant_text}");
+    println!("{assistant_text}");
     Ok(())
 }
 
@@ -324,54 +345,94 @@ async fn initialize_cli_turn_runtime(
 
 #[allow(clippy::print_stdout)] // CLI output
 fn print_cli_chat_startup(runtime: &CliTurnRuntime, options: &CliChatOptions) -> CliResult<()> {
+    let summary = build_cli_chat_startup_summary(runtime, options)?;
+    for line in render_cli_chat_startup_lines(&summary) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn build_cli_chat_startup_summary(
+    runtime: &CliTurnRuntime,
+    options: &CliChatOptions,
+) -> CliResult<CliChatStartupSummary> {
     let context_engine_selection = resolve_context_engine_selection(&runtime.config);
     let acp_selection = resolve_acp_backend_selection(&runtime.config);
-    let dispatch_channels = runtime.config.acp.dispatch.allowed_channel_ids()?;
-
-    println!(
-        "loongclaw chat started (config={}, memory={})",
-        runtime.resolved_path.display(),
-        runtime.memory_label
-    );
-    println!(
-        "session={} (type /help for commands, /exit to quit)",
-        runtime.session_id
-    );
-    println!(
-        "context_engine={} source={}",
-        context_engine_selection.id,
-        context_engine_selection.source.as_str()
-    );
-    println!(
-        "acp_enabled={} dispatch_enabled={} conversation_routing={} allowed_channels={} backend={} source={}",
-        runtime.config.acp.enabled,
-        runtime.config.acp.dispatch_enabled(),
-        runtime.config.acp.dispatch.conversation_routing.as_str(),
-        dispatch_channels.join(","),
-        acp_selection.id,
-        acp_selection.source.as_str()
-    );
-    if runtime.explicit_acp_request
-        || !runtime.effective_bootstrap_mcp_servers.is_empty()
-        || runtime.effective_working_directory.is_some()
-    {
-        let bootstrap_label = if runtime.effective_bootstrap_mcp_servers.is_empty() {
-            "-".to_owned()
-        } else {
-            runtime.effective_bootstrap_mcp_servers.join(",")
-        };
-        let cwd_label = runtime
+    Ok(CliChatStartupSummary {
+        config_path: runtime.resolved_path.display().to_string(),
+        memory_label: runtime.memory_label.clone(),
+        session_id: runtime.session_id.clone(),
+        context_engine_id: context_engine_selection.id.to_owned(),
+        context_engine_source: context_engine_selection.source.as_str().to_owned(),
+        acp_enabled: runtime.config.acp.enabled,
+        dispatch_enabled: runtime.config.acp.dispatch_enabled(),
+        conversation_routing: runtime
+            .config
+            .acp
+            .dispatch
+            .conversation_routing
+            .as_str()
+            .to_owned(),
+        allowed_channels: runtime.config.acp.dispatch.allowed_channel_ids()?,
+        acp_backend_id: acp_selection.id.to_owned(),
+        acp_backend_source: acp_selection.source.as_str().to_owned(),
+        explicit_acp_request: runtime.explicit_acp_request,
+        event_stream_enabled: options.acp_event_stream,
+        bootstrap_mcp_servers: runtime.effective_bootstrap_mcp_servers.clone(),
+        working_directory: runtime
             .effective_working_directory
             .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "-".to_owned());
-        println!(
-            "acp_turn_options explicit={} event_stream={} bootstrap_mcp_servers={bootstrap_label} cwd={cwd_label}",
-            runtime.explicit_acp_request, options.acp_event_stream,
-        );
+            .map(|path| path.display().to_string()),
+    })
+}
+
+fn render_cli_chat_startup_lines(summary: &CliChatStartupSummary) -> Vec<String> {
+    let mut lines = vec![
+        "loongclaw chat ready".to_owned(),
+        format!("- session: {}", summary.session_id),
+        format!("- config: {}", summary.config_path),
+        format!("- memory: {}", summary.memory_label),
+        "- start typing a request, or use /help for commands".to_owned(),
+        format!("- try this first: {DEFAULT_FIRST_CHAT_PROMPT}"),
+        "assistant runtime".to_owned(),
+    ];
+
+    let allowed_channels = if summary.allowed_channels.is_empty() {
+        "-".to_owned()
+    } else {
+        summary.allowed_channels.join(",")
+    };
+    lines.push(format!(
+        "- context engine: {} ({})",
+        summary.context_engine_id, summary.context_engine_source
+    ));
+    lines.push(format!(
+        "- acp: enabled={} dispatch_enabled={} routing={} backend={} ({}) allowed_channels={allowed_channels}",
+        summary.acp_enabled,
+        summary.dispatch_enabled,
+        summary.conversation_routing,
+        summary.acp_backend_id,
+        summary.acp_backend_source,
+    ));
+
+    if summary.explicit_acp_request
+        || summary.event_stream_enabled
+        || !summary.bootstrap_mcp_servers.is_empty()
+        || summary.working_directory.is_some()
+    {
+        let bootstrap_label = if summary.bootstrap_mcp_servers.is_empty() {
+            "-".to_owned()
+        } else {
+            summary.bootstrap_mcp_servers.join(",")
+        };
+        let cwd_label = summary.working_directory.as_deref().unwrap_or("-");
+        lines.push(format!(
+            "- acp overrides: explicit={} event_stream={} bootstrap_mcp_servers={bootstrap_label} cwd={cwd_label}",
+            summary.explicit_acp_request, summary.event_stream_enabled,
+        ));
     }
 
-    Ok(())
+    lines
 }
 
 async fn run_cli_turn(
@@ -1268,6 +1329,75 @@ mod tests {
             .expect_err("empty one-shot message should fail");
 
         assert!(error.contains("ask message must not be empty"));
+    }
+
+    #[test]
+    fn render_cli_chat_startup_lines_prioritize_first_turn_guidance() {
+        let lines = render_cli_chat_startup_lines(&CliChatStartupSummary {
+            config_path: "/tmp/loongclaw.toml".to_owned(),
+            memory_label: "/tmp/loongclaw.db".to_owned(),
+            session_id: "default".to_owned(),
+            context_engine_id: "threaded".to_owned(),
+            context_engine_source: "config".to_owned(),
+            acp_enabled: true,
+            dispatch_enabled: true,
+            conversation_routing: "automatic".to_owned(),
+            allowed_channels: vec!["cli".to_owned()],
+            acp_backend_id: "builtin".to_owned(),
+            acp_backend_source: "default".to_owned(),
+            explicit_acp_request: false,
+            event_stream_enabled: false,
+            bootstrap_mcp_servers: Vec::new(),
+            working_directory: None,
+        });
+
+        assert_eq!(lines[0], "loongclaw chat ready");
+        assert!(lines.iter().any(|line| line == "- session: default"));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "- start typing a request, or use /help for commands"),
+            "chat startup should read like a product entry point instead of a raw runtime dump: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| {
+                line == "- try this first: Summarize this repository and suggest the best next step."
+            }),
+            "chat startup should suggest a concrete first prompt: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| line == "assistant runtime"),
+            "chat startup should still preserve a compact runtime section for operator context: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn render_cli_chat_startup_lines_surface_explicit_acp_overrides() {
+        let lines = render_cli_chat_startup_lines(&CliChatStartupSummary {
+            config_path: "/tmp/loongclaw.toml".to_owned(),
+            memory_label: "/tmp/loongclaw.db".to_owned(),
+            session_id: "thread-42".to_owned(),
+            context_engine_id: "threaded".to_owned(),
+            context_engine_source: "env".to_owned(),
+            acp_enabled: true,
+            dispatch_enabled: true,
+            conversation_routing: "manual".to_owned(),
+            allowed_channels: vec!["cli".to_owned(), "telegram".to_owned()],
+            acp_backend_id: "jsonrpc".to_owned(),
+            acp_backend_source: "config".to_owned(),
+            explicit_acp_request: true,
+            event_stream_enabled: true,
+            bootstrap_mcp_servers: vec!["filesystem".to_owned()],
+            working_directory: Some("/workspace/project".to_owned()),
+        });
+
+        assert!(
+            lines.iter().any(|line| {
+                line
+                    == "- acp overrides: explicit=true event_stream=true bootstrap_mcp_servers=filesystem cwd=/workspace/project"
+            }),
+            "chat startup should surface ACP override knobs only when they matter: {lines:#?}"
+        );
     }
 
     #[test]

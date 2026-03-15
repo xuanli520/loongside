@@ -10,6 +10,8 @@ use crate::config::ToolConfig;
 use crate::memory::runtime_config::MemoryRuntimeConfig;
 
 pub(crate) mod approval;
+#[cfg(feature = "tool-browser")]
+mod browser;
 mod catalog;
 mod claw_import;
 pub(crate) mod delegate;
@@ -32,9 +34,12 @@ pub use catalog::{
     delegate_child_tool_view_for_config, delegate_child_tool_view_for_config_with_delegate,
     governance_profile_for_descriptor, governance_profile_for_tool_name,
     planned_delegate_child_tool_view, planned_root_tool_view, runtime_tool_view,
-    runtime_tool_view_for_config, tool_catalog,
+    runtime_tool_view_for_config, runtime_tool_view_for_config_with_external_skills,
+    runtime_tool_view_for_runtime_config, tool_catalog,
 };
 pub use kernel_adapter::MvpToolAdapter;
+
+pub(crate) const BROWSER_SESSION_SCOPE_FIELD: &str = "__loongclaw_browser_scope";
 
 /// Execute a tool request, routing through the kernel for
 /// policy enforcement and audit recording.
@@ -196,7 +201,7 @@ pub fn canonical_tool_name(raw: &str) -> &str {
 }
 
 pub fn is_known_tool_name(raw: &str) -> bool {
-    is_known_tool_name_in_view(raw, &runtime_tool_view())
+    tool_catalog().resolve(raw).is_some()
 }
 
 pub fn is_known_tool_name_in_view(raw: &str, view: &ToolView) -> bool {
@@ -235,6 +240,10 @@ pub fn execute_tool_core_with_config(
         "external_skills.remove" => {
             external_skills::execute_external_skills_remove_tool_with_config(request, config)
         }
+        #[cfg(feature = "tool-browser")]
+        "browser.open" | "browser.extract" | "browser.click" => {
+            browser::execute_browser_tool_with_config(request, config)
+        }
         "shell.exec" => shell::execute_shell_tool_with_config(request, config),
         "file.read" => file::execute_file_read_tool_with_config(request, config),
         "file.write" => file::execute_file_write_tool_with_config(request, config),
@@ -260,7 +269,7 @@ pub struct ToolRegistryEntry {
 /// Returns a sorted list of all registered tools, gated by feature flags.
 pub fn tool_registry() -> Vec<ToolRegistryEntry> {
     let catalog = tool_catalog();
-    runtime_tool_view()
+    runtime_tool_view_for_runtime_config(runtime_config::get_tool_runtime_config())
         .iter(&catalog)
         .map(|descriptor| ToolRegistryEntry {
             name: descriptor.name,
@@ -276,7 +285,7 @@ pub fn capability_snapshot() -> String {
 }
 
 pub fn capability_snapshot_with_config(config: &runtime_config::ToolRuntimeConfig) -> String {
-    capability_snapshot_for_view_with_config(&runtime_tool_view(), config)
+    capability_snapshot_for_view_with_config(&runtime_tool_view_for_runtime_config(config), config)
 }
 
 pub fn capability_snapshot_for_view(view: &ToolView) -> String {
@@ -311,8 +320,14 @@ pub(crate) fn capability_snapshot_for_view_with_config(
 /// The output shape matches OpenAI-compatible `tools=[{type:function,...}]`.
 /// Order is deterministic for stable prompting/tests.
 pub fn provider_tool_definitions() -> Vec<Value> {
+    provider_tool_definitions_with_config(runtime_config::get_tool_runtime_config())
+}
+
+pub fn provider_tool_definitions_with_config(
+    config: &runtime_config::ToolRuntimeConfig,
+) -> Vec<Value> {
     let catalog = tool_catalog();
-    runtime_tool_view()
+    runtime_tool_view_for_runtime_config(config)
         .iter(&catalog)
         .map(|descriptor| {
             debug_assert_eq!(descriptor.availability, ToolAvailability::Runtime);
@@ -482,7 +497,7 @@ mod tests {
         feature = "memory-sqlite"
     ))]
     #[test]
-    fn capability_snapshot_lists_all_tools_when_all_features_enabled() {
+    fn capability_snapshot_lists_default_runtime_visible_tools() {
         let snapshot = capability_snapshot();
         assert!(snapshot.contains(
             "- approval_request_resolve: Resolve one visible governed tool approval request"
@@ -493,6 +508,15 @@ mod tests {
         assert!(snapshot.contains(
             "- approval_requests_list: List visible governed tool approval requests across the current session scope"
         ));
+        assert!(snapshot.contains(
+            "- browser.click: Follow one previously discovered page link within a bounded browser session"
+        ));
+        assert!(snapshot.contains(
+            "- browser.extract: Extract structured text or links from the current browser session page"
+        ));
+        assert!(snapshot.contains(
+            "- browser.open: Open a public web page into a bounded browser session with safe link discovery"
+        ));
         assert!(
             snapshot.contains(
                 "- claw.import: Import legacy Claw configs into native LoongClaw settings"
@@ -502,23 +526,7 @@ mod tests {
         assert!(snapshot.contains(
             "- delegate_async: Delegate a focused subtask into a background child session"
         ));
-        assert!(snapshot.contains("- external_skills.fetch: Download external skills artifacts with domain policy and approval guards"));
-        assert!(snapshot.contains("- external_skills.install: Install a managed external skill from a local directory or archive"));
-        assert!(
-            snapshot.contains(
-                "- external_skills.inspect: Read metadata for an installed external skill"
-            )
-        );
-        assert!(snapshot.contains(
-            "- external_skills.invoke: Load an installed external skill into the conversation loop"
-        ));
-        assert!(snapshot.contains(
-            "- external_skills.list: List managed external skills available for invocation"
-        ));
         assert!(snapshot.contains("- external_skills.policy: Read/update external skills domain allow/block policy at runtime"));
-        assert!(snapshot.contains(
-            "- external_skills.remove: Remove an installed external skill from the managed runtime"
-        ));
         assert!(snapshot.contains("- file.read: Read file contents"));
         assert!(snapshot.contains("- file.write: Write file contents"));
         assert!(snapshot.contains(
@@ -558,16 +566,13 @@ mod tests {
             "- approval_request_resolve",
             "- approval_request_status",
             "- approval_requests_list",
+            "- browser.click",
+            "- browser.extract",
+            "- browser.open",
             "- claw.import",
             "- delegate",
             "- delegate_async",
-            "- external_skills.fetch",
-            "- external_skills.inspect",
-            "- external_skills.install",
-            "- external_skills.invoke",
-            "- external_skills.list",
             "- external_skills.policy",
-            "- external_skills.remove",
             "- file.read",
             "- file.write",
             "- provider.switch",
@@ -599,21 +604,18 @@ mod tests {
     #[test]
     fn tool_registry_returns_all_known_tools() {
         let entries = tool_registry();
-        assert_eq!(entries.len(), 26);
+        assert_eq!(entries.len(), 23);
         let names: Vec<&str> = entries.iter().map(|e| e.name).collect();
         assert!(names.contains(&"approval_request_resolve"));
         assert!(names.contains(&"approval_request_status"));
         assert!(names.contains(&"approval_requests_list"));
+        assert!(names.contains(&"browser.click"));
+        assert!(names.contains(&"browser.extract"));
+        assert!(names.contains(&"browser.open"));
         assert!(names.contains(&"claw.import"));
         assert!(names.contains(&"delegate"));
         assert!(names.contains(&"delegate_async"));
-        assert!(names.contains(&"external_skills.fetch"));
-        assert!(names.contains(&"external_skills.install"));
-        assert!(names.contains(&"external_skills.inspect"));
-        assert!(names.contains(&"external_skills.invoke"));
-        assert!(names.contains(&"external_skills.list"));
         assert!(names.contains(&"external_skills.policy"));
-        assert!(names.contains(&"external_skills.remove"));
         assert!(names.contains(&"shell.exec"));
         assert!(names.contains(&"file.read"));
         assert!(names.contains(&"file.write"));
@@ -660,10 +662,11 @@ mod tests {
     #[cfg(all(feature = "tool-file", feature = "tool-shell"))]
     #[test]
     fn planned_root_tool_view_is_advertisable_when_all_tools_are_runtime_ready() {
-        let defs = try_provider_tool_definitions_for_view(&planned_root_tool_view())
+        let view = planned_root_tool_view();
+        let defs = try_provider_tool_definitions_for_view(&view)
             .expect("all tools should now be advertisable");
 
-        assert_eq!(defs.len(), 27);
+        assert_eq!(defs.len(), view.iter(&tool_catalog()).count());
     }
 
     #[cfg(feature = "memory-sqlite")]
@@ -685,6 +688,9 @@ mod tests {
             "session_wait",
             "sessions_history",
             "sessions_list",
+            "browser.click",
+            "browser.extract",
+            "browser.open",
         ] {
             assert!(
                 view.contains(tool_name),
@@ -707,6 +713,62 @@ mod tests {
 
         let root_view = runtime_tool_view_for_config(&config);
         assert!(!root_view.contains("web.fetch"));
+    }
+
+    #[test]
+    fn runtime_tool_view_hides_browser_when_disabled() {
+        let mut config = crate::config::ToolConfig::default();
+        config.browser.enabled = false;
+
+        let root_view = runtime_tool_view_for_config(&config);
+        assert!(!root_view.contains("browser.open"));
+        assert!(!root_view.contains("browser.extract"));
+        assert!(!root_view.contains("browser.click"));
+    }
+
+    #[test]
+    fn runtime_tool_view_respects_explicit_external_skills_toggle() {
+        let config = crate::config::ToolConfig::default();
+
+        let disabled_view = runtime_tool_view_for_config(&config);
+        assert!(!disabled_view.contains("external_skills.fetch"));
+        assert!(!disabled_view.contains("external_skills.invoke"));
+        assert!(!disabled_view.contains("external_skills.list"));
+
+        let enabled_view = runtime_tool_view_for_config_with_external_skills(&config, true);
+        assert!(enabled_view.contains("external_skills.fetch"));
+        assert!(enabled_view.contains("external_skills.invoke"));
+        assert!(enabled_view.contains("external_skills.list"));
+    }
+
+    #[test]
+    fn capability_snapshot_with_config_uses_runtime_enabled_tool_view() {
+        let config = runtime_config::ToolRuntimeConfig {
+            sessions_enabled: false,
+            messages_enabled: false,
+            delegate_enabled: false,
+            browser: runtime_config::BrowserRuntimePolicy {
+                enabled: false,
+                max_sessions: 8,
+                max_links: 40,
+                max_text_chars: 6000,
+            },
+            web_fetch: runtime_config::WebFetchRuntimePolicy {
+                enabled: false,
+                ..runtime_config::WebFetchRuntimePolicy::default()
+            },
+            external_skills: runtime_config::ExternalSkillsRuntimePolicy {
+                enabled: false,
+                ..runtime_config::ExternalSkillsRuntimePolicy::default()
+            },
+            ..runtime_config::ToolRuntimeConfig::default()
+        };
+
+        let snapshot = capability_snapshot_with_config(&config);
+        assert!(!snapshot.contains("- browser.open:"));
+        assert!(!snapshot.contains("- web.fetch:"));
+        assert!(!snapshot.contains("- delegate:"));
+        assert!(!snapshot.contains("- external_skills.fetch:"));
     }
 
     #[test]
@@ -771,8 +833,9 @@ mod tests {
     ))]
     #[test]
     fn provider_tool_definitions_are_stable_and_complete() {
-        let defs = provider_tool_definitions();
-        assert_eq!(defs.len(), 26);
+        let defs =
+            provider_tool_definitions_with_config(&runtime_config::ToolRuntimeConfig::default());
+        assert_eq!(defs.len(), 23);
 
         let names: Vec<&str> = defs
             .iter()
@@ -786,16 +849,13 @@ mod tests {
                 "approval_request_resolve",
                 "approval_request_status",
                 "approval_requests_list",
+                "browser_click",
+                "browser_extract",
+                "browser_open",
                 "claw_import",
                 "delegate",
                 "delegate_async",
-                "external_skills_fetch",
-                "external_skills_inspect",
-                "external_skills_install",
-                "external_skills_invoke",
-                "external_skills_list",
                 "external_skills_policy",
-                "external_skills_remove",
                 "file_read",
                 "file_write",
                 "provider_switch",
@@ -950,6 +1010,24 @@ mod tests {
     }
 
     #[test]
+    fn provider_tool_definitions_include_browser_open_when_enabled() {
+        let defs = try_provider_tool_definitions_for_view(&runtime_tool_view_for_config(
+            &crate::config::ToolConfig::default(),
+        ))
+        .expect("runtime-visible tool schemas");
+        let browser_open = defs
+            .iter()
+            .find(|item| item["function"]["name"] == "browser_open")
+            .expect("browser_open definition");
+        let properties = browser_open["function"]["parameters"]["properties"]
+            .as_object()
+            .expect("browser_open properties");
+        assert!(properties.contains_key("url"));
+        assert!(!properties.contains_key("session_id"));
+        assert!(properties.contains_key("max_bytes"));
+    }
+
+    #[test]
     fn canonical_tool_name_maps_known_aliases() {
         assert_eq!(canonical_tool_name("claw_import"), "claw.import");
         assert_eq!(
@@ -983,6 +1061,9 @@ mod tests {
         assert_eq!(canonical_tool_name("file_read"), "file.read");
         assert_eq!(canonical_tool_name("file_write"), "file.write");
         assert_eq!(canonical_tool_name("provider_switch"), "provider.switch");
+        assert_eq!(canonical_tool_name("browser_open"), "browser.open");
+        assert_eq!(canonical_tool_name("browser_extract"), "browser.extract");
+        assert_eq!(canonical_tool_name("browser_click"), "browser.click");
         assert_eq!(canonical_tool_name("shell_exec"), "shell.exec");
         assert_eq!(canonical_tool_name("shell"), "shell.exec");
         assert_eq!(canonical_tool_name("web_fetch"), "web.fetch");
@@ -1013,6 +1094,12 @@ mod tests {
         assert!(is_known_tool_name("file_write"));
         assert!(is_known_tool_name("provider.switch"));
         assert!(is_known_tool_name("provider_switch"));
+        assert!(is_known_tool_name("browser.open"));
+        assert!(is_known_tool_name("browser_open"));
+        assert!(is_known_tool_name("browser.extract"));
+        assert!(is_known_tool_name("browser_extract"));
+        assert!(is_known_tool_name("browser.click"));
+        assert!(is_known_tool_name("browser_click"));
         assert!(is_known_tool_name("shell.exec"));
         assert!(is_known_tool_name("shell_exec"));
         assert!(is_known_tool_name("shell"));

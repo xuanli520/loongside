@@ -23,12 +23,14 @@ LoongClaw is not only a runtime for developers. The current MVP is aimed at:
 
 The current product contract is:
 
-1. Install LoongClaw.
+1. Install LoongClaw through the documented bootstrap installer, which prefers
+   checksum-verified GitHub Release binaries and keeps an explicit `--source`
+   fallback from a local checkout.
 2. Run `loongclaw onboard`.
 3. Set provider credentials.
-4. Get first value through either:
-   - `loongclaw ask --message "..."`
-   - `loongclaw chat`
+4. Get first value through a concrete one-shot command such as
+   `loongclaw ask --message "Summarize this repository and suggest the best next step."`,
+   then use `loongclaw chat` for follow-up interactive work.
 5. If anything is broken, use `loongclaw doctor` or `loongclaw doctor --fix`.
 6. Enable Telegram or Feishu only after the base CLI flow is healthy.
 
@@ -38,10 +40,13 @@ This keeps the first-run journey legible while preserving the existing runtime a
 
 See [Product Specs Index](product-specs/index.md) for detailed user-facing requirements:
 
+- [Installation](product-specs/installation.md) — bootstrap install, release-first download, and source fallback
 - [Onboarding](product-specs/onboarding.md) — first-run setup and handoff to first success
 - [One-Shot Ask](product-specs/one-shot-ask.md) — non-interactive assistant fast path
 - [Doctor](product-specs/doctor.md) — diagnostics and safe repair expectations
+- [Browser Automation](product-specs/browser-automation.md) — bounded browser-style assistant actions
 - [Channel Setup](product-specs/channel-setup.md) — configuring shipped assistant surfaces
+- [Tool Surface](product-specs/tool-surface.md) — truthful runtime-visible tool advertising
 - [WebChat](product-specs/webchat.md) — expectations for the browser-facing chat surface
 - [Memory Profiles](product-specs/memory-profiles.md) — memory access patterns
 - [Prompt And Personality](product-specs/prompt-and-personality.md) — prompt engineering constraints

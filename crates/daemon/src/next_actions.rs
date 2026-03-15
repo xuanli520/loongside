@@ -1,7 +1,11 @@
 use loongclaw_app as mvp;
 
+pub(crate) const DEFAULT_FIRST_ASK_MESSAGE: &str =
+    "Summarize this repository and suggest the best next step.";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SetupNextActionKind {
+    Ask,
     Chat,
     Channel,
     Doctor,
@@ -20,6 +24,16 @@ pub(crate) fn collect_setup_next_actions(
 ) -> Vec<SetupNextAction> {
     let mut actions = Vec::new();
     if config.cli.enabled {
+        actions.push(SetupNextAction {
+            kind: SetupNextActionKind::Ask,
+            label: "ask example".to_owned(),
+            command: format!(
+                "{} ask --config {} --message \"{}\"",
+                mvp::config::CLI_COMMAND_NAME,
+                config_path,
+                DEFAULT_FIRST_ASK_MESSAGE
+            ),
+        });
         actions.push(SetupNextAction {
             kind: SetupNextActionKind::Chat,
             label: "chat".to_owned(),

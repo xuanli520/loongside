@@ -57,7 +57,7 @@ fn execute_web_fetch_tool_enabled(
 
     let mut current_url = reqwest::Url::parse(raw_url)
         .map_err(|error| format!("invalid web.fetch url `{raw_url}`: {error}"))?;
-    let mut current_host = validate_fetch_target(&current_url, &config.web_fetch)?;
+    let mut current_host = validate_web_target(&current_url, &config.web_fetch, "web.fetch")?;
     let mut redirect_count = 0usize;
 
     loop {
@@ -90,7 +90,7 @@ fn execute_web_fetch_tool_enabled(
             let next_url = current_url
                 .join(location)
                 .map_err(|error| format!("web.fetch failed to resolve redirect target: {error}"))?;
-            current_host = validate_fetch_target(&next_url, &config.web_fetch)?;
+            current_host = validate_web_target(&next_url, &config.web_fetch, "web.fetch")?;
             current_url = next_url;
             redirect_count += 1;
             continue;
@@ -222,10 +222,11 @@ fn parse_max_bytes(payload: &Map<String, Value>, configured_max: usize) -> Resul
     Ok(parsed)
 }
 
-#[cfg(feature = "tool-webfetch")]
-fn validate_fetch_target(
+#[cfg(any(feature = "tool-webfetch", feature = "tool-browser"))]
+pub(crate) fn validate_web_target(
     url: &reqwest::Url,
     policy: &super::runtime_config::WebFetchRuntimePolicy,
+    surface_name: &str,
 ) -> Result<String, String> {
     use std::net::{IpAddr, ToSocketAddrs};
 
@@ -233,7 +234,7 @@ fn validate_fetch_target(
         "http" | "https" => {}
         other => {
             return Err(format!(
-                "web.fetch requires http or https url, got scheme `{other}`"
+                "{surface_name} requires http or https url, got scheme `{other}`"
             ));
         }
     }
@@ -241,18 +242,18 @@ fn validate_fetch_target(
     let host = url
         .host_str()
         .map(str::to_ascii_lowercase)
-        .ok_or_else(|| format!("web.fetch url `{url}` has no host"))?;
+        .ok_or_else(|| format!("{surface_name} url `{url}` has no host"))?;
 
     if let Some(rule) = first_matching_domain_rule(&host, &policy.blocked_domains) {
         return Err(format!(
-            "web.fetch blocked host `{host}` because it matches blocked domain rule `{rule}`"
+            "{surface_name} blocked host `{host}` because it matches blocked domain rule `{rule}`"
         ));
     }
     if !policy.allowed_domains.is_empty()
         && first_matching_domain_rule(&host, &policy.allowed_domains).is_none()
     {
         return Err(format!(
-            "web.fetch denied host `{host}` because it is not in allowed_domains"
+            "{surface_name} denied host `{host}` because it is not in allowed_domains"
         ));
     }
 
@@ -261,13 +262,15 @@ fn validate_fetch_target(
     }
 
     if host == "localhost" {
-        return Err("web.fetch blocked private or special-use host `localhost`".to_owned());
+        return Err(format!(
+            "{surface_name} blocked private or special-use host `localhost`"
+        ));
     }
 
     if let Ok(ip) = host.parse::<IpAddr>() {
         if is_private_or_special_ip(ip) {
             return Err(format!(
-                "web.fetch blocked private or special-use address `{ip}`"
+                "{surface_name} blocked private or special-use address `{ip}`"
             ));
         }
         return Ok(host);
@@ -275,30 +278,32 @@ fn validate_fetch_target(
 
     let port = url
         .port_or_known_default()
-        .ok_or_else(|| format!("web.fetch url `{url}` has no known port"))?;
+        .ok_or_else(|| format!("{surface_name} url `{url}` has no known port"))?;
     let addrs = (host.as_str(), port)
         .to_socket_addrs()
-        .map_err(|error| format!("web.fetch failed to resolve host `{host}`: {error}"))?;
+        .map_err(|error| format!("{surface_name} failed to resolve host `{host}`: {error}"))?;
 
     let mut saw_addr = false;
     for addr in addrs {
         saw_addr = true;
         if is_private_or_special_ip(addr.ip()) {
             return Err(format!(
-                "web.fetch blocked private or special-use address `{}` for host `{host}`",
+                "{surface_name} blocked private or special-use address `{}` for host `{host}`",
                 addr.ip()
             ));
         }
     }
 
     if !saw_addr {
-        return Err(format!("web.fetch resolved no addresses for host `{host}`"));
+        return Err(format!(
+            "{surface_name} resolved no addresses for host `{host}`"
+        ));
     }
 
     Ok(host)
 }
 
-#[cfg(feature = "tool-webfetch")]
+#[cfg(any(feature = "tool-webfetch", feature = "tool-browser"))]
 fn first_matching_domain_rule<'a>(host: &str, rules: &'a BTreeSet<String>) -> Option<&'a str> {
     rules
         .iter()
@@ -306,7 +311,7 @@ fn first_matching_domain_rule<'a>(host: &str, rules: &'a BTreeSet<String>) -> Op
         .map(String::as_str)
 }
 
-#[cfg(feature = "tool-webfetch")]
+#[cfg(any(feature = "tool-webfetch", feature = "tool-browser"))]
 fn domain_rule_matches(host: &str, rule: &str) -> bool {
     if let Some(suffix) = rule.strip_prefix("*.") {
         return host == suffix || host.ends_with(&format!(".{suffix}"));
@@ -314,7 +319,7 @@ fn domain_rule_matches(host: &str, rule: &str) -> bool {
     host == rule
 }
 
-#[cfg(feature = "tool-webfetch")]
+#[cfg(any(feature = "tool-webfetch", feature = "tool-browser"))]
 fn is_private_or_special_ip(ip: std::net::IpAddr) -> bool {
     use std::net::IpAddr;
 
@@ -324,7 +329,7 @@ fn is_private_or_special_ip(ip: std::net::IpAddr) -> bool {
     }
 }
 
-#[cfg(feature = "tool-webfetch")]
+#[cfg(any(feature = "tool-webfetch", feature = "tool-browser"))]
 fn is_private_or_special_ipv4(ip: std::net::Ipv4Addr) -> bool {
     let octets = ip.octets();
     let first = octets[0];
@@ -347,7 +352,7 @@ fn is_private_or_special_ipv4(ip: std::net::Ipv4Addr) -> bool {
         || first >= 240
 }
 
-#[cfg(feature = "tool-webfetch")]
+#[cfg(any(feature = "tool-webfetch", feature = "tool-browser"))]
 fn is_private_or_special_ipv6(ip: std::net::Ipv6Addr) -> bool {
     if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
         return true;
@@ -363,8 +368,8 @@ fn is_private_or_special_ipv6(ip: std::net::Ipv6Addr) -> bool {
         || (segments[0] == 0x2001 && segments[1] == 0x0db8)
 }
 
-#[cfg(feature = "tool-webfetch")]
-fn looks_like_html(content_type: Option<&str>, body: &str) -> bool {
+#[cfg(any(feature = "tool-webfetch", feature = "tool-browser"))]
+pub(crate) fn looks_like_html(content_type: Option<&str>, body: &str) -> bool {
     if let Some(content_type) = content_type {
         let lowered = content_type.to_ascii_lowercase();
         if lowered.contains("text/html") || lowered.contains("application/xhtml+xml") {
@@ -376,8 +381,8 @@ fn looks_like_html(content_type: Option<&str>, body: &str) -> bool {
     lowered.contains("<html") || lowered.contains("<body") || lowered.contains("<!doctype html")
 }
 
-#[cfg(feature = "tool-webfetch")]
-fn response_is_probably_binary(content_type: Option<&str>, body: &[u8]) -> bool {
+#[cfg(any(feature = "tool-webfetch", feature = "tool-browser"))]
+pub(crate) fn response_is_probably_binary(content_type: Option<&str>, body: &[u8]) -> bool {
     if body.is_empty() {
         return false;
     }
@@ -420,16 +425,16 @@ fn response_is_probably_binary(content_type: Option<&str>, body: &[u8]) -> bool 
     control_count.saturating_mul(8) > sample.len()
 }
 
-#[cfg(feature = "tool-webfetch")]
-fn extract_html_title(html: &str) -> Option<String> {
+#[cfg(any(feature = "tool-webfetch", feature = "tool-browser"))]
+pub(crate) fn extract_html_title(html: &str) -> Option<String> {
     extract_tag_inner_text(html, "title").and_then(|value| {
         let collapsed = collapse_whitespace(&decode_basic_entities(value.trim()));
         (!collapsed.is_empty()).then_some(collapsed)
     })
 }
 
-#[cfg(feature = "tool-webfetch")]
-fn extract_readable_text_from_html(html: &str) -> String {
+#[cfg(any(feature = "tool-webfetch", feature = "tool-browser"))]
+pub(crate) fn extract_readable_text_from_html(html: &str) -> String {
     let mut sanitized = strip_tag_block(html, "script");
     sanitized = strip_tag_block(&sanitized, "style");
     sanitized = strip_tag_block(&sanitized, "noscript");
@@ -438,7 +443,7 @@ fn extract_readable_text_from_html(html: &str) -> String {
     collapse_whitespace(&decode_basic_entities(&text))
 }
 
-#[cfg(feature = "tool-webfetch")]
+#[cfg(any(feature = "tool-webfetch", feature = "tool-browser"))]
 fn strip_tag_block(input: &str, tag: &str) -> String {
     let open = format!("<{tag}");
     let close = format!("</{tag}>");
@@ -463,7 +468,7 @@ fn strip_tag_block(input: &str, tag: &str) -> String {
     output
 }
 
-#[cfg(feature = "tool-webfetch")]
+#[cfg(any(feature = "tool-webfetch", feature = "tool-browser"))]
 fn extract_tag_inner_text<'a>(input: &'a str, tag: &str) -> Option<&'a str> {
     let lowered = input.to_ascii_lowercase();
     let open = format!("<{tag}");
@@ -474,7 +479,7 @@ fn extract_tag_inner_text<'a>(input: &'a str, tag: &str) -> Option<&'a str> {
     Some(&input[open_end..end])
 }
 
-#[cfg(feature = "tool-webfetch")]
+#[cfg(any(feature = "tool-webfetch", feature = "tool-browser"))]
 fn strip_tags(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     let mut in_tag = false;
@@ -501,7 +506,7 @@ fn strip_tags(input: &str) -> String {
     output
 }
 
-#[cfg(feature = "tool-webfetch")]
+#[cfg(any(feature = "tool-webfetch", feature = "tool-browser"))]
 fn decode_basic_entities(input: &str) -> String {
     input
         .replace("&nbsp;", " ")
@@ -512,7 +517,7 @@ fn decode_basic_entities(input: &str) -> String {
         .replace("&#39;", "'")
 }
 
-#[cfg(feature = "tool-webfetch")]
+#[cfg(any(feature = "tool-webfetch", feature = "tool-browser"))]
 fn collapse_whitespace(input: &str) -> String {
     input.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -791,7 +796,8 @@ mod tests {
         };
         let url = reqwest::Url::parse("http://localhost:8080").expect("url");
 
-        let host = validate_fetch_target(&url, &policy).expect("localhost should be allowed");
+        let host =
+            validate_web_target(&url, &policy, "web.fetch").expect("localhost should be allowed");
 
         assert_eq!(host, "localhost");
     }

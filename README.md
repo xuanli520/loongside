@@ -66,7 +66,8 @@ LoongClaw is a layered Agentic OS runtime built to feel like a trustworthy priva
 - `ask` gives users a one-shot assistant command for first success without entering a REPL.
 - `chat` provides an interactive CLI channel with sliding-window conversation memory.
 - `doctor` and `doctor --fix` are the explicit repair path when the local runtime is unhealthy.
-- Core tool runtime now ships `web.fetch`, `shell.exec`, `file.read`, and `file.write`.
+- Core tool runtime now ships bounded browser automation (`browser.open`, `browser.extract`, `browser.click`) plus `web.fetch`, `shell.exec`, `file.read`, and `file.write`.
+- Runtime tool catalogs now stay truthful to the active config: browser/web tools disappear when disabled, and external-skills lifecycle tools are only advertised when that runtime is enabled.
 - Shipped assistant surfaces today are CLI first, with Telegram polling and Feishu webhook as optional channels after the base setup is healthy.
 - Memory-system selection is now a stable builtin-only seam:
   - config: `[memory] system = "builtin"`
@@ -169,18 +170,20 @@ cargo run -p loongclaw-daemon --bin loongclawd -- acp-observability --json
 
 ## Quick Start
 
-### Prerequisites
+### Install Script (Release-First When Available)
 
-- Rust stable toolchain (edition 2024)
-- `cargo` available in your PATH
+The bootstrap installer is fetched directly from the repository. It prefers the matching GitHub
+Release binary, verifies its SHA256 checksum, installs `loongclaw`, and can immediately hand you
+into guided onboarding.
 
-### Install from Source
+If the repository has not published its first release yet, the installer exits with a clear message.
+Use the source install path below in that case.
 
 <details>
 <summary>Linux / macOS</summary>
 
 ```bash
-./scripts/install.sh --onboard
+curl -fsSL https://raw.githubusercontent.com/loongclaw-ai/loongclaw/alpha-test/scripts/install.sh | bash -s -- --onboard
 ```
 </details>
 
@@ -188,7 +191,39 @@ cargo run -p loongclaw-daemon --bin loongclawd -- acp-observability --json
 <summary>Windows (PowerShell)</summary>
 
 ```powershell
-pwsh ./scripts/install.ps1 -Onboard
+$script = Join-Path $env:TEMP "loongclaw-install.ps1"
+Invoke-WebRequest https://raw.githubusercontent.com/loongclaw-ai/loongclaw/alpha-test/scripts/install.ps1 -OutFile $script
+pwsh $script -Onboard
+```
+</details>
+
+Available installer options:
+
+- `--onboard` / `-Onboard` runs `loongclaw onboard` after install.
+- `--version <tag>` / `-Version <tag>` installs a specific release instead of `latest`.
+- `--source` / `-Source` falls back to building from a local repository checkout.
+- `--prefix <dir>` / `-Prefix <dir>` changes the install directory.
+
+### Build from Source
+
+Prerequisites:
+
+- Rust stable toolchain (edition 2024)
+- `cargo` available in your PATH
+
+<details>
+<summary>Linux / macOS</summary>
+
+```bash
+bash scripts/install.sh --source --onboard
+```
+</details>
+
+<details>
+<summary>Windows (PowerShell)</summary>
+
+```powershell
+pwsh ./scripts/install.ps1 -Source -Onboard
 ```
 </details>
 
@@ -210,7 +245,7 @@ cargo install --path crates/daemon
    loongclaw onboard
    ```
 
-2. Set your provider API key:
+2. Set your provider credential in the env that onboarding selected:
 
    ```bash
    export PROVIDER_API_KEY=sk-...
@@ -219,8 +254,11 @@ cargo install --path crates/daemon
 3. Get a first one-shot answer:
 
    ```bash
-   loongclaw ask --message "What can you help me with in this repository?"
+   loongclaw ask --message "Summarize this repository and suggest the best next step."
    ```
+
+   On a healthy setup, onboarding and `doctor` now print this style of ask example directly so the
+   first success path is visible without reading docs first.
 
 4. Continue with interactive chat when you want to stay in session:
 
@@ -230,9 +268,12 @@ cargo install --path crates/daemon
 
    Use `loongclaw chat --acp` when you want this chat session to route turns through ACP
    explicitly. Without `--acp` or other ACP-specific chat flags, normal chat stays on the default
-   provider/context-engine path.
+   provider/context-engine path. The chat banner now starts with a concrete first prompt and keeps
+   the ACP/runtime context in a compact operator-readable block.
 
-Run `loongclaw doctor --fix` if anything goes wrong, or when onboarding / ask / chat reports a local health issue.
+Run `loongclaw doctor --fix` if anything goes wrong, or when onboarding / ask / chat reports a
+local health issue. `doctor` now prints next actions such as credential env hints, safe repair
+commands, and ask/chat follow-ups instead of only raw status lines.
 
 ### Run Tests
 
@@ -402,7 +443,8 @@ Recommended runtime flow:
 - `ask` -- one-shot assistant answer and exit
 - `doctor` -- diagnostics with optional safe fixes (`--fix`) and machine-readable output (`--json`)
 - `chat` -- interactive CLI with sliding-window conversation memory
-- Core tools: `web.fetch`, `shell.exec`, `file.read`, `file.write`, `external_skills.policy`, `external_skills.fetch`, `external_skills.install`, `external_skills.list`, `external_skills.inspect`, `external_skills.invoke`, `external_skills.remove`
+- Default-visible tools: `browser.open`, `browser.extract`, `browser.click`, `web.fetch`, `shell.exec`, `file.read`, `file.write`, `external_skills.policy`
+- External-skills lifecycle tools (`external_skills.fetch/install/list/inspect/invoke/remove`) are advertised only when the external-skills runtime is enabled
 - Providers: OpenAI-compatible, Volcengine custom endpoint
 - Channels: CLI, Telegram polling, Feishu encrypted webhook
 
@@ -454,6 +496,7 @@ enable only what you need for minimal builds.
 |------|-------------|
 | `config-toml` | TOML configuration loader |
 | `memory-sqlite` | SQLite conversation memory |
+| `tool-browser` | `browser.open` / `browser.extract` / `browser.click` tools |
 | `tool-shell` | `shell.exec` tool |
 | `tool-file` | `file.read` / `file.write` tools |
 | `tool-webfetch` | `web.fetch` tool |
@@ -526,9 +569,11 @@ chat_completions_path = "/api/v3/chat/completions"
 ### Tool policy
 
 Shell execution defaults to **deny-unknown** — only explicitly allowed commands run.
-File access is sandboxed to the working directory by default. `web.fetch` is
-enabled in the MVP build, but still blocks localhost, private hosts, and
-special-use destinations unless the operator explicitly relaxes that policy.
+File access is sandboxed to the working directory by default. `web.fetch` and the bounded browser
+tools reuse the same SSRF-safe network policy and still block localhost, private hosts, and
+special-use destinations unless the operator explicitly relaxes that policy. Runtime tool
+advertising follows the active config, so disabled browser/web/external-skills surfaces disappear
+from the exposed assistant tool catalog instead of drifting from reality.
 
 ```toml
 [tools]
@@ -536,6 +581,12 @@ shell_default_mode = "deny"                          # "deny" | "allow"
 shell_allow = ["echo", "ls", "git", "cargo"]         # permitted commands
 shell_deny = []                                      # hard-blocked commands
 # file_root = "/home/user/project"                   # defaults to CWD
+
+[tools.browser]
+enabled = true
+max_sessions = 8
+max_links = 40
+max_text_chars = 6000
 
 [tools.web]
 enabled = true

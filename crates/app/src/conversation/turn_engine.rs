@@ -598,9 +598,14 @@ pub(crate) async fn execute_tool_intent_via_kernel(
     intent: &ToolIntent,
     kernel_ctx: &KernelContext,
 ) -> Result<ToolCoreOutcome, TurnFailure> {
+    let canonical_tool_name = crate::tools::canonical_tool_name(intent.tool_name.as_str());
     let request = ToolCoreRequest {
-        tool_name: crate::tools::canonical_tool_name(intent.tool_name.as_str()).to_owned(),
-        payload: intent.args_json.clone(),
+        tool_name: canonical_tool_name.to_owned(),
+        payload: augment_tool_payload_for_kernel(
+            canonical_tool_name,
+            intent.args_json.clone(),
+            intent.session_id.as_str(),
+        ),
     };
     let caps = BTreeSet::from([Capability::InvokeTool]);
     kernel_ctx
@@ -627,6 +632,34 @@ pub(crate) async fn execute_tool_intent_via_kernel(
                 }
             }
         })
+}
+
+fn augment_tool_payload_for_kernel(
+    canonical_tool_name: &str,
+    payload: serde_json::Value,
+    session_id: &str,
+) -> serde_json::Value {
+    if !matches!(
+        canonical_tool_name,
+        "browser.open" | "browser.extract" | "browser.click"
+    ) {
+        return payload;
+    }
+
+    match payload {
+        serde_json::Value::Object(mut object) => {
+            object.insert(
+                crate::tools::BROWSER_SESSION_SCOPE_FIELD.to_owned(),
+                json!(session_id),
+            );
+            serde_json::Value::Object(object)
+        }
+        other @ (serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_)
+        | serde_json::Value::Array(_)) => other,
+    }
 }
 
 fn turn_result_from_tool_execution_failure(failure: TurnFailure) -> TurnResult {

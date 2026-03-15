@@ -9,7 +9,8 @@ use crate::CliResult;
 use crate::KernelContext;
 use crate::tools::{
     ToolView, delegate_child_tool_view_for_config,
-    delegate_child_tool_view_for_config_with_delegate, runtime_tool_view_for_config,
+    delegate_child_tool_view_for_config_with_delegate,
+    runtime_tool_view_for_config_with_external_skills,
 };
 
 use super::super::memory;
@@ -290,7 +291,10 @@ pub trait ConversationRuntime: Send + Sync {
         kernel_ctx: Option<&KernelContext>,
     ) -> CliResult<ToolView> {
         let _ = (session_id, kernel_ctx);
-        Ok(runtime_tool_view_for_config(&config.tools))
+        Ok(runtime_tool_view_for_config_with_external_skills(
+            &config.tools,
+            config.external_skills.enabled,
+        ))
     }
 
     #[cfg(feature = "memory-sqlite")]
@@ -504,7 +508,10 @@ where
             }
         }
 
-        Ok(runtime_tool_view_for_config(&config.tools))
+        Ok(runtime_tool_view_for_config_with_external_skills(
+            &config.tools,
+            config.external_skills.enabled,
+        ))
     }
 
     async fn bootstrap(
@@ -548,7 +555,10 @@ where
         if include_system_prompt {
             apply_tool_view_to_system_prompt_if_needed(
                 &mut assembled.messages,
-                &runtime_tool_view_for_config(&config.tools),
+                &runtime_tool_view_for_config_with_external_skills(
+                    &config.tools,
+                    config.external_skills.enabled,
+                ),
                 &session_context.tool_view,
             );
         }
@@ -568,7 +578,10 @@ where
             .map(|mut assembled| {
                 apply_tool_view_to_system_prompt_if_needed(
                     &mut assembled.messages,
-                    &runtime_tool_view_for_config(&config.tools),
+                    &runtime_tool_view_for_config_with_external_skills(
+                        &config.tools,
+                        config.external_skills.enabled,
+                    ),
                     tool_view,
                 );
                 assembled.messages

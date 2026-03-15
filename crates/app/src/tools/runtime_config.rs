@@ -28,6 +28,25 @@ impl Default for ExternalSkillsRuntimePolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserRuntimePolicy {
+    pub enabled: bool,
+    pub max_sessions: usize,
+    pub max_links: usize,
+    pub max_text_chars: usize,
+}
+
+impl Default for BrowserRuntimePolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_sessions: crate::config::DEFAULT_BROWSER_MAX_SESSIONS,
+            max_links: crate::config::DEFAULT_BROWSER_MAX_LINKS,
+            max_text_chars: crate::config::DEFAULT_BROWSER_MAX_TEXT_CHARS,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebFetchRuntimePolicy {
     pub enabled: bool,
     pub allow_private_hosts: bool,
@@ -63,6 +82,10 @@ pub struct ToolRuntimeConfig {
     pub shell_deny: BTreeSet<String>,
     pub shell_default_mode: ShellPolicyDefault,
     pub config_path: Option<PathBuf>,
+    pub sessions_enabled: bool,
+    pub messages_enabled: bool,
+    pub delegate_enabled: bool,
+    pub browser: BrowserRuntimePolicy,
     pub web_fetch: WebFetchRuntimePolicy,
     pub external_skills: ExternalSkillsRuntimePolicy,
 }
@@ -78,6 +101,10 @@ impl Default for ToolRuntimeConfig {
             shell_deny: BTreeSet::new(),
             shell_default_mode: ShellPolicyDefault::Deny,
             config_path: None,
+            sessions_enabled: true,
+            messages_enabled: false,
+            delegate_enabled: true,
+            browser: BrowserRuntimePolicy::default(),
             web_fetch: WebFetchRuntimePolicy::default(),
             external_skills: ExternalSkillsRuntimePolicy::default(),
         }
@@ -94,6 +121,16 @@ impl ToolRuntimeConfig {
         let config_path = std::env::var("LOONGCLAW_CONFIG_PATH")
             .ok()
             .map(PathBuf::from);
+        let sessions_enabled = parse_env_bool("LOONGCLAW_TOOL_SESSIONS_ENABLED").unwrap_or(true);
+        let messages_enabled = parse_env_bool("LOONGCLAW_TOOL_MESSAGES_ENABLED").unwrap_or(false);
+        let delegate_enabled = parse_env_bool("LOONGCLAW_TOOL_DELEGATE_ENABLED").unwrap_or(true);
+        let browser_enabled = parse_env_bool("LOONGCLAW_BROWSER_ENABLED").unwrap_or(true);
+        let browser_max_sessions = parse_env_usize("LOONGCLAW_BROWSER_MAX_SESSIONS")
+            .unwrap_or(crate::config::DEFAULT_BROWSER_MAX_SESSIONS);
+        let browser_max_links = parse_env_usize("LOONGCLAW_BROWSER_MAX_LINKS")
+            .unwrap_or(crate::config::DEFAULT_BROWSER_MAX_LINKS);
+        let browser_max_text_chars = parse_env_usize("LOONGCLAW_BROWSER_MAX_TEXT_CHARS")
+            .unwrap_or(crate::config::DEFAULT_BROWSER_MAX_TEXT_CHARS);
         let web_fetch_enabled = parse_env_bool("LOONGCLAW_WEB_FETCH_ENABLED").unwrap_or(true);
         let web_fetch_allow_private_hosts =
             parse_env_bool("LOONGCLAW_WEB_FETCH_ALLOW_PRIVATE_HOSTS").unwrap_or(false);
@@ -121,6 +158,15 @@ impl ToolRuntimeConfig {
         Self {
             file_root,
             config_path,
+            sessions_enabled,
+            messages_enabled,
+            delegate_enabled,
+            browser: BrowserRuntimePolicy {
+                enabled: browser_enabled,
+                max_sessions: browser_max_sessions,
+                max_links: browser_max_links,
+                max_text_chars: browser_max_text_chars,
+            },
             web_fetch: WebFetchRuntimePolicy {
                 enabled: web_fetch_enabled,
                 allow_private_hosts: web_fetch_allow_private_hosts,
@@ -207,6 +253,13 @@ mod tests {
         let config = ToolRuntimeConfig::default();
         assert!(config.file_root.is_none());
         assert!(config.config_path.is_none());
+        assert!(config.sessions_enabled);
+        assert!(!config.messages_enabled);
+        assert!(config.delegate_enabled);
+        assert!(config.browser.enabled);
+        assert_eq!(config.browser.max_sessions, 8);
+        assert_eq!(config.browser.max_links, 40);
+        assert_eq!(config.browser.max_text_chars, 6000);
         assert!(config.web_fetch.enabled);
         assert!(!config.web_fetch.allow_private_hosts);
         assert!(config.web_fetch.allowed_domains.is_empty());
@@ -235,9 +288,18 @@ mod tests {
     #[test]
     fn explicit_config_injection_overrides_defaults() {
         let config = ToolRuntimeConfig {
+            sessions_enabled: false,
+            messages_enabled: true,
+            delegate_enabled: false,
             shell_allow: BTreeSet::from(["git".to_owned(), "cargo".to_owned()]),
             file_root: Some(PathBuf::from("/tmp/test-root")),
             config_path: Some(PathBuf::from("/tmp/test-root/loongclaw.toml")),
+            browser: BrowserRuntimePolicy {
+                enabled: false,
+                max_sessions: 4,
+                max_links: 12,
+                max_text_chars: 2_048,
+            },
             web_fetch: WebFetchRuntimePolicy {
                 enabled: false,
                 allow_private_hosts: true,
@@ -265,6 +327,13 @@ mod tests {
             config.config_path,
             Some(PathBuf::from("/tmp/test-root/loongclaw.toml"))
         );
+        assert!(!config.sessions_enabled);
+        assert!(config.messages_enabled);
+        assert!(!config.delegate_enabled);
+        assert!(!config.browser.enabled);
+        assert_eq!(config.browser.max_sessions, 4);
+        assert_eq!(config.browser.max_links, 12);
+        assert_eq!(config.browser.max_text_chars, 2_048);
         assert!(!config.web_fetch.enabled);
         assert!(config.web_fetch.allow_private_hosts);
         assert!(
@@ -329,6 +398,13 @@ mod tests {
 
     #[test]
     fn from_env_parses_external_skills_policy() {
+        crate::process_env::set_var("LOONGCLAW_TOOL_SESSIONS_ENABLED", "false");
+        crate::process_env::set_var("LOONGCLAW_TOOL_MESSAGES_ENABLED", "true");
+        crate::process_env::set_var("LOONGCLAW_TOOL_DELEGATE_ENABLED", "false");
+        crate::process_env::set_var("LOONGCLAW_BROWSER_ENABLED", "false");
+        crate::process_env::set_var("LOONGCLAW_BROWSER_MAX_SESSIONS", "4");
+        crate::process_env::set_var("LOONGCLAW_BROWSER_MAX_LINKS", "12");
+        crate::process_env::set_var("LOONGCLAW_BROWSER_MAX_TEXT_CHARS", "2048");
         crate::process_env::set_var("LOONGCLAW_WEB_FETCH_ENABLED", "false");
         crate::process_env::set_var("LOONGCLAW_WEB_FETCH_ALLOW_PRIVATE_HOSTS", "true");
         crate::process_env::set_var(
@@ -359,6 +435,13 @@ mod tests {
         crate::process_env::set_var("LOONGCLAW_EXTERNAL_SKILLS_AUTO_EXPOSE_INSTALLED", "false");
 
         let config = ToolRuntimeConfig::from_env();
+        assert!(!config.sessions_enabled);
+        assert!(config.messages_enabled);
+        assert!(!config.delegate_enabled);
+        assert!(!config.browser.enabled);
+        assert_eq!(config.browser.max_sessions, 4);
+        assert_eq!(config.browser.max_links, 12);
+        assert_eq!(config.browser.max_text_chars, 2_048);
         assert!(!config.web_fetch.enabled);
         assert!(config.web_fetch.allow_private_hosts);
         assert!(
@@ -398,6 +481,13 @@ mod tests {
         );
         assert!(!config.external_skills.auto_expose_installed);
 
+        crate::process_env::remove_var("LOONGCLAW_TOOL_SESSIONS_ENABLED");
+        crate::process_env::remove_var("LOONGCLAW_TOOL_MESSAGES_ENABLED");
+        crate::process_env::remove_var("LOONGCLAW_TOOL_DELEGATE_ENABLED");
+        crate::process_env::remove_var("LOONGCLAW_BROWSER_ENABLED");
+        crate::process_env::remove_var("LOONGCLAW_BROWSER_MAX_SESSIONS");
+        crate::process_env::remove_var("LOONGCLAW_BROWSER_MAX_LINKS");
+        crate::process_env::remove_var("LOONGCLAW_BROWSER_MAX_TEXT_CHARS");
         crate::process_env::remove_var("LOONGCLAW_WEB_FETCH_ENABLED");
         crate::process_env::remove_var("LOONGCLAW_WEB_FETCH_ALLOW_PRIVATE_HOSTS");
         crate::process_env::remove_var("LOONGCLAW_WEB_FETCH_ALLOWED_DOMAINS");
@@ -434,6 +524,21 @@ mod tests {
             Some(PathBuf::from("/tmp/managed-skills"))
         );
         assert!(!policy.auto_expose_installed);
+    }
+
+    #[test]
+    fn browser_policy_struct_construction() {
+        let policy = BrowserRuntimePolicy {
+            enabled: false,
+            max_sessions: 4,
+            max_links: 12,
+            max_text_chars: 2_048,
+        };
+
+        assert!(!policy.enabled);
+        assert_eq!(policy.max_sessions, 4);
+        assert_eq!(policy.max_links, 12);
+        assert_eq!(policy.max_text_chars, 2_048);
     }
 
     #[test]

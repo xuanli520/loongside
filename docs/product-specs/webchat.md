@@ -10,8 +10,9 @@ can use the assistant without staying in a terminal.
 - [ ] Product docs state clearly whether WebChat is shipped, experimental, or
       planned. The MVP must not advertise it as generally available before it
       exists.
-- [ ] Until WebChat ships, first-run docs direct users to `ask` and `chat`
-      instead of implying a browser UI already exists.
+- [ ] Until WebChat ships, first-run docs direct users to a concrete
+      `loongclaw ask --message "..."` example first and `loongclaw chat`
+      second, instead of implying a browser UI already exists.
 - [ ] When WebChat does ship, it must reuse the same conversation, provider,
       tool, and memory semantics as CLI ask/chat rather than creating a separate
       assistant runtime.

@@ -3236,8 +3236,8 @@ fn onboarding_success_summary_reports_import_source_and_enabled_channels() {
     assert!(
         summary.next_actions.iter().any(|action| action
             .command
-            .contains("loongclaw chat --config /tmp/loongclaw-config.toml")),
-        "success summary should keep a direct chat handoff: {summary:#?}"
+            .contains("loongclaw ask --config /tmp/loongclaw-config.toml --message")),
+        "success summary should keep a direct ask handoff: {summary:#?}"
     );
 }
 
@@ -3252,18 +3252,24 @@ fn onboarding_success_summary_derives_structured_actions() {
 
     assert_eq!(
         summary.next_actions[0].kind,
-        crate::onboard_cli::OnboardingActionKind::Chat
+        crate::onboard_cli::OnboardingActionKind::Ask
     );
     assert_eq!(
         summary.next_actions[1].kind,
-        crate::onboard_cli::OnboardingActionKind::Channel
+        crate::onboard_cli::OnboardingActionKind::Chat
     );
     assert_eq!(
         summary.next_actions[2].kind,
         crate::onboard_cli::OnboardingActionKind::Channel
     );
-    assert_eq!(summary.next_actions[1].label, "telegram");
-    assert_eq!(summary.next_actions[2].label, "feishu");
+    assert_eq!(
+        summary.next_actions[3].kind,
+        crate::onboard_cli::OnboardingActionKind::Channel
+    );
+    assert_eq!(summary.next_actions[0].label, "ask example");
+    assert_eq!(summary.next_actions[1].label, "chat");
+    assert_eq!(summary.next_actions[2].label, "telegram");
+    assert_eq!(summary.next_actions[3].label, "feishu");
 }
 
 #[test]
@@ -4344,7 +4350,6 @@ fn render_onboarding_success_summary_compacts_for_narrow_width() {
     let path = PathBuf::from("/tmp/loongclaw-config.toml");
     let summary = crate::onboard_cli::build_onboarding_success_summary(&path, &config, None);
     let lines = crate::onboard_cli::render_onboarding_success_summary_with_width(&summary, 48);
-
     assert!(
         lines.iter().any(|line| line == "start here"),
         "narrow renderer should explicitly call out the primary next action: {lines:#?}"
@@ -4352,14 +4357,15 @@ fn render_onboarding_success_summary_compacts_for_narrow_width() {
     assert!(
         lines
             .iter()
-            .any(|line| line == "- chat: loongclaw chat --config"),
-        "narrow renderer should keep the primary action readable while wrapping the long path separately: {lines:#?}"
-    );
-    assert!(
-        lines
-            .iter()
-            .any(|line| line == "  /tmp/loongclaw-config.toml"),
-        "narrow renderer should wrap the long config path onto an indented continuation line: {lines:#?}"
+            .any(|line| line == "- ask example: loongclaw ask --config")
+            && lines
+                .iter()
+                .any(|line| line == "  /tmp/loongclaw-config.toml --message")
+            && lines
+                .iter()
+                .any(|line| line == "  \"Summarize this repository and suggest the")
+            && lines.iter().any(|line| line == "  best next step.\""),
+        "narrow renderer should keep the primary ask example readable even when the command wraps: {lines:#?}"
     );
     assert!(
         lines.iter().any(|line| line == "also available"),
@@ -4368,8 +4374,11 @@ fn render_onboarding_success_summary_compacts_for_narrow_width() {
     assert!(
         lines
             .iter()
-            .any(|line| line == "- telegram: loongclaw telegram-serve --config"),
-        "narrow renderer should wrap secondary actions without hiding the command name: {lines:#?}"
+            .any(|line| line == "- chat: loongclaw chat --config")
+            && lines
+                .iter()
+                .any(|line| line == "- telegram: loongclaw telegram-serve --config"),
+        "narrow renderer should keep secondary chat and channel actions visible after the primary ask example: {lines:#?}"
     );
 }
 
@@ -4383,7 +4392,6 @@ fn onboarding_success_summary_uses_starting_point_language() {
     );
 
     let lines = crate::onboard_cli::render_onboarding_success_summary_with_width(&summary, 80);
-
     assert!(
         lines
             .iter()
@@ -4406,6 +4414,7 @@ fn onboarding_success_summary_includes_brand_header() {
     );
 
     let lines = crate::onboard_cli::render_onboarding_success_summary_with_width(&summary, 80);
+    let rendered = lines.join(" ");
 
     assert!(
         lines[0].starts_with("██╗"),
@@ -4420,10 +4429,10 @@ fn onboarding_success_summary_includes_brand_header() {
         "success summary should retain a clear completion heading: {lines:#?}"
     );
     assert!(
-        lines
-            .iter()
-            .any(|line| line == "start here: loongclaw chat --config /tmp/loongclaw-config.toml"),
-        "success summary should elevate chat as the primary handoff command: {lines:#?}"
+        rendered
+            .contains("start here: loongclaw ask --config /tmp/loongclaw-config.toml --message")
+            && rendered.contains("Summarize this repository and suggest the best next step."),
+        "success summary should elevate ask as the primary handoff command even when wrapping is needed: {lines:#?}"
     );
 }
 
@@ -4468,9 +4477,9 @@ fn onboarding_success_summary_reports_existing_config_kept() {
         channels: vec!["cli".to_owned()],
         domain_outcomes: Vec::new(),
         next_actions: vec![crate::onboard_cli::OnboardingAction {
-            kind: crate::onboard_cli::OnboardingActionKind::Chat,
-            label: "chat".to_owned(),
-            command: "loongclaw chat --config /tmp/loongclaw-config.toml".to_owned(),
+            kind: crate::onboard_cli::OnboardingActionKind::Ask,
+            label: "ask".to_owned(),
+            command: "loongclaw ask --config /tmp/loongclaw-config.toml --message \"Summarize this repository and suggest the best next step.\"".to_owned(),
         }],
     };
 
@@ -4551,9 +4560,9 @@ fn onboarding_success_summary_groups_domain_outcomes_by_decision() {
             },
         ],
         next_actions: vec![crate::onboard_cli::OnboardingAction {
-            kind: crate::onboard_cli::OnboardingActionKind::Chat,
-            label: "chat".to_owned(),
-            command: "loongclaw chat --config /tmp/loongclaw-config.toml".to_owned(),
+            kind: crate::onboard_cli::OnboardingActionKind::Ask,
+            label: "ask".to_owned(),
+            command: "loongclaw ask --config /tmp/loongclaw-config.toml --message \"Summarize this repository and suggest the best next step.\"".to_owned(),
         }],
     };
 
@@ -4610,9 +4619,9 @@ fn onboarding_success_summary_wraps_domain_outcomes_for_narrow_width() {
             },
         ],
         next_actions: vec![crate::onboard_cli::OnboardingAction {
-            kind: crate::onboard_cli::OnboardingActionKind::Chat,
-            label: "chat".to_owned(),
-            command: "loongclaw chat --config /tmp/loongclaw-config.toml".to_owned(),
+            kind: crate::onboard_cli::OnboardingActionKind::Ask,
+            label: "ask".to_owned(),
+            command: "loongclaw ask --config /tmp/loongclaw-config.toml --message \"Summarize this repository and suggest the best next step.\"".to_owned(),
         }],
     };
 
@@ -4643,16 +4652,21 @@ fn onboarding_success_summary_groups_secondary_channel_actions_after_primary_han
     let path = PathBuf::from("/tmp/loongclaw-config.toml");
     let summary = crate::onboard_cli::build_onboarding_success_summary(&path, &config, None);
     let lines = crate::onboard_cli::render_onboarding_success_summary_with_width(&summary, 80);
+    let rendered = lines.join(" ");
 
     assert!(
-        lines
-            .iter()
-            .any(|line| line == "start here: loongclaw chat --config /tmp/loongclaw-config.toml"),
-        "wide success summary should call out a single primary next action: {lines:#?}"
+        rendered
+            .contains("start here: loongclaw ask --config /tmp/loongclaw-config.toml --message")
+            && rendered.contains("Summarize this repository and suggest the best next step."),
+        "wide success summary should call out a single primary ask action even when wrapping is needed: {lines:#?}"
     );
     assert!(
         lines.iter().any(|line| line == "also available"),
         "wide success summary should group secondary channel actions under a separate heading: {lines:#?}"
+    );
+    assert!(
+        rendered.contains("- chat: loongclaw chat --config /tmp/loongclaw-config.toml"),
+        "wide success summary should still surface interactive chat as a secondary follow-up: {lines:#?}"
     );
     assert!(
         lines.iter().any(|line| line

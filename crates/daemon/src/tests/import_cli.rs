@@ -531,14 +531,14 @@ fn import_cli_apply_summary_wraps_long_path_and_domains_for_narrow_width() {
     assert!(
         lines
             .iter()
-            .any(|line| line == "next step: loongclaw chat --config /tmp/shared"),
-        "apply summary should keep the next-step label visible before wrapping long command paths: {lines:#?}"
+            .any(|line| line == "next step: loongclaw ask --config /tmp/shared"),
+        "apply summary should keep the ask-next-step label visible before wrapping long command paths: {lines:#?}"
     );
     assert!(
         lines
             .iter()
-            .any(|line| line == "  workspace/loongclaw config.toml"),
-        "apply summary should continue wrapped next-step commands on an indented line: {lines:#?}"
+            .any(|line| line == "  workspace/loongclaw config.toml --message"),
+        "apply summary should continue wrapped ask commands on an indented line: {lines:#?}"
     );
 }
 
@@ -582,10 +582,16 @@ fn import_cli_apply_summary_includes_registry_channel_actions() {
 
     assert!(
         lines.iter().any(|line| {
+            line == "also available: chat · loongclaw chat --config /tmp/loongclaw-config.toml"
+        }),
+        "apply summary should surface interactive chat immediately after the primary ask step: {lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| {
             line
                 == "also available: telegram · loongclaw telegram-serve --config /tmp/loongclaw-config.toml"
         }),
-        "apply summary should surface registry-driven channel handoff commands after the primary next step: {lines:#?}"
+        "apply summary should continue surfacing registry-driven channel handoff commands after ask/chat: {lines:#?}"
     );
 }
 
@@ -611,8 +617,8 @@ fn import_cli_apply_summary_uses_channel_handoff_when_cli_is_disabled() {
     assert!(
         lines
             .iter()
-            .all(|line| line != "next step: loongclaw chat --config /tmp/loongclaw-config.toml"),
-        "chat should not remain the primary handoff when cli is disabled: {lines:#?}"
+            .all(|line| !line.starts_with("next step: loongclaw ask --config")),
+        "ask should not remain the primary handoff when cli is disabled: {lines:#?}"
     );
 }
 

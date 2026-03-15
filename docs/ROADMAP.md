@@ -276,13 +276,15 @@ Delivered in current baseline:
 - `ask` command as the one-shot assistant fast path
 - `chat` command as baseline CLI channel
 - `doctor` repair loop with `--fix` and machine-readable output
+- ask-first first-run handoff from onboarding and doctor with concrete next-step guidance
 - first-party Telegram polling channel adapter
 - first-party Feishu webhook channel adapter
 - SQLite-backed conversation memory with sliding-window retrieval
-- core tool execution for `shell.exec`, `file.read`, `file.write`, `web.fetch`
-- one-command source install scripts (`scripts/install.sh`, `scripts/install.ps1`)
+- core tool execution for `browser.open`, `browser.extract`, `browser.click`, `web.fetch`, `shell.exec`, `file.read`, `file.write`
+- release-first install flow with checksum-verified prebuilt binaries and explicit source fallback (`scripts/install.sh`, `scripts/install.ps1`)
+- runtime-visible tool advertising so capability snapshots and provider tool schemas follow the actually enabled tool surface
 - Cargo feature flags for MVP packaging controls
-- product specs for onboarding, one-shot ask, doctor, channel setup, and WebChat expectations
+- product specs for installation, onboarding, one-shot ask, doctor, browser automation, tool surface, channel setup, and WebChat expectations
 - modular channel/provider architecture for extension-safe evolution:
   - `app/channel/feishu/*` split into adapter/payload/webhook layers
   - Feishu encrypted webhook payload decrypt lane with signature verification
@@ -297,19 +299,18 @@ Delivered in current baseline:
 Remaining deliverables:
 
 - OpenAI-compatible protocol adapter hardening and Volcengine custom adapter profile
-- beginner installation pipeline:
-  - prebuilt binaries
-  - one-command onboarding on macOS/Linux/Windows
-  - guided onboarding flow and diagnostics
+- beginner installation hardening:
+  - sustain tagged release publishing across macOS/Linux/Windows
+  - expand beyond installer scripts into package-manager distribution only after release adoption is stable
 - browser-facing assistant surface:
   - WebChat implementation
-  - browser/web automation beyond `web.fetch`
 
 Acceptance criteria:
 
 - a new user can install and complete a first successful `ask` or `chat` in <= 5 minutes
 - local memory persistence is stable across process restarts
-- shell/file/web tools obey policy constraints and emit auditable outcomes
+- shell/file/web/browser tools obey policy constraints and emit auditable outcomes
+- advertised tools match the actually invokable runtime surface for the current config and compiled features
 - channel/provider modules can be toggled by feature flags without core code edits
 
 ## Quality Gate Matrix (Always On)

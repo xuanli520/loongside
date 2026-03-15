@@ -14,6 +14,8 @@ that I can get an answer immediately without entering an interactive shell.
 - [ ] `ask` rejects empty or whitespace-only messages before starting a turn.
 - [ ] `ask` prints one assistant response and exits without REPL-only prompts or
       slash-command behavior.
+- [ ] Onboarding and `doctor` can both promote a concrete `ask` example as the
+      first visible success path for a healthy local setup.
 - [ ] `ask` help text points users toward `loongclaw chat` for interactive
       follow-up.
 
