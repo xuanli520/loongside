@@ -23,6 +23,7 @@ mod process_env;
     clippy::unwrap_used,
     clippy::missing_panics_doc
 )]
+#[doc(hidden)]
 pub mod test_support;
 
 pub use context::KernelContext;

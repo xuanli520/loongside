@@ -59,6 +59,7 @@ pub use loongclaw_spec::programmatic::{
     clippy::unwrap_used,
     clippy::missing_panics_doc
 )]
+#[doc(hidden)]
 pub mod test_support;
 
 pub const PUBLIC_GITHUB_REPO: &str = "loongclaw-ai/loongclaw";
