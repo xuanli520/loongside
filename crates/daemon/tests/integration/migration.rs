@@ -1514,7 +1514,10 @@ fn migration_compose_recommended_candidate_supplements_channel_fields_across_sou
 
 #[test]
 fn migration_compose_recommended_candidate_preserves_current_custom_provider_endpoint() {
-    let _env = MigrationEnvironmentGuard::set(&[("TELEGRAM_BOT_TOKEN", None)]);
+    let _env = MigrationEnvironmentGuard::set(&[
+        ("TELEGRAM_BOT_TOKEN", None),
+        ("OPENROUTER_API_KEY", None),
+    ]);
 
     let mut existing = mvp::config::LoongClawConfig::default();
     existing.provider.kind = mvp::config::ProviderKind::Openrouter;
