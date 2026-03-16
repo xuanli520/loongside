@@ -2,7 +2,8 @@
 #![allow(
     clippy::disallowed_methods,
     clippy::multiple_unsafe_ops_per_block,
-    clippy::undocumented_unsafe_blocks
+    clippy::undocumented_unsafe_blocks,
+    clippy::indexing_slicing
 )]
 
 use super::*;

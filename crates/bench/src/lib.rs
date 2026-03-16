@@ -679,15 +679,15 @@ struct ProgrammaticPressureGateCheck {
 #[derive(Debug, Clone, Default)]
 #[doc(hidden)]
 pub struct ScenarioRunSample {
-    latency_ms: f64,
-    passed: bool,
-    blocked: bool,
-    connector_calls: usize,
-    error_codes: BTreeMap<String, usize>,
-    schema_fingerprint: Option<String>,
-    scheduler: Option<SchedulerSnapshot>,
-    half_open_transition_ms: Option<f64>,
-    closed_after_recovery: Option<bool>,
+    pub latency_ms: f64,
+    pub passed: bool,
+    pub blocked: bool,
+    pub connector_calls: usize,
+    pub error_codes: BTreeMap<String, usize>,
+    pub schema_fingerprint: Option<String>,
+    pub(crate) scheduler: Option<SchedulerSnapshot>,
+    pub half_open_transition_ms: Option<f64>,
+    pub closed_after_recovery: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
