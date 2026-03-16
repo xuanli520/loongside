@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, clippy::panic)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 

@@ -677,7 +677,8 @@ struct ProgrammaticPressureGateCheck {
 }
 
 #[derive(Debug, Clone, Default)]
-struct ScenarioRunSample {
+#[doc(hidden)]
+pub struct ScenarioRunSample {
     latency_ms: f64,
     passed: bool,
     blocked: bool,
@@ -9980,5 +9981,4 @@ mod tests {
         assert_eq!(normalized.min_ratio, 0.0);
         assert_eq!(normalized.latency_ms, 0.0);
     }
-
 }
