@@ -202,17 +202,12 @@ fn execute_web_fetch_tool_enabled(
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk
                     .map_err(|error| format!("failed to read web.fetch response body: {error}"))?;
-                body.extend_from_slice(&chunk);
-                if body.len() as u64 > limit {
+                if body.len() as u64 + chunk.len() as u64 > limit {
                     return Err(format!(
                         "web.fetch response exceeded max_bytes limit ({max_bytes} bytes)"
                     ));
                 }
-            }
-            if body.len() > max_bytes {
-                return Err(format!(
-                    "web.fetch response exceeded max_bytes limit ({max_bytes} bytes)"
-                ));
+                body.extend_from_slice(&chunk);
             }
 
             let raw_text = String::from_utf8_lossy(&body).into_owned();
