@@ -52,6 +52,7 @@ pub use loongclaw_spec::programmatic::{
     acquire_programmatic_circuit_slot, record_programmatic_circuit_outcome,
 };
 
+#[cfg(any(test, feature = "test-support"))]
 #[allow(
     clippy::expect_used,
     clippy::panic,

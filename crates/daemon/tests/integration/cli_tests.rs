@@ -1,7 +1,5 @@
 use super::*;
 
-use super::*;
-
 fn channel_catalog_command_family(
     raw: &str,
 ) -> mvp::channel::ChannelCatalogCommandFamilyDescriptor {

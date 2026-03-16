@@ -47,7 +47,7 @@ This follows the existing `crates/spec` precedent (`test-hooks` feature).
 
 ### protocol (leaf crate)
 - **Current**: Inline `#[cfg(test)]` blocks only
-- **Action**: Same as contracts — likely unit-only.
+- **Action**: Migrated — integration tests moved to `crates/protocol/tests/`, `test-support` feature added.
 
 ### kernel
 - **Current**: `src/tests.rs` (2,046 lines), mock harnesses (`MockEmbeddedPiHarness`, `MockAcpHarness`)
@@ -78,12 +78,12 @@ This follows the existing `crates/spec` precedent (`test-hooks` feature).
 - **Action**: Move entire `src/tests/` to `crates/daemon/tests/`. Update imports. Add `test-support` feature if shared helpers need re-export.
 
 ### bench
-- **Current**: Benchmarking suite
-- **Action**: No test migration needed.
+- **Current**: Benchmarking suite with integration-style tests
+- **Action**: Migrated — integration tests moved to `crates/bench/tests/`, `test-support` feature added.
 
 ## Target Structure (app crate example)
 
-```
+```text
 crates/app/
 ├── src/
 │   ├── conversation/

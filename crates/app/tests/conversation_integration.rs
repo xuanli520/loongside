@@ -171,13 +171,16 @@ async fn integ_shell_exec_blocked_command() {
     let harness = TurnTestHarness::with_tool_config(
         BTreeSet::from([Capability::InvokeTool]),
         ToolRuntimeConfig {
-            shell_deny: BTreeSet::from(["rm".to_owned()]),
+            shell_deny: BTreeSet::from(["echo".to_owned()]),
             ..ToolRuntimeConfig::default()
         },
     );
 
     let turn = FakeProviderBuilder::new()
-        .with_tool_call("shell.exec", json!({"command": "rm", "args": ["-rf", "/"]}))
+        .with_tool_call(
+            "shell.exec",
+            json!({"command": "echo", "args": ["denied_test_command"]}),
+        )
         .build();
     let result = harness.execute(&turn).await;
 

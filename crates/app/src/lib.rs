@@ -16,6 +16,7 @@ pub mod session;
 pub mod tools;
 
 mod process_env;
+#[cfg(any(test, feature = "test-support"))]
 #[allow(
     clippy::expect_used,
     clippy::panic,
