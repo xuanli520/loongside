@@ -3413,6 +3413,7 @@ where
                     self.runtime,
                     &session_context,
                     replay_request.payload,
+                    self.binding,
                 )
                 .await
             }
@@ -3723,6 +3724,7 @@ where
                     self.runtime,
                     session_context,
                     request.payload,
+                    binding,
                 )
                 .await
             }
@@ -3799,6 +3801,7 @@ async fn execute_delegate_async_tool<R: ConversationRuntime + ?Sized>(
     runtime: &R,
     session_context: &SessionContext,
     payload: Value,
+    binding: ConversationRuntimeBinding<'_>,
 ) -> Result<loongclaw_contracts::ToolCoreOutcome, String> {
     if !config.tools.delegate.enabled {
         return Err("app_tool_disabled: delegate is disabled by config".to_owned());
@@ -3853,6 +3856,7 @@ async fn execute_delegate_async_tool<R: ConversationRuntime + ?Sized>(
             task: delegate_request.task,
             label: child_label,
             timeout_seconds: delegate_request.timeout_seconds,
+            kernel_context: binding.kernel_context().cloned(),
         },
     );
 
@@ -3880,6 +3884,7 @@ async fn execute_delegate_async_tool<R: ConversationRuntime + ?Sized>(
     _runtime: &R,
     _session_context: &SessionContext,
     _payload: Value,
+    _binding: ConversationRuntimeBinding<'_>,
 ) -> Result<loongclaw_contracts::ToolCoreOutcome, String> {
     Err("delegate_async requires sqlite memory support (enable feature `memory-sqlite`)".to_owned())
 }
