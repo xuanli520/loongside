@@ -5,12 +5,18 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+loongclaw-protocol = { path = ".", features = ["test-support"] }
 
 [lints]
 workspace = true
