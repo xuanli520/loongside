@@ -1050,7 +1050,22 @@ impl TurnEngine {
                 if provider_tool_denial_should_conceal_name(intent, descriptor, true) {
                     return Err(concealed_provider_tool_denial());
                 }
-                if !crate::tools::is_provider_exposed_tool_name(&intent.tool_name) {
+                // For tool.invoke, validate that the inner tool_id is also visible.
+                // For all other provider-sourced intents, verify they are provider-exposed
+                // (this gate catches non-bridge paths where a discoverable tool name
+                // arrives without being rewritten to tool.invoke).
+                if descriptor.name == "tool.invoke" {
+                    let inner_name = effective_visible_tool_name(intent, descriptor);
+                    if inner_name != descriptor.name
+                        && !session_context.tool_view.contains(inner_name.as_str())
+                    {
+                        if intent.source.starts_with("provider_") {
+                            return Err(concealed_provider_tool_denial());
+                        }
+                        let reason = format!("tool_not_visible: {inner_name}");
+                        return Err(TurnFailure::policy_denied("tool_not_visible", reason));
+                    }
+                } else if !crate::tools::is_provider_exposed_tool_name(&intent.tool_name) {
                     let reason = format!("tool_not_provider_exposed: {}", intent.tool_name);
                     return Err(TurnFailure::policy_denied(
                         "tool_not_provider_exposed",

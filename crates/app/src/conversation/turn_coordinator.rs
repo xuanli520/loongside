@@ -2264,7 +2264,11 @@ async fn resolve_provider_turn<R: ConversationRuntime + ?Sized>(
                     session_id,
                     preparation,
                     user_input,
-                    config.conversation.turn_loop.max_rounds.max(1),
+                    config
+                        .conversation
+                        .turn_loop
+                        .max_discovery_followup_rounds
+                        .max(1),
                     kernel_ctx,
                 )
                 .await

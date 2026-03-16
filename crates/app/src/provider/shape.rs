@@ -1457,6 +1457,59 @@ mod tests {
     }
 
     #[test]
+    fn bridge_context_skips_truncated_search_results() {
+        let payload_summary = serde_json::to_string(&json!({
+            "results": [
+                {
+                    "tool_id": "file.read",
+                    "lease": "lease-truncated",
+                }
+            ]
+        }))
+        .expect("encode");
+        let envelope = serde_json::to_string(&json!({
+            "status": "ok",
+            "tool": "tool.search",
+            "tool_call_id": "call-search",
+            "payload_summary": payload_summary,
+            "payload_chars": payload_summary.chars().count(),
+            "payload_truncated": true,
+        }))
+        .expect("encode envelope");
+        let messages = vec![json!({
+            "role": "assistant",
+            "content": format!("[tool_result]\n[ok] {envelope}"),
+        })];
+
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "reading",
+                    "tool_calls": [{
+                        "id": "call_trunc",
+                        "type": "function",
+                        "function": {
+                            "name": "file_read",
+                            "arguments": "{\"path\":\"README.md\"}"
+                        }
+                    }]
+                }
+            }]
+        });
+        let turn = extract_provider_turn_with_scope_and_messages(
+            &body,
+            Some("session-trunc"),
+            Some("turn-trunc"),
+            &messages,
+        )
+        .expect("turn");
+        // When payload is truncated, bridge context should be empty,
+        // so the tool call should NOT be rewritten to tool.invoke.
+        assert_eq!(turn.tool_intents[0].tool_name, "file.read");
+        assert_eq!(turn.tool_intents[0].args_json, json!({"path": "README.md"}));
+    }
+
+    #[test]
     fn extract_provider_turn_handles_text_only() {
         let body = serde_json::json!({
             "choices": [{

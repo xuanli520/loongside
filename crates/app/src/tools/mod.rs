@@ -1256,7 +1256,19 @@ fn tool_catalog_digest() -> String {
 fn tool_lease_secret() -> &'static str {
     static SECRET: OnceLock<String> = OnceLock::new();
     SECRET.get_or_init(|| {
-        let seed = format!("tool-lease:{}:{}", std::process::id(), now_unix_seconds());
+        // Use RandomState for OS-level entropy rather than deterministic PID+timestamp.
+        // RandomState is seeded from the OS CSPRNG on most platforms.
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hasher};
+        let random_state = RandomState::new();
+        let mut hasher = random_state.build_hasher();
+        hasher.write_u64(std::process::id() as u64);
+        hasher.write_u64(now_unix_seconds());
+        let entropy = hasher.finish();
+        let seed = format!(
+            "tool-lease:{entropy:x}:{:x}",
+            random_state.build_hasher().finish()
+        );
         let digest = Sha256::digest(seed.as_bytes());
         format!("{digest:x}")
     })
@@ -2244,6 +2256,42 @@ mod tests {
         .expect_err("replayed turn lease should fail");
 
         assert!(error.contains("turn mismatch"), "error: {error}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn tool_search_hides_tools_exceeding_granted_capabilities() {
+        let root = std::env::temp_dir().join(format!(
+            "loongclaw-tool-search-cap-filter-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("create fixture root");
+
+        let config = test_tool_runtime_config(root.clone());
+        let result = execute_tool_core_with_config(
+            ToolCoreRequest {
+                tool_name: "tool.search".to_owned(),
+                payload: json!({
+                    "query": "read",
+                    TOOL_SEARCH_GRANTED_CAPABILITIES_FIELD: [
+                        "InvokeTool"
+                    ]
+                }),
+            },
+            &config,
+        )
+        .expect("search should succeed");
+
+        let results = result.payload["results"].as_array().expect("results array");
+        let tool_ids: Vec<&str> = results
+            .iter()
+            .filter_map(|entry| entry["tool_id"].as_str())
+            .collect();
+        assert!(
+            !tool_ids.contains(&"file.read"),
+            "file.read requires FilesystemRead, should be hidden when only InvokeTool is granted; got: {tool_ids:?}"
+        );
+
         std::fs::remove_dir_all(&root).ok();
     }
 
