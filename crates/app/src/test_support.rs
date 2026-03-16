@@ -67,6 +67,9 @@ impl Drop for ScopedEnv {
     }
 }
 
+/// Monotonic counter for unique harness IDs (avoids temp dir collisions).
+static HARNESS_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 /// Ergonomic builder for constructing fake `ProviderTurn` responses in tests.
 pub struct FakeProviderBuilder {
     text: String,
@@ -113,9 +116,6 @@ impl FakeProviderBuilder {
         }
     }
 }
-
-/// Monotonic counter for unique harness IDs (avoids temp dir collisions).
-static HARNESS_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Integration test harness composing real kernel + real tools + fake provider.
 ///
