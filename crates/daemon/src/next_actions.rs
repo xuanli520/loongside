@@ -27,7 +27,7 @@ pub(crate) fn collect_setup_next_actions(
             kind: SetupNextActionKind::Ask,
             label: "ask example".to_owned(),
             command: format!(
-                "{} ask --config {} --message \"{}\"",
+                "{} ask --config '{}' --message \"{}\"",
                 mvp::config::CLI_COMMAND_NAME,
                 config_path,
                 DEFAULT_FIRST_ASK_MESSAGE
@@ -37,7 +37,7 @@ pub(crate) fn collect_setup_next_actions(
             kind: SetupNextActionKind::Chat,
             label: "chat".to_owned(),
             command: format!(
-                "{} chat --config {}",
+                "{} chat --config '{}'",
                 mvp::config::CLI_COMMAND_NAME,
                 config_path
             ),

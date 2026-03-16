@@ -108,7 +108,7 @@ jobs:
           mkdir -p dist
           archive="${PACKAGE_NAME}-${RELEASE_TAG}-${{ matrix.target }}.tar.gz"
           tar -C "target/${{ matrix.target }}/release" -czf "dist/${archive}" "${BIN_NAME}${{ matrix.ext }}"
-          shasum -a 256 "dist/${archive}" > "dist/${archive}.sha256"
+          cd dist && shasum -a 256 "${archive}" > "${archive}.sha256"
 
       - name: Package archive (Windows)
         if: matrix.archive == 'zip'

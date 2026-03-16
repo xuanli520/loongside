@@ -910,7 +910,7 @@ impl TurnEngine {
             let augmented_payload = augment_tool_payload_for_kernel(
                 resolved_tool.canonical_name,
                 injected.payload,
-                &intent.session_id,
+                &session_context.session_id,
             );
             let request = ToolCoreRequest {
                 tool_name: resolved_tool.canonical_name.to_owned(),

@@ -73,7 +73,7 @@ bootstrap installer 直接从仓库拉取。它会优先下载当前平台对应
 <summary>Linux / macOS</summary>
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/loongclaw-ai/loongclaw/alpha-test/scripts/install.sh | bash -s -- --onboard
+curl -fsSL https://raw.githubusercontent.com/loongclaw-ai/loongclaw/main/scripts/install.sh | bash -s -- --onboard
 ```
 </details>
 
@@ -82,7 +82,7 @@ curl -fsSL https://raw.githubusercontent.com/loongclaw-ai/loongclaw/alpha-test/s
 
 ```powershell
 $script = Join-Path $env:TEMP "loongclaw-install.ps1"
-Invoke-WebRequest https://raw.githubusercontent.com/loongclaw-ai/loongclaw/alpha-test/scripts/install.ps1 -OutFile $script
+Invoke-WebRequest https://raw.githubusercontent.com/loongclaw-ai/loongclaw/main/scripts/install.ps1 -OutFile $script
 pwsh $script -Onboard
 ```
 </details>
@@ -296,7 +296,7 @@ auto_expose_installed = true
 - `ask` -- 一次性助手回答后退出
 - `doctor` -- 诊断工具，可选安全修复 (`--fix`) 和机器可读输出 (`--json`)
 - `chat` -- 交互式 CLI，滑动窗口对话记忆
-- 默认可见工具：`browser.open`、`browser.extract`、`browser.click`、`web.fetch`、`shell.exec`、`file.read`、`file.write`、`external_skills.policy`
+- 默认可见工具：`browser.open`、`browser.extract`、`browser.click`、`web.fetch`、`shell.exec`、`file.read`、`file.write`、`external_skills_policy`
 - external-skills 生命周期工具（`external_skills.fetch/install/list/inspect/invoke/remove`）只会在 external-skills runtime 启用时对助手暴露
 - Provider：OpenAI 兼容、火山引擎自定义端点
 - 通道：CLI、Telegram 轮询、飞书加密 webhook

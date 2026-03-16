@@ -3885,7 +3885,7 @@ fn onboarding_success_summary_reports_import_source_and_enabled_channels() {
     assert!(
         summary.next_actions.iter().any(|action| action
             .command
-            .contains("loongclaw ask --config /tmp/loongclaw-config.toml --message")),
+            .contains("loongclaw ask --config '/tmp/loongclaw-config.toml' --message")),
         "success summary should keep a direct ask handoff: {summary:#?}"
     );
 }
@@ -5023,7 +5023,7 @@ fn render_onboarding_success_summary_compacts_for_narrow_width() {
             .any(|line| line == "- ask example: loongclaw ask --config")
             && lines
                 .iter()
-                .any(|line| line == "  /tmp/loongclaw-config.toml --message")
+                .any(|line| line == "  '/tmp/loongclaw-config.toml' --message")
             && lines
                 .iter()
                 .any(|line| line == "  \"Summarize this repository and suggest the")
@@ -5093,7 +5093,7 @@ fn onboarding_success_summary_includes_brand_header() {
     );
     assert!(
         rendered
-            .contains("start here: loongclaw ask --config /tmp/loongclaw-config.toml --message")
+            .contains("start here: loongclaw ask --config '/tmp/loongclaw-config.toml' --message")
             && rendered.contains("Summarize this repository and suggest the best next step."),
         "success summary should elevate ask as the primary handoff command even when wrapping is needed: {lines:#?}"
     );
@@ -5319,7 +5319,7 @@ fn onboarding_success_summary_groups_secondary_channel_actions_after_primary_han
 
     assert!(
         rendered
-            .contains("start here: loongclaw ask --config /tmp/loongclaw-config.toml --message")
+            .contains("start here: loongclaw ask --config '/tmp/loongclaw-config.toml' --message")
             && rendered.contains("Summarize this repository and suggest the best next step."),
         "wide success summary should call out a single primary ask action even when wrapping is needed: {lines:#?}"
     );
@@ -5328,19 +5328,19 @@ fn onboarding_success_summary_groups_secondary_channel_actions_after_primary_han
         "wide success summary should group secondary channel actions under a separate heading: {lines:#?}"
     );
     assert!(
-        rendered.contains("- chat: loongclaw chat --config /tmp/loongclaw-config.toml"),
+        rendered.contains("- chat: loongclaw chat --config '/tmp/loongclaw-config.toml'"),
         "wide success summary should still surface interactive chat as a secondary follow-up: {lines:#?}"
     );
     assert!(
         lines.iter().any(|line| line
-            == "- telegram: loongclaw telegram-serve --config /tmp/loongclaw-config.toml"),
+            == "- telegram: loongclaw telegram-serve --config '/tmp/loongclaw-config.toml'"),
         "wide success summary should list telegram as a secondary action: {lines:#?}"
     );
     assert!(
         lines
             .iter()
             .any(|line| line
-                == "- feishu: loongclaw feishu-serve --config /tmp/loongclaw-config.toml"),
+                == "- feishu: loongclaw feishu-serve --config '/tmp/loongclaw-config.toml'"),
         "wide success summary should list feishu as a secondary action: {lines:#?}"
     );
 }
@@ -5362,13 +5362,13 @@ fn onboarding_success_summary_uses_channel_handoff_when_cli_is_disabled() {
     );
     assert!(
         lines.iter().any(|line| line
-            == "start here: loongclaw telegram-serve --config /tmp/loongclaw-config.toml"),
+            == "start here: loongclaw telegram-serve --config '/tmp/loongclaw-config.toml'"),
         "success summary should guide users into the first enabled channel when cli is disabled: {lines:#?}"
     );
     assert!(
         lines
             .iter()
-            .all(|line| line != "start here: loongclaw chat --config /tmp/loongclaw-config.toml"),
+            .all(|line| line != "start here: loongclaw chat --config '/tmp/loongclaw-config.toml'"),
         "success summary should not keep chat as the primary handoff once cli is disabled: {lines:#?}"
     );
 }

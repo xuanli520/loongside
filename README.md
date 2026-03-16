@@ -183,7 +183,7 @@ Use the source install path below in that case.
 <summary>Linux / macOS</summary>
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/loongclaw-ai/loongclaw/alpha-test/scripts/install.sh | bash -s -- --onboard
+curl -fsSL https://raw.githubusercontent.com/loongclaw-ai/loongclaw/main/scripts/install.sh | bash -s -- --onboard
 ```
 </details>
 
@@ -192,7 +192,7 @@ curl -fsSL https://raw.githubusercontent.com/loongclaw-ai/loongclaw/alpha-test/s
 
 ```powershell
 $script = Join-Path $env:TEMP "loongclaw-install.ps1"
-Invoke-WebRequest https://raw.githubusercontent.com/loongclaw-ai/loongclaw/alpha-test/scripts/install.ps1 -OutFile $script
+Invoke-WebRequest https://raw.githubusercontent.com/loongclaw-ai/loongclaw/main/scripts/install.ps1 -OutFile $script
 pwsh $script -Onboard
 ```
 </details>
@@ -458,7 +458,7 @@ Recommended runtime flow:
 - `ask` -- one-shot assistant answer and exit
 - `doctor` -- diagnostics with optional safe fixes (`--fix`) and machine-readable output (`--json`)
 - `chat` -- interactive CLI with sliding-window conversation memory
-- Default-visible tools: `browser.open`, `browser.extract`, `browser.click`, `web.fetch`, `shell.exec`, `file.read`, `file.write`, `external_skills.policy`
+- Default-visible tools: `browser.open`, `browser.extract`, `browser.click`, `web.fetch`, `shell.exec`, `file.read`, `file.write`, `external_skills_policy`
 - External-skills lifecycle tools (`external_skills.fetch/install/list/inspect/invoke/remove`) are advertised only when the external-skills runtime is enabled
 - Providers: OpenAI-compatible, Volcengine custom endpoint
 - Channels: CLI, Telegram polling, Feishu encrypted webhook

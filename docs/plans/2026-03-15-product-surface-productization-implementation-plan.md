@@ -10,7 +10,7 @@
 
 ---
 
-### Task 1: Land the design and issue linkage
+## Task 1: Land the design and issue linkage
 
 **Files:**
 - Create: `docs/plans/2026-03-15-product-surface-productization-design.md`

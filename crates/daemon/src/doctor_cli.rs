@@ -1056,7 +1056,7 @@ fn build_doctor_next_steps(
     let mut steps = Vec::new();
     let config_path_display = config_path.display().to_string();
     let rerun_command = format!(
-        "{} doctor --config {}",
+        "{} doctor --config '{}'",
         mvp::config::CLI_COMMAND_NAME,
         config_path_display
     );
@@ -1843,7 +1843,7 @@ mod tests {
 
         assert_eq!(
             next_steps[0],
-            "Apply safe local repairs: loongclaw doctor --config /tmp/loongclaw.toml --fix"
+            "Apply safe local repairs: loongclaw doctor --config '/tmp/loongclaw.toml' --fix"
         );
         assert!(
             next_steps.iter().any(|step| {
@@ -1852,10 +1852,8 @@ mod tests {
             "doctor should turn missing provider auth into a concrete next step: {next_steps:#?}"
         );
         assert!(
-            next_steps
-                .iter()
-                .any(|step| step
-                    == "Re-run diagnostics: loongclaw doctor --config /tmp/loongclaw.toml"),
+            next_steps.iter().any(|step| step
+                == "Re-run diagnostics: loongclaw doctor --config '/tmp/loongclaw.toml'"),
             "doctor should tell the operator how to confirm the repair path: {next_steps:#?}"
         );
     }
@@ -1883,13 +1881,13 @@ mod tests {
 
         assert!(
             next_steps.iter().any(|step| {
-                step == "Try a one-shot task: loongclaw ask --config /tmp/loongclaw.toml --message \"Summarize this repository and suggest the best next step.\""
+                step == "Try a one-shot task: loongclaw ask --config '/tmp/loongclaw.toml' --message \"Summarize this repository and suggest the best next step.\""
             }),
             "green doctor runs should hand the user into ask immediately: {next_steps:#?}"
         );
         assert!(
             next_steps.iter().any(|step| {
-                step == "Open interactive chat: loongclaw chat --config /tmp/loongclaw.toml"
+                step == "Open interactive chat: loongclaw chat --config '/tmp/loongclaw.toml'"
             }),
             "green doctor runs should still advertise chat as the follow-up path: {next_steps:#?}"
         );

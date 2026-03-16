@@ -308,7 +308,7 @@ Expected: only task-scoped changes remain.
 - push branch to `fork-chumyin`
 - open PR against `loongclaw-ai/loongclaw:alpha-test`
 - use repository PR template
-- include `Closes #163`
+- include `Closes #168`
 - mention that `web.fetch` advances the product track in `#41`
 
 **Step 5: Final confirmation**
