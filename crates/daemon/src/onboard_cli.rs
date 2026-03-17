@@ -205,13 +205,13 @@ fn validate_select_one_state(
     if options_len == 0 {
         return Err("no selection options available".to_owned());
     }
-    if let Some(idx) = default {
-        if idx >= options_len {
-            return Err(format!(
-                "default selection index {idx} out of range 0..{}",
-                options_len - 1
-            ));
-        }
+    if let Some(idx) = default
+        && idx >= options_len
+    {
+        return Err(format!(
+            "default selection index {idx} out of range 0..{}",
+            options_len - 1
+        ));
     }
     Ok(default)
 }
