@@ -46,6 +46,21 @@ fn unique_temp_path(label: &str) -> PathBuf {
     ))
 }
 
+fn provider_choice_input(kind: mvp::config::ProviderKind) -> String {
+    let index = mvp::config::ProviderKind::all_sorted()
+        .iter()
+        .position(|candidate| *candidate == kind)
+        .expect("provider kind should exist in the interactive onboarding order");
+    (index + 1).to_string()
+}
+
+fn scripted_input_not_cancelled(raw: String) -> loongclaw_daemon::CliResult<String> {
+    if raw.trim() == "\u{1b}" {
+        return Err("onboarding cancelled: escape input received".to_owned());
+    }
+    Ok(raw)
+}
+
 struct DetectedEnvironmentGuard {
     _lock: MutexGuard<'static, ()>,
     saved: Vec<(String, Option<OsString>)>,
@@ -229,7 +244,7 @@ impl loongclaw_daemon::onboard_cli::OnboardUi for ScriptedOnboardUi {
         default: Option<usize>,
     ) -> loongclaw_daemon::CliResult<usize> {
         self.outputs.push(format!("SELECT {label}"));
-        let value = self.next_input(label)?;
+        let value = scripted_input_not_cancelled(self.next_input(label)?)?;
         let trimmed = value.trim();
         if trimmed.is_empty() {
             return default.ok_or_else(|| "no default for required selection".to_owned());
@@ -1044,14 +1059,34 @@ async fn interactive_onboard_clear_token_keeps_inline_provider_credential() {
             system_prompt: None,
             skip_model_probe: true,
         },
-        [
-            "1", "2", "openai", "gpt-4.1", ":clear", "", "", "", "y", "y", "o",
+        vec![
+            "1".to_owned(),
+            "2".to_owned(),
+            provider_choice_input(mvp::config::ProviderKind::Openai),
+            "gpt-4.1".to_owned(),
+            ":clear".to_owned(),
+            String::new(),
+            String::new(),
+            String::new(),
+            "y".to_owned(),
+            "y".to_owned(),
+            "o".to_owned(),
         ],
         None,
         None,
     )
     .await
     .expect("run scripted onboarding with explicit credential clear token");
+
+    let joined = transcript.join("\n");
+    assert!(
+        joined.contains("SELECT Provider"),
+        "provider fallback should use numbered selection even without detected provider choices: {transcript:#?}"
+    );
+    assert!(
+        !joined.contains("PROMPT Provider"),
+        "provider fallback should no longer ask for free-form provider text input: {transcript:#?}"
+    );
 
     let raw = std::fs::read_to_string(&output_path).expect("read written onboarding config");
     assert!(
@@ -1079,7 +1114,20 @@ async fn interactive_onboard_clear_token_restores_builtin_system_prompt() {
     existing.cli.system_prompt = "custom review prompt".to_owned();
     mvp::config::write(output_path.to_str(), &existing, true).expect("write existing config");
 
-    run_scripted_onboard_flow(
+    let mut ui = ScriptedOnboardUi::new(vec![
+        "1".to_owned(),
+        provider_choice_input(mvp::config::ProviderKind::Openai),
+        "gpt-4.1".to_owned(),
+        String::new(),
+        ":clear".to_owned(),
+        String::new(),
+        "y".to_owned(),
+        "y".to_owned(),
+        "o".to_owned(),
+    ]);
+    let context =
+        loongclaw_daemon::onboard_cli::OnboardRuntimeContext::new_for_tests(80, None, None);
+    loongclaw_daemon::onboard_cli::run_onboard_cli_with_ui(
         loongclaw_daemon::onboard_cli::OnboardCommandOptions {
             output: output_path.to_str().map(str::to_owned),
             force: false,
@@ -1093,14 +1141,16 @@ async fn interactive_onboard_clear_token_restores_builtin_system_prompt() {
             system_prompt: Some(existing.cli.system_prompt.clone()),
             skip_model_probe: true,
         },
-        [
-            "1", "2", "openai", "gpt-4.1", "", ":clear", "", "y", "y", "o",
-        ],
-        None,
-        None,
+        &mut ui,
+        &context,
     )
     .await
-    .expect("run scripted onboarding with explicit system-prompt clear token");
+    .unwrap_or_else(|error| {
+        panic!(
+            "run scripted onboarding with explicit system-prompt clear token: {error}; transcript: {:#?}",
+            ui.transcript()
+        )
+    });
 
     let (_, config) =
         mvp::config::load(output_path.to_str()).expect("load interactive onboarding config");
@@ -5194,18 +5244,18 @@ async fn onboard_current_setup_adjustments_preserve_unchanged_domain_actions_in_
             system_prompt: None,
             skip_model_probe: true,
         },
-        [
-            "1",
-            "2",
-            "openai",
-            "gpt-4.1",
-            "OPENAI_API_KEY",
-            "",
-            "custom review prompt",
-            "",
-            "y",
-            "y",
-            "o",
+        vec![
+            "1".to_owned(),
+            "2".to_owned(),
+            provider_choice_input(mvp::config::ProviderKind::Openai),
+            "gpt-4.1".to_owned(),
+            "OPENAI_API_KEY".to_owned(),
+            String::new(),
+            "custom review prompt".to_owned(),
+            String::new(),
+            "y".to_owned(),
+            "y".to_owned(),
+            "o".to_owned(),
         ],
         Some(workspace_root),
         None,
@@ -5293,18 +5343,18 @@ async fn onboard_current_setup_adjustments_capture_personality_and_memory_profil
             system_prompt: None,
             skip_model_probe: true,
         },
-        [
-            "1",
-            "2",
-            "openai",
-            "gpt-4.1",
-            "OPENAI_API_KEY",
-            "2",
-            "",
-            "3",
-            "y",
-            "y",
-            "o",
+        vec![
+            "1".to_owned(),
+            "2".to_owned(),
+            provider_choice_input(mvp::config::ProviderKind::Openai),
+            "gpt-4.1".to_owned(),
+            "OPENAI_API_KEY".to_owned(),
+            "2".to_owned(),
+            String::new(),
+            "3".to_owned(),
+            "y".to_owned(),
+            "y".to_owned(),
+            "o".to_owned(),
         ],
         Some(workspace_root),
         None,

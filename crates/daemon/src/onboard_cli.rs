@@ -1063,37 +1063,54 @@ fn resolve_provider_selection(
         return Ok(choice.config.clone());
     }
 
-    // No imported choices — fall back to typed provider kind prompt.
+    // No imported choices — still use the numbered chooser so the provider
+    // step stays aligned with the rest of onboarding.
+    let default_provider_kind = options
+        .provider
+        .as_deref()
+        .and_then(parse_provider_kind)
+        .or(provider_selection.default_kind)
+        .or_else(|| {
+            provider_selection
+                .default_profile_id
+                .as_deref()
+                .and_then(parse_provider_kind)
+        })
+        .unwrap_or(config.provider.kind);
+    let provider_kinds = mvp::config::ProviderKind::all_sorted();
+    let select_options: Vec<SelectOption> = provider_kinds
+        .iter()
+        .map(|kind| SelectOption {
+            label: provider_kind_display_name(*kind).to_owned(),
+            slug: provider_kind_id(*kind).to_owned(),
+            description: String::new(),
+            recommended: *kind == default_provider_kind,
+        })
+        .collect();
+    let default_idx = if provider_selection.requires_explicit_choice {
+        None
+    } else {
+        provider_kinds
+            .iter()
+            .position(|kind| *kind == default_provider_kind)
+    };
     print_lines(
         ui,
-        render_provider_selection_screen_lines_with_style(
+        render_provider_selection_header_lines(
             provider_selection,
             guided_prompt_path,
             context.render_width,
-            true,
         ),
     )?;
-    let default_provider = options
-        .provider
-        .clone()
-        .or_else(|| provider_selection.default_profile_id.clone())
-        .or_else(|| {
-            provider_selection
-                .default_kind
-                .map(|kind| provider_kind_id(kind).to_owned())
-        })
-        .unwrap_or_else(|| provider_kind_id(config.provider.kind).to_owned());
-    loop {
-        let input = if provider_selection.requires_explicit_choice {
-            ui.prompt_required("Provider")?
-        } else {
-            ui.prompt_with_default("Provider", &default_provider)?
-        };
-        match resolve_provider_config_from_selector(&config.provider, provider_selection, &input) {
-            Ok(provider) => return Ok(provider),
-            Err(error) => print_message(ui, error)?,
-        }
-    }
+    let idx = ui.select_one("Provider", &select_options, default_idx)?;
+    let kind = *provider_kinds
+        .get(idx)
+        .ok_or_else(|| format!("provider selection index {idx} out of range"))?;
+    Ok(resolve_provider_config_from_selection(
+        &config.provider,
+        provider_selection,
+        kind,
+    ))
 }
 
 pub fn resolve_provider_config_from_selector(
@@ -4244,13 +4261,7 @@ fn render_provider_selection_screen_lines_with_style(
     width: usize,
     color_enabled: bool,
 ) -> Vec<String> {
-    let intro = if plan.imported_choices.is_empty() {
-        vec!["pick the provider that should back this setup".to_owned()]
-    } else if plan.requires_explicit_choice {
-        vec!["other detected settings stay merged".to_owned()]
-    } else {
-        vec!["review the detected provider choices for this setup".to_owned()]
-    };
+    let intro = provider_selection_intro_lines(plan);
     let options = plan
         .imported_choices
         .iter()
@@ -4300,22 +4311,27 @@ fn render_provider_selection_header_lines(
     guided_prompt_path: GuidedPromptPath,
     width: usize,
 ) -> Vec<String> {
-    let intro = if plan.requires_explicit_choice {
-        vec!["other detected settings stay merged".to_owned()]
-    } else {
-        vec!["review the detected provider choices for this setup".to_owned()]
-    };
     render_onboard_choice_screen(
         OnboardHeaderStyle::Compact,
         width,
         "choose the current provider",
         "choose active provider",
         Some((GuidedOnboardStep::Provider, guided_prompt_path)),
-        intro,
+        provider_selection_intro_lines(plan),
         vec![],
         vec![],
         true,
     )
+}
+
+fn provider_selection_intro_lines(plan: &crate::migration::ProviderSelectionPlan) -> Vec<String> {
+    if plan.imported_choices.is_empty() {
+        vec!["pick the provider that should back this setup".to_owned()]
+    } else if plan.requires_explicit_choice {
+        vec!["other detected settings stay merged".to_owned()]
+    } else {
+        vec!["review the detected provider choices for this setup".to_owned()]
+    }
 }
 
 fn render_provider_selection_default_choice_footer_line(
@@ -5522,6 +5538,7 @@ mod tests {
         ) -> CliResult<usize> {
             match self.inputs.pop_front() {
                 Some(value) => {
+                    let value = ensure_onboard_input_not_cancelled(value)?;
                     let trimmed = value.trim();
                     if trimmed.is_empty() {
                         return default
@@ -6395,6 +6412,26 @@ mod tests {
             .expect("required prompt should preserve stdio trimming semantics");
 
         assert_eq!(value, "minimax");
+    }
+
+    #[test]
+    fn test_onboard_ui_select_one_cancels_on_escape_input() {
+        let mut ui = TestOnboardUi::with_inputs(["\u{1b}"]);
+        let options = vec![SelectOption {
+            label: "OpenAI".to_owned(),
+            slug: "openai".to_owned(),
+            description: String::new(),
+            recommended: true,
+        }];
+
+        let error = ui
+            .select_one("Provider", &options, Some(0))
+            .expect_err("escape input should cancel selection instead of surfacing a parse error");
+
+        assert!(
+            error.contains("cancelled"),
+            "escape cancellation should stay user-facing for selection prompts: {error}"
+        );
     }
 
     #[test]
