@@ -575,7 +575,10 @@ impl ToolRuntimeConfig {
             }
             if narrowing.browser.max_links.is_some() {
                 rendered_any = true;
-                lines.push(format!("- browser max links: {}", effective.browser.max_links));
+                lines.push(format!(
+                    "- browser max links: {}",
+                    effective.browser.max_links
+                ));
             }
             if narrowing.browser.max_text_chars.is_some() {
                 rendered_any = true;
