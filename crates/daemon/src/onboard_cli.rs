@@ -2,6 +2,9 @@ use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread;
+use std::time::Duration;
 
 use loongclaw_app as mvp;
 use loongclaw_spec::CliResult;
@@ -13,6 +16,11 @@ const BACKUP_TIMESTAMP_FORMAT: &[FormatItem<'static>] =
     format_description!("[year][month][day]-[hour][minute][second]");
 const ONBOARD_CLEAR_INPUT_TOKEN: &str = ":clear";
 const ONBOARD_ESCAPE_CANCEL_HINT: &str = "- press Esc then Enter to cancel onboarding";
+const ONBOARD_SINGLE_LINE_INPUT_HINT: &str =
+    "- terminal input is single line; extra pasted lines are ignored";
+const ONBOARD_PASTE_DRAIN_WINDOW_ENV: &str = "LOONGCLAW_ONBOARD_PASTE_DRAIN_WINDOW_MS";
+const DEFAULT_ONBOARD_PASTE_DRAIN_WINDOW: Duration = Duration::from_millis(75);
+const ONBOARD_LINE_READER_BUFFER_SIZE: usize = 64;
 
 #[derive(Debug, Clone)]
 pub struct OnboardCommandOptions {
@@ -29,11 +37,39 @@ pub struct OnboardCommandOptions {
     pub skip_model_probe: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct SelectOption {
+    pub label: String,
+    pub slug: String,
+    pub description: String,
+    pub recommended: bool,
+}
+
 pub trait OnboardUi {
     fn print_line(&mut self, line: &str) -> CliResult<()>;
     fn prompt_with_default(&mut self, label: &str, default: &str) -> CliResult<String>;
     fn prompt_required(&mut self, label: &str) -> CliResult<String>;
     fn prompt_confirm(&mut self, message: &str, default: bool) -> CliResult<bool>;
+    fn select_one(
+        &mut self,
+        label: &str,
+        options: &[SelectOption],
+        default: Option<usize>,
+    ) -> CliResult<usize> {
+        let default = validate_select_one_state(options.len(), default)?;
+        loop {
+            let input = if let Some(default_index) = default {
+                self.prompt_with_default(label, &(default_index + 1).to_string())?
+            } else {
+                self.prompt_required(label)?
+            };
+            let trimmed = input.trim();
+            if let Some(index) = parse_select_one_input(trimmed, options) {
+                return Ok(index);
+            }
+            self.print_line(&render_select_one_invalid_input_message(options))?;
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -65,8 +101,218 @@ impl OnboardRuntimeContext {
     }
 }
 
+trait OnboardPromptLineReader {
+    fn read_blocking_line(&mut self) -> CliResult<OnboardPromptRead>;
+    fn read_pending_line(&mut self) -> CliResult<Option<String>>;
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum OnboardPromptRead {
+    Line(String),
+    Eof,
+}
+
+#[derive(Debug)]
+enum StdioOnboardLineMessage {
+    Line(String),
+    Eof,
+    Error(String),
+}
+
+type StdioOnboardLineSender = mpsc::SyncSender<StdioOnboardLineMessage>;
+
+#[derive(Debug)]
+enum StdioOnboardLineReader {
+    Background {
+        receiver: Receiver<StdioOnboardLineMessage>,
+        paste_drain_window: Duration,
+    },
+    Direct {
+        degraded_notice: Option<String>,
+    },
+}
+
+fn onboard_line_channel() -> (StdioOnboardLineSender, Receiver<StdioOnboardLineMessage>) {
+    onboard_line_channel_with_capacity(ONBOARD_LINE_READER_BUFFER_SIZE)
+}
+
+fn onboard_line_channel_with_capacity(
+    buffer_size: usize,
+) -> (StdioOnboardLineSender, Receiver<StdioOnboardLineMessage>) {
+    assert!(
+        buffer_size > 0,
+        "onboard line reader buffer must be non-zero"
+    );
+    mpsc::sync_channel(buffer_size)
+}
+
+fn onboard_paste_drain_window() -> Duration {
+    env::var(ONBOARD_PASTE_DRAIN_WINDOW_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|millis| *millis > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_ONBOARD_PASTE_DRAIN_WINDOW)
+}
+
+fn spawn_onboard_stdin_reader(sender: StdioOnboardLineSender) -> io::Result<()> {
+    thread::Builder::new()
+        .name("loongclaw-onboard-stdin".to_owned())
+        .spawn(move || {
+            loop {
+                let mut line = String::new();
+                match io::stdin().read_line(&mut line) {
+                    Ok(0) => {
+                        let _ = sender.send(StdioOnboardLineMessage::Eof);
+                        break;
+                    }
+                    Ok(_) => {
+                        if sender.send(StdioOnboardLineMessage::Line(line)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = sender.send(StdioOnboardLineMessage::Error(format!(
+                            "read stdin failed: {error}"
+                        )));
+                        break;
+                    }
+                }
+            }
+        })
+        .map(|_handle| ())
+}
+
+fn format_onboard_line_reader_spawn_notice(error: &io::Error) -> String {
+    format!(
+        "warning: failed to start onboarding stdin reader thread ({error}); single-line paste draining is disabled for this session"
+    )
+}
+
+impl StdioOnboardLineReader {
+    fn background_from_receiver(receiver: Receiver<StdioOnboardLineMessage>) -> Self {
+        Self::Background {
+            receiver,
+            paste_drain_window: onboard_paste_drain_window(),
+        }
+    }
+
+    fn try_spawn_background_receiver() -> io::Result<Receiver<StdioOnboardLineMessage>> {
+        let (sender, receiver) = onboard_line_channel();
+        spawn_onboard_stdin_reader(sender)?;
+        Ok(receiver)
+    }
+
+    fn from_spawn_result(result: io::Result<Receiver<StdioOnboardLineMessage>>) -> Self {
+        match result {
+            Ok(receiver) => Self::background_from_receiver(receiver),
+            Err(error) => Self::Direct {
+                degraded_notice: Some(format_onboard_line_reader_spawn_notice(&error)),
+            },
+        }
+    }
+
+    fn take_degraded_notice(&mut self) -> Option<String> {
+        match self {
+            Self::Background { .. } => None,
+            Self::Direct { degraded_notice } => degraded_notice.take(),
+        }
+    }
+}
+
+impl Default for StdioOnboardLineReader {
+    fn default() -> Self {
+        Self::from_spawn_result(Self::try_spawn_background_receiver())
+    }
+}
+
+impl OnboardPromptLineReader for StdioOnboardLineReader {
+    fn read_blocking_line(&mut self) -> CliResult<OnboardPromptRead> {
+        if let Some(notice) = self.take_degraded_notice() {
+            eprintln!("{notice}");
+        }
+        match self {
+            Self::Background { receiver, .. } => match receiver.recv() {
+                Ok(StdioOnboardLineMessage::Line(line)) => Ok(OnboardPromptRead::Line(line)),
+                Ok(StdioOnboardLineMessage::Eof) => Ok(OnboardPromptRead::Eof),
+                Ok(StdioOnboardLineMessage::Error(error)) => Err(error),
+                Err(_) => Ok(OnboardPromptRead::Eof),
+            },
+            Self::Direct { .. } => {
+                let mut line = String::new();
+                let bytes_read = io::stdin()
+                    .read_line(&mut line)
+                    .map_err(|error| format!("read stdin failed: {error}"))?;
+                if bytes_read == 0 {
+                    return Ok(OnboardPromptRead::Eof);
+                }
+                Ok(OnboardPromptRead::Line(line))
+            }
+        }
+    }
+
+    fn read_pending_line(&mut self) -> CliResult<Option<String>> {
+        match self {
+            Self::Background {
+                receiver,
+                paste_drain_window,
+            } => match receiver.recv_timeout(*paste_drain_window) {
+                Ok(StdioOnboardLineMessage::Line(line)) => Ok(Some(line)),
+                Ok(StdioOnboardLineMessage::Eof) => Ok(None),
+                Ok(StdioOnboardLineMessage::Error(error)) => Err(error),
+                Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => Ok(None),
+            },
+            Self::Direct { .. } => Ok(None),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
-struct StdioOnboardUi;
+struct StdioOnboardUi {
+    line_reader: StdioOnboardLineReader,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct OnboardPromptCapture {
+    raw: String,
+    dropped_line_count: usize,
+    reached_eof: bool,
+}
+
+fn read_single_line_prompt_capture(
+    reader: &mut impl OnboardPromptLineReader,
+) -> CliResult<OnboardPromptCapture> {
+    let read = reader.read_blocking_line()?;
+    let mut dropped_line_count = 0;
+    let (raw, reached_eof) = match read {
+        OnboardPromptRead::Line(raw) => {
+            while reader.read_pending_line()?.is_some() {
+                dropped_line_count += 1;
+            }
+            (raw, false)
+        }
+        OnboardPromptRead::Eof => (String::new(), true),
+    };
+    Ok(OnboardPromptCapture {
+        raw,
+        dropped_line_count,
+        reached_eof,
+    })
+}
+
+fn print_dropped_paste_notice(label: &str, dropped_line_count: usize) {
+    if dropped_line_count == 0 {
+        return;
+    }
+    let noun = if dropped_line_count == 1 {
+        "line"
+    } else {
+        "lines"
+    };
+    println!(
+        "note: {label} accepts a single line; ignored {dropped_line_count} extra pasted {noun}"
+    );
+}
 
 impl OnboardUi for StdioOnboardUi {
     fn print_line(&mut self, line: &str) -> CliResult<()> {
@@ -75,15 +321,13 @@ impl OnboardUi for StdioOnboardUi {
     }
 
     fn prompt_with_default(&mut self, label: &str, default: &str) -> CliResult<String> {
-        print!("{label} [{default}]: ");
+        print!("{}", render_prompt_with_default_text(label, default));
         io::stdout()
             .flush()
             .map_err(|error| format!("flush stdout failed: {error}"))?;
-        let mut line = String::new();
-        io::stdin()
-            .read_line(&mut line)
-            .map_err(|error| format!("read stdin failed: {error}"))?;
-        let line = ensure_onboard_input_not_cancelled(line)?;
+        let capture = read_single_line_prompt_capture(&mut self.line_reader)?;
+        let line = ensure_onboard_input_not_cancelled(capture.raw)?;
+        print_dropped_paste_notice(label, capture.dropped_line_count);
         let trimmed = line.trim();
         if trimmed.is_empty() {
             return Ok(default.to_owned());
@@ -96,11 +340,9 @@ impl OnboardUi for StdioOnboardUi {
         io::stdout()
             .flush()
             .map_err(|error| format!("flush stdout failed: {error}"))?;
-        let mut line = String::new();
-        io::stdin()
-            .read_line(&mut line)
-            .map_err(|error| format!("read stdin failed: {error}"))?;
-        let line = ensure_onboard_input_not_cancelled(line)?;
+        let capture = read_single_line_prompt_capture(&mut self.line_reader)?;
+        let line = ensure_onboard_input_not_cancelled(capture.raw)?;
+        print_dropped_paste_notice(label, capture.dropped_line_count);
         Ok(line.trim().to_owned())
     }
 
@@ -110,17 +352,112 @@ impl OnboardUi for StdioOnboardUi {
         io::stdout()
             .flush()
             .map_err(|error| format!("flush stdout failed: {error}"))?;
-        let mut line = String::new();
-        io::stdin()
-            .read_line(&mut line)
-            .map_err(|error| format!("read stdin failed: {error}"))?;
-        let line = ensure_onboard_input_not_cancelled(line)?;
+        let capture = read_single_line_prompt_capture(&mut self.line_reader)?;
+        let line = ensure_onboard_input_not_cancelled(capture.raw)?;
+        print_dropped_paste_notice(message, capture.dropped_line_count);
         let value = line.trim().to_ascii_lowercase();
         if value.is_empty() {
             return Ok(default);
         }
         Ok(matches!(value.as_str(), "y" | "yes"))
     }
+
+    fn select_one(
+        &mut self,
+        label: &str,
+        options: &[SelectOption],
+        default: Option<usize>,
+    ) -> CliResult<usize> {
+        let default = validate_select_one_state(options.len(), default)?;
+        loop {
+            for (i, opt) in options.iter().enumerate() {
+                let num = i + 1;
+                let rec = if opt.recommended {
+                    " (recommended)"
+                } else {
+                    ""
+                };
+                println!("  {num}) {}{rec}", opt.label);
+                if !opt.description.is_empty() {
+                    println!("     {}", opt.description);
+                }
+            }
+            println!();
+            let prompt_text = match default {
+                Some(idx) => render_prompt_with_default_text(label, &(idx + 1).to_string()),
+                None => format!("{label}: "),
+            };
+            print!("{prompt_text}");
+            io::stdout()
+                .flush()
+                .map_err(|error| format!("flush stdout failed: {error}"))?;
+            let capture = read_single_line_prompt_capture(&mut self.line_reader)?;
+            print_dropped_paste_notice(label, capture.dropped_line_count);
+            if capture.reached_eof {
+                return resolve_select_one_eof(default);
+            }
+            let input = ensure_onboard_input_not_cancelled(capture.raw)?;
+            let trimmed = input.trim();
+            if trimmed.is_empty() {
+                if let Some(idx) = default {
+                    return Ok(idx);
+                }
+                println!("Please select an option.");
+                continue;
+            }
+            if let Some(index) = parse_select_one_input(trimmed, options) {
+                return Ok(index);
+            }
+            println!("{}", render_select_one_invalid_input_message(options));
+        }
+    }
+}
+
+fn validate_select_one_state(
+    options_len: usize,
+    default: Option<usize>,
+) -> CliResult<Option<usize>> {
+    if options_len == 0 {
+        return Err("no selection options available".to_owned());
+    }
+    if let Some(idx) = default
+        && idx >= options_len
+    {
+        return Err(format!(
+            "default selection index {idx} out of range 0..{}",
+            options_len - 1
+        ));
+    }
+    Ok(default)
+}
+
+fn parse_select_one_input(trimmed: &str, options: &[SelectOption]) -> Option<usize> {
+    if let Ok(selected) = trimmed.parse::<usize>()
+        && (1..=options.len()).contains(&selected)
+    {
+        return Some(selected - 1);
+    }
+    options
+        .iter()
+        .position(|option| option.slug.eq_ignore_ascii_case(trimmed))
+}
+
+fn render_select_one_invalid_input_message(options: &[SelectOption]) -> String {
+    format!(
+        "invalid selection. enter a number between 1 and {}, or one of: {}",
+        options.len(),
+        options
+            .iter()
+            .map(|option| option.slug.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn resolve_select_one_eof(default: Option<usize>) -> CliResult<usize> {
+    default.ok_or_else(|| {
+        "onboarding cancelled: stdin closed while waiting for required selection".to_owned()
+    })
 }
 
 fn print_lines(ui: &mut impl OnboardUi, lines: impl IntoIterator<Item = String>) -> CliResult<()> {
@@ -182,6 +519,8 @@ pub enum OnboardNonInteractiveWarningPolicy {
     AcceptedBySkipModelProbe,
     AcceptedByExplicitModel,
     AcceptedByPreferredModels,
+    RequiresExplicitModel,
+    RequiresExplicitModelWithoutReviewedDefault,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -459,6 +798,7 @@ pub struct OnboardingSuccessSummary {
     pub saved_provider_profiles: Vec<String>,
     pub model: String,
     pub transport: String,
+    pub provider_endpoint: Option<String>,
     pub credential: Option<OnboardingCredentialSummary>,
     pub prompt_mode: String,
     pub personality: Option<String>,
@@ -502,7 +842,7 @@ pub type ChannelImportReadiness = crate::migration::ChannelImportReadiness;
 
 pub async fn run_onboard_cli(options: OnboardCommandOptions) -> CliResult<()> {
     let context = OnboardRuntimeContext::capture();
-    let mut ui = StdioOnboardUi;
+    let mut ui = StdioOnboardUi::default();
     run_onboard_cli_with_ui(options, &mut ui, &context).await
 }
 
@@ -904,36 +1244,95 @@ fn resolve_provider_selection(
         ));
     }
 
+    if !provider_selection.imported_choices.is_empty() {
+        let select_options: Vec<SelectOption> = provider_selection
+            .imported_choices
+            .iter()
+            .map(|choice| SelectOption {
+                label: provider_kind_display_name(choice.kind).to_owned(),
+                slug: choice.profile_id.clone(),
+                description: format!("source: {}, summary: {}", choice.source, choice.summary),
+                recommended: Some(choice.profile_id.as_str())
+                    == provider_selection.default_profile_id.as_deref(),
+            })
+            .collect();
+        let default_idx = if provider_selection.requires_explicit_choice {
+            None
+        } else {
+            provider_selection
+                .default_profile_id
+                .as_deref()
+                .and_then(|default_id| {
+                    provider_selection
+                        .imported_choices
+                        .iter()
+                        .position(|choice| choice.profile_id == default_id)
+                })
+        };
+        print_lines(
+            ui,
+            render_provider_selection_header_lines(
+                provider_selection,
+                guided_prompt_path,
+                context.render_width,
+            ),
+        )?;
+        let idx = ui.select_one("Provider", &select_options, default_idx)?;
+        let choice = provider_selection
+            .imported_choices
+            .get(idx)
+            .ok_or_else(|| format!("provider selection index {idx} out of range"))?;
+        return Ok(choice.config.clone());
+    }
+
+    // No imported choices — still use the numbered chooser so the provider
+    // step stays aligned with the rest of onboarding.
+    let default_provider_kind = options
+        .provider
+        .as_deref()
+        .and_then(parse_provider_kind)
+        .or(provider_selection.default_kind)
+        .or_else(|| {
+            provider_selection
+                .default_profile_id
+                .as_deref()
+                .and_then(parse_provider_kind)
+        })
+        .unwrap_or(config.provider.kind);
+    let provider_kinds = mvp::config::ProviderKind::all_sorted();
+    let select_options: Vec<SelectOption> = provider_kinds
+        .iter()
+        .map(|kind| SelectOption {
+            label: provider_kind_display_name(*kind).to_owned(),
+            slug: provider_kind_id(*kind).to_owned(),
+            description: String::new(),
+            recommended: *kind == default_provider_kind,
+        })
+        .collect();
+    let default_idx = if provider_selection.requires_explicit_choice {
+        None
+    } else {
+        provider_kinds
+            .iter()
+            .position(|kind| *kind == default_provider_kind)
+    };
     print_lines(
         ui,
-        render_provider_selection_screen_lines_with_style(
+        render_provider_selection_header_lines(
             provider_selection,
             guided_prompt_path,
             context.render_width,
-            true,
         ),
     )?;
-    let default_provider = options
-        .provider
-        .clone()
-        .or_else(|| provider_selection.default_profile_id.clone())
-        .or_else(|| {
-            provider_selection
-                .default_kind
-                .map(|kind| provider_kind_id(kind).to_owned())
-        })
-        .unwrap_or_else(|| provider_kind_id(config.provider.kind).to_owned());
-    loop {
-        let input = if provider_selection.requires_explicit_choice {
-            ui.prompt_required("Provider")?
-        } else {
-            ui.prompt_with_default("Provider", &default_provider)?
-        };
-        match resolve_provider_config_from_selector(&config.provider, provider_selection, &input) {
-            Ok(provider) => return Ok(provider),
-            Err(error) => print_message(ui, error)?,
-        }
-    }
+    let idx = ui.select_one("Provider", &select_options, default_idx)?;
+    let kind = *provider_kinds
+        .get(idx)
+        .ok_or_else(|| format!("provider selection index {idx} out of range"))?;
+    Ok(resolve_provider_config_from_selection(
+        &config.provider,
+        provider_selection,
+        kind,
+    ))
 }
 
 pub fn resolve_provider_config_from_selector(
@@ -1039,11 +1438,14 @@ fn resolve_model_selection(
         return Err("model cannot be empty".to_owned());
     }
 
-    let default_model = resolve_onboarding_model_prompt_default(options, config);
     if options.non_interactive {
-        return Ok(default_model);
+        if let Some(model) = options.model.as_deref() {
+            return Ok(model.trim().to_owned());
+        }
+        return Ok(config.provider.configured_model_value());
     }
 
+    let default_model = resolve_onboarding_model_prompt_default(options, config);
     print_lines(
         ui,
         render_model_selection_screen_lines_with_style(
@@ -1074,13 +1476,14 @@ fn resolve_onboarding_model_prompt_default(
         return model;
     }
 
-    if config.provider.configured_model_value() == "auto"
+    let configured_model = config.provider.configured_model_value();
+    if configured_model.eq_ignore_ascii_case("auto")
         && let Some(model) = config.provider.kind.recommended_onboarding_model()
     {
         return model.to_owned();
     }
 
-    config.provider.configured_model_value()
+    configured_model
 }
 
 fn resolve_api_key_env_selection(
@@ -1195,29 +1598,46 @@ fn resolve_personality_selection(
         .as_deref()
         .and_then(parse_prompt_personality)
         .unwrap_or_else(|| config.cli.resolved_personality());
+
+    let personalities = [
+        (
+            mvp::prompt::PromptPersonality::CalmEngineering,
+            "calm engineering",
+            "rigorous, direct, and technically grounded",
+        ),
+        (
+            mvp::prompt::PromptPersonality::FriendlyCollab,
+            "friendly collab",
+            "warm, cooperative, and explanatory when helpful",
+        ),
+        (
+            mvp::prompt::PromptPersonality::AutonomousExecutor,
+            "autonomous executor",
+            "decisive, high-initiative, and execution-oriented",
+        ),
+    ];
+    let select_options: Vec<SelectOption> = personalities
+        .iter()
+        .map(|(p, label, desc)| SelectOption {
+            label: label.to_string(),
+            slug: prompt_personality_id(*p).to_owned(),
+            description: desc.to_string(),
+            recommended: *p == default_personality,
+        })
+        .collect();
+    let default_idx = personalities
+        .iter()
+        .position(|(p, _, _)| *p == default_personality);
+
     print_lines(
         ui,
-        render_personality_selection_screen_lines_with_style(
-            config,
-            default_personality,
-            context.render_width,
-            true,
-        ),
+        render_personality_selection_header_lines(config, context.render_width),
     )?;
-    loop {
-        let input =
-            ui.prompt_with_default("Personality", prompt_personality_id(default_personality))?;
-        if let Some(personality) = parse_prompt_personality(&input) {
-            return Ok(personality);
-        }
-        print_message(
-            ui,
-            format!(
-                "Unsupported personality: {input}. Use one of: {}",
-                supported_personality_list()
-            ),
-        )?;
-    }
+    let idx = ui.select_one("Personality", &select_options, default_idx)?;
+    let (personality, _, _) = personalities
+        .get(idx)
+        .ok_or_else(|| format!("personality selection index {idx} out of range"))?;
+    Ok(*personality)
 }
 
 fn resolve_prompt_addendum_selection(
@@ -1313,29 +1733,48 @@ fn resolve_memory_profile_selection(
         .as_deref()
         .and_then(parse_memory_profile)
         .unwrap_or(config.memory.profile);
+
+    let profiles = [
+        (
+            mvp::config::MemoryProfile::WindowOnly,
+            "recent turns only",
+            "load only the active sliding window",
+        ),
+        (
+            mvp::config::MemoryProfile::WindowPlusSummary,
+            "window plus summary",
+            "add a summary block before the recent window",
+        ),
+        (
+            mvp::config::MemoryProfile::ProfilePlusWindow,
+            "profile plus window",
+            "inject durable profile notes before the recent window",
+        ),
+    ];
+    let select_options: Vec<SelectOption> = profiles
+        .iter()
+        .map(|(p, label, desc)| SelectOption {
+            label: label.to_string(),
+            slug: memory_profile_id(*p).to_owned(),
+            description: desc.to_string(),
+            recommended: *p == default_profile,
+        })
+        .collect();
+    let default_idx = profiles.iter().position(|(p, _, _)| *p == default_profile);
+
     print_lines(
         ui,
-        render_memory_profile_selection_screen_lines_with_style(
+        render_memory_profile_selection_header_lines(
             config,
-            default_profile,
             guided_prompt_path,
             context.render_width,
-            true,
         ),
     )?;
-    loop {
-        let input = ui.prompt_with_default("Memory profile", memory_profile_id(default_profile))?;
-        if let Some(profile) = parse_memory_profile(&input) {
-            return Ok(profile);
-        }
-        print_message(
-            ui,
-            format!(
-                "Unsupported memory profile: {input}. Use one of: {}",
-                supported_memory_profile_list()
-            ),
-        )?;
-    }
+    let idx = ui.select_one("Memory profile", &select_options, default_idx)?;
+    let (profile, _, _) = profiles
+        .get(idx)
+        .ok_or_else(|| format!("memory profile selection index {idx} out of range"))?;
+    Ok(*profile)
 }
 
 async fn run_preflight_checks(
@@ -1405,35 +1844,47 @@ fn provider_model_probe_failure_check(
     error: String,
 ) -> OnboardCheck {
     let provider_prefix = provider_check_detail_prefix(config);
+    let auth_style_failure = mvp::provider::is_auth_style_failure_message(error.as_str());
+    let append_region_hint = |mut detail: String| {
+        if auth_style_failure && let Some(hint) = config.provider.region_endpoint_failure_hint() {
+            detail.push(' ');
+            detail.push_str(hint.as_str());
+        }
+        detail
+    };
     let (level, detail, non_interactive_warning_policy) = match config
         .provider
         .model_catalog_probe_recovery()
     {
         mvp::config::ModelCatalogProbeRecovery::ExplicitModel(model) => (
             OnboardCheckLevel::Warn,
-            format!(
+            append_region_hint(format!(
                 "{provider_prefix}: model catalog probe failed ({error}); chat may still work because model `{model}` is explicitly configured"
-            ),
+            )),
             OnboardNonInteractiveWarningPolicy::AcceptedByExplicitModel,
         ),
         mvp::config::ModelCatalogProbeRecovery::ConfiguredPreferredModels(fallback_models) => (
             OnboardCheckLevel::Warn,
-            format!(
+            append_region_hint(format!(
                 "{provider_prefix}: model catalog probe failed ({error}); runtime will try configured preferred model fallback(s): {}",
                 render_onboard_model_candidate_list(&fallback_models)
-            ),
+            )),
             OnboardNonInteractiveWarningPolicy::AcceptedByPreferredModels,
         ),
         mvp::config::ModelCatalogProbeRecovery::RequiresExplicitModel {
             recommended_onboarding_model,
         } => (
             OnboardCheckLevel::Fail,
-            provider_model_probe_requires_explicit_model_detail(
+            append_region_hint(provider_model_probe_requires_explicit_model_detail(
                 provider_prefix.as_str(),
                 error.as_str(),
                 recommended_onboarding_model,
-            ),
-            OnboardNonInteractiveWarningPolicy::Block,
+            )),
+            if recommended_onboarding_model.is_some() {
+                OnboardNonInteractiveWarningPolicy::RequiresExplicitModel
+            } else {
+                OnboardNonInteractiveWarningPolicy::RequiresExplicitModelWithoutReviewedDefault
+            },
         ),
     };
 
@@ -1719,10 +2170,11 @@ fn selected_provider_credential_env_field(
     match (matches_oauth, matches_api_key) {
         (true, false) => ProviderCredentialEnvField::OAuthAccessToken,
         (false, true) => ProviderCredentialEnvField::ApiKey,
-        _ => configured_provider_credential_env_binding(provider)
+        (true, true) => configured_provider_credential_env_binding(provider)
             .or_else(|| preferred_provider_credential_env_binding(provider))
             .map(|binding| binding.field)
             .unwrap_or(ProviderCredentialEnvField::ApiKey),
+        (false, false) => ProviderCredentialEnvField::ApiKey,
     }
 }
 
@@ -2927,6 +3379,7 @@ fn build_onboarding_success_summary_with_memory(
         saved_provider_profiles: crate::provider_presentation::saved_provider_profile_ids(config),
         model: config.provider.model.clone(),
         transport: config.provider.transport_readiness().summary,
+        provider_endpoint: config.provider.region_endpoint_note(),
         credential: summarize_provider_credential(&config.provider),
         prompt_mode: summarize_prompt_mode(config),
         personality: config
@@ -3079,6 +3532,13 @@ fn render_onboarding_success_summary_with_width_and_style(
         &summary.transport,
         width,
     ));
+    if let Some(provider_endpoint) = summary.provider_endpoint.as_deref() {
+        lines.extend(mvp::presentation::render_wrapped_text_line(
+            "- provider endpoint: ",
+            provider_endpoint,
+            width,
+        ));
+    }
     if let Some(credential) = summary.credential.as_ref() {
         lines.extend(mvp::presentation::render_wrapped_text_line(
             &format!("- {}: ", credential.label),
@@ -3196,10 +3656,12 @@ fn render_onboard_option_lines(options: &[OnboardScreenOption], width: usize) ->
         } else {
             ""
         };
+        let prefix = render_onboard_option_prefix(&option.key);
+        let continuation = " ".repeat(prefix.chars().count());
         lines.extend(
             mvp::presentation::render_wrapped_text_line_with_continuation(
-                &format!("[{}] ", option.key),
-                "    ",
+                &prefix,
+                &continuation,
                 &format!("{}{}", option.label, suffix),
                 width,
             ),
@@ -3217,7 +3679,15 @@ fn render_onboard_option_lines(options: &[OnboardScreenOption], width: usize) ->
 }
 
 fn render_default_choice_footer_line(key: &str, description: &str) -> String {
-    format!("press Enter to use [{key}], {description}")
+    format!("press Enter to use default {key}, {description}")
+}
+
+fn render_prompt_with_default_text(label: &str, default: &str) -> String {
+    format!("{label} (default: {default}): ")
+}
+
+fn render_onboard_option_prefix(key: &str) -> String {
+    format!("{key}) ")
 }
 
 fn render_default_input_hint_line(description: impl AsRef<str>) -> String {
@@ -3549,9 +4019,8 @@ fn render_preflight_summary_screen_lines_with_style(
     if has_attention {
         summary_lines
             .push(crate::onboard_presentation::preflight_attention_summary_line().to_owned());
-        if counts.fail > 0 {
-            summary_lines
-                .push(crate::onboard_presentation::preflight_probe_rerun_hint().to_owned());
+        if let Some(hint) = preflight_attention_hint_line(checks) {
+            summary_lines.push(hint.to_owned());
         }
     } else {
         summary_lines.push(crate::onboard_presentation::preflight_green_summary_line().to_owned());
@@ -3599,6 +4068,27 @@ fn render_preflight_summary_screen_lines_with_style(
         lines.extend(render_onboard_wrapped_display_lines(footer_lines, width));
     }
     lines
+}
+
+fn preflight_attention_hint_line(checks: &[OnboardCheck]) -> Option<&'static str> {
+    if checks.iter().any(|check| {
+        matches!(
+            check.non_interactive_warning_policy,
+            OnboardNonInteractiveWarningPolicy::RequiresExplicitModel
+        )
+    }) {
+        return Some(crate::onboard_presentation::preflight_explicit_model_rerun_hint());
+    }
+
+    if checks.iter().any(|check| {
+        matches!(
+            check.non_interactive_warning_policy,
+            OnboardNonInteractiveWarningPolicy::RequiresExplicitModelWithoutReviewedDefault
+        )
+    }) {
+        return Some(crate::onboard_presentation::preflight_explicit_model_only_rerun_hint());
+    }
+    None
 }
 
 pub fn render_write_confirmation_screen_lines(
@@ -4048,13 +4538,7 @@ fn render_provider_selection_screen_lines_with_style(
     width: usize,
     color_enabled: bool,
 ) -> Vec<String> {
-    let intro = if plan.imported_choices.is_empty() {
-        vec!["pick the provider that should back this setup".to_owned()]
-    } else if plan.requires_explicit_choice {
-        vec!["other detected settings stay merged".to_owned()]
-    } else {
-        vec!["review the detected provider choices for this setup".to_owned()]
-    };
+    let intro = provider_selection_intro_lines(plan);
     let options = plan
         .imported_choices
         .iter()
@@ -4097,6 +4581,34 @@ fn render_provider_selection_screen_lines_with_style(
         ),
         color_enabled,
     )
+}
+
+fn render_provider_selection_header_lines(
+    plan: &crate::migration::ProviderSelectionPlan,
+    guided_prompt_path: GuidedPromptPath,
+    width: usize,
+) -> Vec<String> {
+    render_onboard_choice_screen(
+        OnboardHeaderStyle::Compact,
+        width,
+        "choose the current provider",
+        "choose active provider",
+        Some((GuidedOnboardStep::Provider, guided_prompt_path)),
+        provider_selection_intro_lines(plan),
+        vec![],
+        vec![],
+        true,
+    )
+}
+
+fn provider_selection_intro_lines(plan: &crate::migration::ProviderSelectionPlan) -> Vec<String> {
+    if plan.imported_choices.is_empty() {
+        vec!["pick the provider that should back this setup".to_owned()]
+    } else if plan.requires_explicit_choice {
+        vec!["other detected settings stay merged".to_owned()]
+    } else {
+        vec!["review the detected provider choices for this setup".to_owned()]
+    }
 }
 
 fn render_provider_selection_default_choice_footer_line(
@@ -4333,6 +4845,7 @@ fn render_system_prompt_selection_screen_lines_with_style(
             } else {
                 render_clear_input_hint_line("use the built-in behavior")
             },
+            ONBOARD_SINGLE_LINE_INPUT_HINT.to_owned(),
         ],
         color_enabled,
     )
@@ -4404,6 +4917,29 @@ fn render_personality_selection_screen_lines_with_style(
     )
 }
 
+fn render_personality_selection_header_lines(
+    config: &mvp::config::LoongClawConfig,
+    width: usize,
+) -> Vec<String> {
+    render_onboard_choice_screen(
+        OnboardHeaderStyle::Compact,
+        width,
+        "choose how LoongClaw should speak and take initiative",
+        "choose personality",
+        Some((
+            GuidedOnboardStep::Personality,
+            GuidedPromptPath::NativePromptPack,
+        )),
+        vec![format!(
+            "- current personality: {}",
+            prompt_personality_id(config.cli.resolved_personality())
+        )],
+        vec![],
+        vec![],
+        true,
+    )
+}
+
 pub fn render_prompt_addendum_selection_screen_lines(
     config: &mvp::config::LoongClawConfig,
     width: usize,
@@ -4439,6 +4975,7 @@ fn render_prompt_addendum_selection_screen_lines_with_style(
         vec![
             "- blank keeps the current addendum".to_owned(),
             "- type '-' to clear it".to_owned(),
+            ONBOARD_SINGLE_LINE_INPUT_HINT.to_owned(),
         ],
         color_enabled,
     )
@@ -4509,6 +5046,27 @@ fn render_memory_profile_selection_screen_lines_with_style(
     )
 }
 
+fn render_memory_profile_selection_header_lines(
+    config: &mvp::config::LoongClawConfig,
+    guided_prompt_path: GuidedPromptPath,
+    width: usize,
+) -> Vec<String> {
+    render_onboard_choice_screen(
+        OnboardHeaderStyle::Compact,
+        width,
+        "choose how much memory context LoongClaw should inject",
+        "choose memory profile",
+        Some((GuidedOnboardStep::MemoryProfile, guided_prompt_path)),
+        vec![format!(
+            "- current profile: {}",
+            memory_profile_id(config.memory.profile)
+        )],
+        vec![],
+        vec![],
+        true,
+    )
+}
+
 pub fn render_existing_config_write_screen_lines(config_path: &str, width: usize) -> Vec<String> {
     render_existing_config_write_screen_lines_with_style(config_path, width, false)
 }
@@ -4576,6 +5134,13 @@ fn render_onboard_review_digest_lines(
         &config.provider.transport_readiness().summary,
         width,
     ));
+    if let Some(provider_endpoint) = config.provider.region_endpoint_note() {
+        lines.extend(mvp::presentation::render_wrapped_text_line(
+            "- provider endpoint: ",
+            &provider_endpoint,
+            width,
+        ));
+    }
 
     if let Some(credential_line) = render_onboard_review_credential_line(&config.provider) {
         lines.push(credential_line);
@@ -5202,7 +5767,8 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::ffi::OsString;
-    use std::sync::MutexGuard;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, MutexGuard};
 
     struct TestOnboardUi {
         inputs: VecDeque<String>,
@@ -5252,6 +5818,36 @@ mod tests {
         }
     }
 
+    struct TestPromptLineReader {
+        blocking_reads: VecDeque<OnboardPromptRead>,
+        pending_lines: VecDeque<String>,
+    }
+
+    impl TestPromptLineReader {
+        fn new(
+            blocking_reads: impl IntoIterator<Item = OnboardPromptRead>,
+            pending_lines: impl IntoIterator<Item = impl Into<String>>,
+        ) -> Self {
+            Self {
+                blocking_reads: blocking_reads.into_iter().collect(),
+                pending_lines: pending_lines.into_iter().map(Into::into).collect(),
+            }
+        }
+    }
+
+    impl OnboardPromptLineReader for TestPromptLineReader {
+        fn read_blocking_line(&mut self) -> CliResult<OnboardPromptRead> {
+            Ok(self
+                .blocking_reads
+                .pop_front()
+                .unwrap_or(OnboardPromptRead::Eof))
+        }
+
+        fn read_pending_line(&mut self) -> CliResult<Option<String>> {
+            Ok(self.pending_lines.pop_front())
+        }
+    }
+
     struct BrowserCompanionEnvGuard {
         _lock: MutexGuard<'static, ()>,
         saved_ready: Option<OsString>,
@@ -5297,6 +5893,40 @@ mod tests {
             Self {
                 _lock: lock,
                 saved_ready,
+            }
+        }
+    }
+
+    struct PasteDrainWindowEnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        saved_value: Option<OsString>,
+    }
+
+    impl PasteDrainWindowEnvGuard {
+        fn set(value: Option<&str>) -> Self {
+            let lock = crate::test_support::lock_daemon_test_environment();
+            let saved_value = std::env::var_os(ONBOARD_PASTE_DRAIN_WINDOW_ENV);
+            match value {
+                Some(value) => set_browser_companion_env_var(ONBOARD_PASTE_DRAIN_WINDOW_ENV, value),
+                None => remove_browser_companion_env_var(ONBOARD_PASTE_DRAIN_WINDOW_ENV),
+            }
+            Self {
+                _lock: lock,
+                saved_value,
+            }
+        }
+    }
+
+    impl Drop for PasteDrainWindowEnvGuard {
+        fn drop(&mut self) {
+            match &self.saved_value {
+                Some(value) => {
+                    set_browser_companion_env_var(
+                        ONBOARD_PASTE_DRAIN_WINDOW_ENV,
+                        &value.to_string_lossy(),
+                    );
+                }
+                None => remove_browser_companion_env_var(ONBOARD_PASTE_DRAIN_WINDOW_ENV),
             }
         }
     }
@@ -5574,6 +6204,10 @@ mod tests {
 
         assert_eq!(check.name, "provider model probe");
         assert_eq!(check.level, OnboardCheckLevel::Fail);
+        assert_eq!(
+            check.non_interactive_warning_policy,
+            OnboardNonInteractiveWarningPolicy::RequiresExplicitModel
+        );
         assert!(
             check.detail.contains("deepseek-chat"),
             "reviewed providers should point users to the reviewed onboarding default when catalog probing is unavailable: {check:#?}"
@@ -5581,6 +6215,44 @@ mod tests {
         assert!(
             check.detail.contains("rerun onboarding"),
             "reviewed providers should suggest rerunning onboarding to accept the reviewed model instead of leaving recovery implicit: {check:#?}"
+        );
+    }
+
+    #[test]
+    fn provider_model_probe_failure_includes_region_hint_for_minimax() {
+        let mut config = mvp::config::LoongClawConfig::default();
+        config.provider.kind = mvp::config::ProviderKind::Minimax;
+        config.provider.model = "auto".to_owned();
+
+        let check =
+            provider_model_probe_failure_check(&config, "provider returned status 401".to_owned());
+
+        assert_eq!(check.name, "provider model probe");
+        assert_eq!(check.level, OnboardCheckLevel::Fail);
+        assert!(
+            check.detail.contains("https://api.minimax.io"),
+            "onboard probe failures for region-sensitive providers should surface the alternate endpoint: {check:#?}"
+        );
+        assert!(
+            check.detail.contains("provider.base_url"),
+            "onboard probe failures should explain the concrete config knob to change: {check:#?}"
+        );
+    }
+
+    #[test]
+    fn provider_model_probe_failure_skips_region_hint_for_non_auth_errors() {
+        let mut config = mvp::config::LoongClawConfig::default();
+        config.provider.kind = mvp::config::ProviderKind::Minimax;
+        config.provider.model = "auto".to_owned();
+
+        let check =
+            provider_model_probe_failure_check(&config, "provider returned status 503".to_owned());
+
+        assert_eq!(check.name, "provider model probe");
+        assert_eq!(check.level, OnboardCheckLevel::Fail);
+        assert!(
+            !check.detail.contains("provider.base_url"),
+            "non-auth probe failures should not steer operators toward region endpoint changes: {check:#?}"
         );
     }
 
@@ -5724,6 +6396,27 @@ mod tests {
         assert_eq!(
             provider.api_key_env, None,
             "switching to the OpenAI oauth env should clear the stale api-key env binding"
+        );
+    }
+
+    #[test]
+    fn apply_selected_api_key_env_routes_unknown_openai_env_to_api_key_binding() {
+        let mut provider = mvp::config::ProviderConfig {
+            kind: mvp::config::ProviderKind::Openai,
+            oauth_access_token_env: Some("OPENAI_CODEX_OAUTH_TOKEN".to_owned()),
+            ..mvp::config::ProviderConfig::default()
+        };
+
+        apply_selected_api_key_env(&mut provider, "OPENAI_ALT_BEARER".to_owned());
+
+        assert_eq!(
+            provider.api_key_env.as_deref(),
+            Some("OPENAI_ALT_BEARER"),
+            "unknown env names should stay on the explicit api-key field instead of being silently rebound to oauth"
+        );
+        assert_eq!(
+            provider.oauth_access_token_env, None,
+            "switching to a custom env name should clear the stale oauth binding"
         );
     }
 
@@ -5909,7 +6602,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_model_selection_prefills_minimax_recommended_model_non_interactively() {
+    fn resolve_model_selection_preserves_minimax_auto_non_interactively() {
         let mut config = mvp::config::LoongClawConfig::default();
         config.provider.kind = mvp::config::ProviderKind::Minimax;
         config.provider.model = "auto".to_owned();
@@ -5938,8 +6631,8 @@ mod tests {
         .expect("resolve model selection");
 
         assert!(
-            selected == "MiniMax-M2.5",
-            "non-interactive onboarding should pick the provider-recommended explicit model for MiniMax instead of preserving auto: {selected:?}"
+            selected == "auto",
+            "non-interactive onboarding should preserve auto for MiniMax instead of silently rewriting the operator config to the reviewed default: {selected:?}"
         );
     }
 
@@ -5979,7 +6672,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_model_selection_prefills_deepseek_recommended_model_non_interactively() {
+    fn resolve_model_selection_preserves_deepseek_auto_non_interactively() {
         let mut config = mvp::config::LoongClawConfig::default();
         config.provider.kind = mvp::config::ProviderKind::Deepseek;
         config.provider.model = "auto".to_owned();
@@ -6008,8 +6701,43 @@ mod tests {
         .expect("resolve model selection");
 
         assert!(
-            selected == "deepseek-chat",
-            "non-interactive onboarding should pick the provider-recommended explicit model for DeepSeek instead of preserving auto: {selected:?}"
+            selected == "auto",
+            "non-interactive onboarding should preserve auto for DeepSeek instead of silently rewriting the operator config to the reviewed default: {selected:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_model_selection_prefills_reviewed_model_for_mixed_case_auto_interactively() {
+        let mut config = mvp::config::LoongClawConfig::default();
+        config.provider.kind = mvp::config::ProviderKind::Deepseek;
+        config.provider.model = "  AUTO  ".to_owned();
+        let mut ui = TestOnboardUi::with_inputs(std::iter::empty::<&str>());
+        let context = OnboardRuntimeContext::new_for_tests(80, None, std::iter::empty::<PathBuf>());
+
+        let selected = resolve_model_selection(
+            &OnboardCommandOptions {
+                output: None,
+                force: false,
+                non_interactive: false,
+                accept_risk: true,
+                provider: None,
+                model: None,
+                api_key_env: None,
+                personality: None,
+                memory_profile: None,
+                system_prompt: None,
+                skip_model_probe: false,
+            },
+            &config,
+            GuidedPromptPath::NativePromptPack,
+            &mut ui,
+            &context,
+        )
+        .expect("resolve model selection");
+
+        assert_eq!(
+            selected, "deepseek-chat",
+            "interactive onboarding should treat mixed-case auto the same as auto when choosing a reviewed provider default"
         );
     }
 
@@ -6104,6 +6832,354 @@ mod tests {
     }
 
     #[test]
+    fn single_line_prompt_capture_drains_follow_up_paste_before_next_prompt() {
+        let mut reader = TestPromptLineReader::new(
+            [
+                OnboardPromptRead::Line("You are helpful.\n".to_owned()),
+                OnboardPromptRead::Line("window-plus-summary\n".to_owned()),
+            ],
+            ["Always be concise.\n"],
+        );
+
+        let first = read_single_line_prompt_capture(&mut reader)
+            .expect("first prompt capture should succeed");
+        let second = read_single_line_prompt_capture(&mut reader)
+            .expect("second prompt capture should consume the next real prompt line");
+
+        assert_eq!(first.raw, "You are helpful.\n");
+        assert_eq!(first.dropped_line_count, 1);
+        assert!(!first.reached_eof);
+        assert_eq!(second.raw, "window-plus-summary\n");
+        assert_eq!(second.dropped_line_count, 0);
+        assert!(!second.reached_eof);
+    }
+
+    #[test]
+    fn onboard_paste_drain_window_prefers_valid_env_override() {
+        let _guard = PasteDrainWindowEnvGuard::set(Some("125"));
+
+        assert_eq!(onboard_paste_drain_window(), Duration::from_millis(125));
+    }
+
+    #[test]
+    fn onboard_paste_drain_window_falls_back_for_invalid_env_values() {
+        let _guard = PasteDrainWindowEnvGuard::set(Some("not-a-number"));
+
+        assert_eq!(
+            onboard_paste_drain_window(),
+            DEFAULT_ONBOARD_PASTE_DRAIN_WINDOW
+        );
+    }
+
+    #[test]
+    fn onboard_paste_drain_window_rejects_zero_millisecond_override() {
+        let _guard = PasteDrainWindowEnvGuard::set(Some("0"));
+
+        assert_eq!(
+            onboard_paste_drain_window(),
+            DEFAULT_ONBOARD_PASTE_DRAIN_WINDOW
+        );
+    }
+
+    #[test]
+    fn onboard_line_channel_applies_backpressure_after_buffer_limit() {
+        let (sender, receiver) = onboard_line_channel_with_capacity(1);
+        let second_send_completed = Arc::new(AtomicBool::new(false));
+        let completed_flag = Arc::clone(&second_send_completed);
+        let producer = thread::spawn(move || {
+            sender
+                .send(StdioOnboardLineMessage::Line("system prompt\n".to_owned()))
+                .expect("send first line");
+            sender
+                .send(StdioOnboardLineMessage::Line(
+                    "follow-up paste\n".to_owned(),
+                ))
+                .expect("send second line after receiver drains");
+            completed_flag.store(true, Ordering::SeqCst);
+        });
+
+        for _ in 0..1_000 {
+            if second_send_completed.load(Ordering::SeqCst) {
+                break;
+            }
+            thread::yield_now();
+        }
+        assert!(
+            !second_send_completed.load(Ordering::SeqCst),
+            "bounded onboarding queue should apply backpressure once the first buffered line is occupied"
+        );
+
+        let mut reader = StdioOnboardLineReader::background_from_receiver(receiver);
+        let capture = read_single_line_prompt_capture(&mut reader)
+            .expect("capture should drain the queued follow-up line");
+        producer.join().expect("producer join");
+
+        assert_eq!(capture.raw, "system prompt\n");
+        assert_eq!(capture.dropped_line_count, 1);
+        assert!(!capture.reached_eof);
+        assert!(
+            second_send_completed.load(Ordering::SeqCst),
+            "receiver drain should unblock the producer once capacity is freed"
+        );
+    }
+
+    #[test]
+    fn stdio_onboard_line_reader_warns_once_when_background_spawn_fails() {
+        let mut reader = StdioOnboardLineReader::from_spawn_result(Err(io::Error::other(
+            "thread quota exhausted",
+        )));
+
+        assert!(
+            matches!(reader, StdioOnboardLineReader::Direct { .. }),
+            "spawn failure should fall back to direct reads instead of constructing a broken background reader"
+        );
+
+        let first_notice = reader
+            .take_degraded_notice()
+            .expect("spawn failure should surface a degraded-mode notice");
+        assert!(
+            first_notice.contains("single-line paste draining is disabled"),
+            "spawn failure notice should explain the lost hardening: {first_notice}"
+        );
+        assert_eq!(
+            reader.take_degraded_notice(),
+            None,
+            "degraded-mode notice should only be emitted once per session"
+        );
+    }
+
+    #[test]
+    fn prompt_addendum_screen_mentions_single_line_terminal_input() {
+        let lines = render_prompt_addendum_selection_screen_lines(
+            &mvp::config::LoongClawConfig::default(),
+            80,
+        );
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("single line") && line.contains("ignored")),
+            "prompt addendum screen should explain how terminal onboarding handles pasted multiline text: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn system_prompt_screen_mentions_single_line_terminal_input() {
+        let lines = render_system_prompt_selection_screen_lines(
+            &mvp::config::LoongClawConfig::default(),
+            80,
+        );
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("single line") && line.contains("ignored")),
+            "system prompt screen should explain how terminal onboarding handles pasted multiline text: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn test_onboard_ui_select_one_cancels_on_escape_input() {
+        let mut ui = TestOnboardUi::with_inputs(["\u{1b}"]);
+        let options = vec![SelectOption {
+            label: "OpenAI".to_owned(),
+            slug: "openai".to_owned(),
+            description: String::new(),
+            recommended: true,
+        }];
+
+        let error = ui
+            .select_one("Provider", &options, Some(0))
+            .expect_err("escape input should cancel selection instead of surfacing a parse error");
+
+        assert!(
+            error.contains("cancelled"),
+            "escape cancellation should stay user-facing for selection prompts: {error}"
+        );
+    }
+
+    #[test]
+    fn validate_select_one_state_rejects_empty_options() {
+        let error = validate_select_one_state(0, None)
+            .expect_err("select_one should reject empty option lists before prompting");
+
+        assert!(
+            error.contains("no selection options"),
+            "empty option lists should return a clear error: {error}"
+        );
+    }
+
+    #[test]
+    fn validate_select_one_state_rejects_out_of_bounds_default() {
+        let error = validate_select_one_state(2, Some(2))
+            .expect_err("select_one should reject a default index that is outside the option list");
+
+        assert!(
+            error.contains("default selection index"),
+            "invalid default index should be reported clearly: {error}"
+        );
+    }
+
+    #[test]
+    fn default_choice_footer_avoids_bracket_default_syntax() {
+        assert_eq!(
+            render_default_choice_footer_line("1", "keep current setup"),
+            "press Enter to use default 1, keep current setup"
+        );
+    }
+
+    #[test]
+    fn prompt_with_default_text_avoids_bracket_default_syntax() {
+        assert_eq!(
+            render_prompt_with_default_text("Setup path", "1"),
+            "Setup path (default: 1): "
+        );
+    }
+
+    #[test]
+    fn render_onboard_option_lines_avoid_bracketed_choice_tokens() {
+        let lines = render_onboard_option_lines(
+            &[OnboardScreenOption {
+                key: "1".to_owned(),
+                label: "Keep current setup".to_owned(),
+                detail_lines: vec!["reuse the detected setup".to_owned()],
+                recommended: true,
+            }],
+            80,
+        );
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("1) Keep current setup (recommended)")),
+            "choice rows should present plain option markers instead of bracket wrappers: {lines:#?}"
+        );
+        assert!(
+            lines.iter().all(|line| !line.contains("[1]")),
+            "choice rows should not imply that brackets are part of the expected input syntax: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn render_onboard_option_lines_align_wrapped_labels_with_option_prefix() {
+        let lines = render_onboard_option_lines(
+            &[OnboardScreenOption {
+                key: "friendly_collab".to_owned(),
+                label: "friendly collab keeps longer wrapped labels aligned".to_owned(),
+                detail_lines: Vec::new(),
+                recommended: false,
+            }],
+            28,
+        );
+        let continuation = lines
+            .iter()
+            .find(|line| line.starts_with(' ') && !line.trim().is_empty())
+            .expect("wrapped option labels should emit a continuation line");
+
+        assert!(
+            continuation.starts_with(
+                &" ".repeat(
+                    render_onboard_option_prefix("friendly_collab")
+                        .chars()
+                        .count()
+                )
+            ),
+            "wrapped option labels should continue under the label text instead of snapping back to a fixed indent: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn onboard_ui_select_one_default_impl_accepts_slug_input() {
+        struct FallbackSelectUi {
+            input: Option<String>,
+        }
+
+        impl OnboardUi for FallbackSelectUi {
+            fn print_line(&mut self, _line: &str) -> CliResult<()> {
+                Ok(())
+            }
+
+            fn prompt_with_default(&mut self, _label: &str, _default: &str) -> CliResult<String> {
+                Ok(self.input.take().unwrap_or_default())
+            }
+
+            fn prompt_required(&mut self, _label: &str) -> CliResult<String> {
+                Ok(self.input.take().unwrap_or_default())
+            }
+
+            fn prompt_confirm(&mut self, _message: &str, default: bool) -> CliResult<bool> {
+                Ok(default)
+            }
+        }
+
+        let mut ui = FallbackSelectUi {
+            input: Some("friendly_collab".to_owned()),
+        };
+        let options = vec![
+            SelectOption {
+                label: "calm engineering".to_owned(),
+                slug: "calm_engineering".to_owned(),
+                description: String::new(),
+                recommended: true,
+            },
+            SelectOption {
+                label: "friendly collab".to_owned(),
+                slug: "friendly_collab".to_owned(),
+                description: String::new(),
+                recommended: false,
+            },
+        ];
+
+        let index = ui
+            .select_one("Personality", &options, Some(0))
+            .expect("default trait implementation should accept slug input");
+
+        assert_eq!(index, 1);
+    }
+
+    #[test]
+    fn test_onboard_ui_select_one_accepts_slug_input() {
+        let mut ui = TestOnboardUi::with_inputs(["friendly_collab"]);
+        let options = vec![
+            SelectOption {
+                label: "calm engineering".to_owned(),
+                slug: "calm_engineering".to_owned(),
+                description: String::new(),
+                recommended: true,
+            },
+            SelectOption {
+                label: "friendly collab".to_owned(),
+                slug: "friendly_collab".to_owned(),
+                description: String::new(),
+                recommended: false,
+            },
+        ];
+
+        let index = ui
+            .select_one("Personality", &options, Some(0))
+            .expect("test ui should stay aligned with shared slug-selection behavior");
+
+        assert_eq!(index, 1);
+    }
+
+    #[test]
+    fn resolve_select_one_eof_returns_default_when_available() {
+        let idx = resolve_select_one_eof(Some(1)).expect("EOF should fall back to the default");
+        assert_eq!(idx, 1);
+    }
+
+    #[test]
+    fn resolve_select_one_eof_errors_when_selection_is_required() {
+        let error = resolve_select_one_eof(None)
+            .expect_err("EOF without a default should terminate instead of looping forever");
+
+        assert!(
+            error.contains("stdin closed"),
+            "required selections should surface EOF as a terminal error: {error}"
+        );
+    }
+
+    #[test]
     fn shortcut_screen_footer_mentions_escape_cancel() {
         let lines = render_continue_current_setup_screen_lines(
             &mvp::config::LoongClawConfig::default(),
@@ -6134,6 +7210,80 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("Esc") && line.contains("cancel")),
             "interactive preflight review should teach the exit gesture explicitly: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn preflight_summary_uses_explicit_model_guidance_for_reviewed_auto_failures() {
+        let mut config = mvp::config::LoongClawConfig::default();
+        config.provider.kind = mvp::config::ProviderKind::Deepseek;
+        config.provider.model = "auto".to_owned();
+
+        let check = provider_model_probe_failure_check(
+            &config,
+            "provider rejected the model list".to_owned(),
+        );
+        let lines = render_preflight_summary_screen_lines(&[check], 80);
+
+        assert!(
+            lines.iter().any(|line| {
+                line.contains("rerun onboarding to choose a reviewed model")
+                    || line.contains("set provider.model / preferred_models explicitly")
+            }),
+            "reviewed auto-model failures should keep the explicit-model remediation visible in the summary: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line.contains("--skip-model-probe")),
+            "reviewed auto-model failures should not suggest --skip-model-probe because that contradicts the explicit-model recovery path: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn preflight_summary_uses_explicit_model_only_guidance_without_reviewed_default() {
+        let mut config = mvp::config::LoongClawConfig::default();
+        config.provider.kind = mvp::config::ProviderKind::Custom;
+        config.provider.model = "auto".to_owned();
+
+        let check = provider_model_probe_failure_check(
+            &config,
+            "provider rejected the model list".to_owned(),
+        );
+        let lines = render_preflight_summary_screen_lines(&[check], 80);
+
+        assert!(
+            lines.iter().any(|line| {
+                line == crate::onboard_presentation::preflight_explicit_model_only_rerun_hint()
+            }),
+            "providers without a reviewed model should keep the summary hint aligned with the explicit-model-only recovery path: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line.contains("choose a reviewed model")),
+            "providers without a reviewed model should not advertise a reviewed-model recovery path that does not exist: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn preflight_summary_omits_skip_model_probe_rerun_hint_after_probe_is_already_skipped() {
+        let lines = render_preflight_summary_screen_lines(
+            &[OnboardCheck {
+                name: "provider model probe",
+                level: OnboardCheckLevel::Warn,
+                detail: "skipped by --skip-model-probe".to_owned(),
+                non_interactive_warning_policy:
+                    OnboardNonInteractiveWarningPolicy::AcceptedBySkipModelProbe,
+            }],
+            80,
+        );
+
+        assert!(
+            lines.iter().all(|line| {
+                line.as_str() != crate::onboard_presentation::preflight_probe_rerun_hint()
+            }),
+            "preflight should not suggest rerunning with --skip-model-probe after the current run already skipped the probe: {lines:#?}"
         );
     }
 

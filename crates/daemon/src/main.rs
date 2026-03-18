@@ -2,8 +2,41 @@
 use clap::Parser;
 use loongclaw_daemon::*;
 
+/// Discard any unread input from the terminal's tty input queue.
+///
+/// When a user pastes multi-line text at an interactive prompt, `read_line()`
+/// consumes only the first line. The remaining lines stay in the kernel's tty
+/// input queue (cooked mode). If the process exits without draining, the parent
+/// shell reads those lines as commands — a potential code execution vector.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn flush_stdin() {
+    // SAFETY: tcflush is a POSIX function that discards unread terminal input.
+    // STDIN_FILENO is a well-defined constant. No memory or resource concerns.
+    unsafe {
+        libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH);
+    }
+}
+
+#[cfg(not(unix))]
+fn flush_stdin() {}
+
+/// Guard that flushes the terminal input queue on drop.
+///
+/// Covers normal return and panic unwinding. For `process::exit()` paths,
+/// `flush_stdin()` must be called explicitly before exit since
+/// `process::exit()` does not run destructors.
+struct StdinGuard;
+
+impl Drop for StdinGuard {
+    fn drop(&mut self) {
+        flush_stdin();
+    }
+}
+
 #[tokio::main]
 async fn main() {
+    let _stdin_guard = StdinGuard;
     let cli = Cli::parse();
     let result = match cli.command.unwrap_or(Commands::Demo) {
         Commands::Demo => run_demo().await,
@@ -417,6 +450,7 @@ async fn main() {
         {
             eprintln!("error: {error}");
         }
+        flush_stdin();
         std::process::exit(2);
     }
 }
