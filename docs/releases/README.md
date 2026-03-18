@@ -17,6 +17,7 @@ Required sections in each canonical release document:
 
 - `# Release vX.Y.Z` or `# Release vX.Y.Z-alpha.N`
 - `## Summary`
+- `## Highlights`
 - `## Process`
 - `## Artifacts`
 - `## Verification`

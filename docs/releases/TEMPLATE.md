@@ -8,6 +8,9 @@
 - Trace ID:
 - Trace path:
 
+## Highlights
+- README-level release summary bullet.
+
 ## Process
 - Date:
 - Owner:
@@ -44,3 +47,4 @@
 - [GitHub release page](https://github.com/loongclaw-ai/loongclaw/releases/tag/vX.Y.Z[-suffix])
 - [Release workflow definition](../../.github/workflows/release.yml)
 - Trace directory: `.docs/traces/<timestamp>-<command>-<tag>-<trace-id>`
+- Local debug log: `.docs/releases/vX.Y.Z[-suffix]-debug.md`

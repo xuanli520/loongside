@@ -25,6 +25,67 @@ assert_file_equals() {
   fi
 }
 
+write_fixture_release_doc() {
+  local path="$1"
+  local tag="$2"
+  local prerelease="$3"
+  local trace_id="$4"
+  local trace_path="$5"
+  local workflow_run_id="$6"
+
+  cat >"$path" <<EOF
+# Release ${tag}
+
+## Summary
+- Generated at: 2026-03-09T05:39:43Z
+- Release status: published (draft=false, prerelease=${prerelease})
+- Target commitish: \`dev\`
+- Artifact count: 1
+- Trace ID: \`${trace_id}\`
+- Trace path: \`${trace_path}\`
+
+## Highlights
+- Fixture release doc for ${tag}.
+
+## Process
+- Date: 2026-03-09T05:39:43Z
+- Owner: fixture
+- Scope summary: fixture release for ${tag}.
+- Gates run: task verify
+- Refactor budget item: fixture placeholder
+
+## Artifacts
+| Asset | Size (bytes) | SHA256 | Download |
+|---|---:|---|---|
+| \`loongclaw-${tag}-x86_64-unknown-linux-gnu.tar.gz\` | 1 | \`deadbeef\` | [link](https://github.com/loongclaw-ai/loongclaw/releases/download/${tag}/linux.tar.gz) |
+
+## Verification
+| Check | Result | Evidence |
+|---|---|---|
+| Release workflow completed successfully | PASS | [workflow run](https://github.com/loongclaw-ai/loongclaw/actions/runs/${workflow_run_id}) |
+| GitHub release is not draft | PASS | [release page](https://github.com/loongclaw-ai/loongclaw/releases/tag/${tag}) |
+
+## Refactor Budget
+- Hotspot metric paid down: none
+- Evidence: fixture
+- If no paydown shipped, rationale: fixture
+
+## Known Issues
+- None observed during fixture verification.
+
+## Rollback
+- Re-run the release workflow and replace assets.
+
+## Detail Links
+- [Changelog entry](../../CHANGELOG.md)
+- [Release workflow run](https://github.com/loongclaw-ai/loongclaw/actions/runs/${workflow_run_id})
+- [GitHub release page](https://github.com/loongclaw-ai/loongclaw/releases/tag/${tag})
+- [Release workflow definition](../../.github/workflows/release.yml)
+- Trace directory: \`${trace_path}\`
+- Local debug log: \`.docs/releases/${tag}-debug.md\`
+EOF
+}
+
 make_fixture_repo() {
   local fixture
   fixture="$(mktemp -d)"
@@ -39,11 +100,30 @@ make_fixture_repo() {
   chmod +x "$fixture/scripts/check-docs.sh"
   cp "$REPO_ROOT/docs/releases/README.md" "$fixture/docs/releases/README.md"
   cp "$REPO_ROOT/docs/releases/TEMPLATE.md" "$fixture/docs/releases/TEMPLATE.md"
-  cp "$REPO_ROOT/docs/releases/v0.1.0.md" "$fixture/docs/releases/v0.1.0.md"
-  cp "$REPO_ROOT/docs/releases/v0.1.1.md" "$fixture/docs/releases/v0.1.1.md"
-  cp "$REPO_ROOT/docs/releases/v0.1.2.md" "$fixture/docs/releases/v0.1.2.md"
   cp "$REPO_ROOT/.github/ISSUE_TEMPLATE/config.yml" "$fixture/.github/ISSUE_TEMPLATE/config.yml"
   cp "$REPO_ROOT/.github/workflows/release.yml" "$fixture/.github/workflows/release.yml"
+
+  write_fixture_release_doc \
+    "$fixture/docs/releases/v0.1.0.md" \
+    "v0.1.0" \
+    "false" \
+    "78eec94e" \
+    ".docs/traces/20260309T045436Z-post-release-v0.1.0-78eec94e" \
+    "10"
+  write_fixture_release_doc \
+    "$fixture/docs/releases/v0.1.1.md" \
+    "v0.1.1" \
+    "false" \
+    "6cacc588" \
+    ".docs/traces/20260309T045437Z-post-release-v0.1.1-6cacc588" \
+    "11"
+  write_fixture_release_doc \
+    "$fixture/docs/releases/v0.1.2.md" \
+    "v0.1.2" \
+    "false" \
+    "020e2a67" \
+    ".docs/traces/20260309T053941Z-post-release-v0.1.2-020e2a67" \
+    "12"
 
   cat >"$fixture/CHANGELOG.md" <<'EOF'
 # Changelog
@@ -233,6 +313,30 @@ run_prerelease_bootstrap_roundtrip_test() {
     cd "$fixture" &&
       LOONGCLAW_RELEASE_DOCS_STRICT=1 scripts/check-docs.sh >/dev/null
   )
+}
+
+run_release_doc_highlights_required_test() {
+  local fixture
+  fixture="$(make_prerelease_fixture_repo)"
+  trap 'rm -rf "$fixture"' RETURN
+
+  local strict_output="$fixture/strict-highlights.txt"
+  local release_doc="$fixture/docs/releases/v0.1.0-alpha.1.md"
+
+  LOONGCLAW_RELEASE_ARTIFACTS_REPO_ROOT="$fixture" "$SCRIPT_UNDER_TEST"
+
+  perl -0pi -e 's/^## Highlights\n.*?\n## Process\n/## Process\n/ms' "$release_doc"
+
+  if (
+    cd "$fixture" &&
+      LOONGCLAW_RELEASE_DOCS_STRICT=1 scripts/check-docs.sh >"$strict_output" 2>&1
+  ); then
+    echo "expected strict doc check to fail when highlights are missing" >&2
+    cat "$strict_output" >&2
+    exit 1
+  fi
+
+  assert_contains "$strict_output" "missing section '## Highlights'"
 }
 
 run_release_doc_linkage_consistency_test() {
@@ -516,6 +620,7 @@ run_debug_doc_trace_consistency_test() {
 
 run_bootstrap_roundtrip_test
 run_prerelease_bootstrap_roundtrip_test
+run_release_doc_highlights_required_test
 run_release_doc_linkage_consistency_test
 run_trace_identity_consistency_test
 run_bootstrap_fails_on_inconsistent_trace_identity_test
