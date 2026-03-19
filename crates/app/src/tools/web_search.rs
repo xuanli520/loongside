@@ -168,9 +168,8 @@ fn parse_duckduckgo_html(html: &str, query: &str, max_results: usize) -> Result<
     }
 
     let mut results = Vec::new();
-    let link_matches_to_process: Vec<_> = link_matches.iter().take(max_results).collect();
 
-    for (i, caps) in link_matches_to_process.iter().enumerate() {
+    for (i, caps) in link_matches.iter().take(max_results).enumerate() {
         let Some(full_match) = caps.get(0) else {
             continue;
         };
@@ -178,7 +177,7 @@ fn parse_duckduckgo_html(html: &str, query: &str, max_results: usize) -> Result<
         let title = strip_html_tags(&caps[2]);
 
         let search_start = full_match.end();
-        let search_end = link_matches_to_process
+        let search_end = link_matches
             .get(i + 1)
             .and_then(|next_caps| next_caps.get(0))
             .map(|m| m.start())
@@ -211,13 +210,18 @@ fn parse_duckduckgo_html(html: &str, query: &str, max_results: usize) -> Result<
 
 #[cfg(feature = "tool-websearch")]
 fn decode_ddg_url(raw: &str) -> String {
-    // Only treat as a DDG redirect if it's a valid DDG redirect URL
-    // Check if the URL is a DuckDuckGo redirect (duckduckgo.com/l/ or has duckduckgo host with uddg=)
-    if let Ok(url) = Url::parse(raw) {
+    let normalized = if raw.starts_with("//") {
+        format!("https:{raw}")
+    } else if raw.starts_with("/l/") {
+        format!("https://duckduckgo.com{raw}")
+    } else {
+        raw.to_owned()
+    };
+
+    if let Ok(url) = Url::parse(&normalized) {
         let is_ddg_host = url
             .host_str()
-            .map(|h| h.ends_with("duckduckgo.com"))
-            .unwrap_or(false);
+            .is_some_and(|host| host == "duckduckgo.com" || host.ends_with(".duckduckgo.com"));
         let is_ddg_redirect = is_ddg_host && url.path().starts_with("/l/");
         if is_ddg_redirect
             && let Some(encoded) = url.query_pairs().find(|(k, _)| k == "uddg").map(|(_, v)| v)
@@ -643,11 +647,8 @@ mod tests {
     fn web_search_disabled_returns_error() {
         let mut config = test_config();
         config.web_search.enabled = false;
-        let error = execute_web_search_tool_with_config(
-            request(json!({"query": "test"})),
-            &config,
-        )
-        .expect_err("should reject when disabled");
+        let error = execute_web_search_tool_with_config(request(json!({"query": "test"})), &config)
+            .expect_err("should reject when disabled");
         assert!(
             error.contains("disabled by config"),
             "unexpected error: {error}"
