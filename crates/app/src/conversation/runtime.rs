@@ -791,13 +791,15 @@ fn delegate_child_runtime_contract_prompt_summary(
 }
 
 fn merge_system_prompt_additions(existing: Option<&str>, extra: Option<&str>) -> Option<String> {
-    let merged = [existing, extra]
-        .into_iter()
-        .flatten()
-        .map(str::trim)
-        .filter(|content| !content.is_empty())
-        .collect::<Vec<_>>();
-    (!merged.is_empty()).then(|| merged.join("\n\n"))
+    match (
+        existing.map(str::trim).filter(|s| !s.is_empty()),
+        extra.map(str::trim).filter(|s| !s.is_empty()),
+    ) {
+        (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
+        (Some(a), None) => Some(a.to_owned()),
+        (None, Some(b)) => Some(b.to_owned()),
+        (None, None) => None,
+    }
 }
 
 fn apply_system_prompt_addition(messages: &mut Vec<Value>, addition: Option<&str>) {

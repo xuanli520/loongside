@@ -480,7 +480,7 @@ impl ToolRuntimeConfig {
     }
 
     #[must_use]
-    pub fn delegate_child_prompt_summary(
+    pub(crate) fn delegate_child_prompt_summary(
         &self,
         narrowing: &ToolRuntimeNarrowing,
     ) -> Option<String> {
@@ -1486,6 +1486,131 @@ Plan within these child-session runtime limits:\n\
 - browser max links: 4\n\
 - browser max text chars: 512\n\
 Treat these as enforced limits for this child session."
+        );
+    }
+
+    #[test]
+    fn delegate_child_prompt_summary_omits_disabled_web_fetch() {
+        let base = ToolRuntimeConfig {
+            web_fetch: WebFetchRuntimePolicy {
+                enabled: false,
+                allow_private_hosts: true,
+                enforce_allowed_domains: false,
+                allowed_domains: BTreeSet::new(),
+                blocked_domains: BTreeSet::new(),
+                timeout_seconds: 30,
+                max_bytes: 1_048_576,
+                max_redirects: 5,
+            },
+            browser: BrowserRuntimePolicy {
+                enabled: true,
+                max_sessions: 4,
+                max_links: 16,
+                max_text_chars: 8_192,
+            },
+            ..ToolRuntimeConfig::default()
+        };
+        let narrowing = ToolRuntimeNarrowing {
+            web_fetch: WebFetchRuntimeNarrowing {
+                allow_private_hosts: Some(false),
+                timeout_seconds: Some(5),
+                ..WebFetchRuntimeNarrowing::default()
+            },
+            browser: BrowserRuntimeNarrowing {
+                max_sessions: Some(2),
+                ..BrowserRuntimeNarrowing::default()
+            },
+        };
+
+        let summary = base
+            .delegate_child_prompt_summary(&narrowing)
+            .expect("should still render browser section");
+
+        assert!(
+            !summary.contains("web.fetch"),
+            "disabled web_fetch fields should not appear in prompt summary: {summary}"
+        );
+        assert!(
+            summary.contains("- browser max sessions: 2"),
+            "enabled browser fields should still appear: {summary}"
+        );
+    }
+
+    #[test]
+    fn delegate_child_prompt_summary_omits_disabled_browser() {
+        let base = ToolRuntimeConfig {
+            web_fetch: WebFetchRuntimePolicy {
+                enabled: true,
+                allow_private_hosts: true,
+                enforce_allowed_domains: false,
+                allowed_domains: BTreeSet::new(),
+                blocked_domains: BTreeSet::new(),
+                timeout_seconds: 30,
+                max_bytes: 1_048_576,
+                max_redirects: 5,
+            },
+            browser: BrowserRuntimePolicy {
+                enabled: false,
+                max_sessions: 4,
+                max_links: 16,
+                max_text_chars: 8_192,
+            },
+            ..ToolRuntimeConfig::default()
+        };
+        let narrowing = ToolRuntimeNarrowing {
+            web_fetch: WebFetchRuntimeNarrowing {
+                timeout_seconds: Some(5),
+                ..WebFetchRuntimeNarrowing::default()
+            },
+            browser: BrowserRuntimeNarrowing {
+                max_sessions: Some(2),
+                max_links: Some(8),
+                ..BrowserRuntimeNarrowing::default()
+            },
+        };
+
+        let summary = base
+            .delegate_child_prompt_summary(&narrowing)
+            .expect("should still render web_fetch section");
+
+        assert!(
+            !summary.contains("browser"),
+            "disabled browser fields should not appear in prompt summary: {summary}"
+        );
+        assert!(
+            summary.contains("- web.fetch timeout seconds: 5"),
+            "enabled web_fetch fields should still appear: {summary}"
+        );
+    }
+
+    #[test]
+    fn delegate_child_prompt_summary_returns_none_when_all_tools_disabled() {
+        let base = ToolRuntimeConfig {
+            web_fetch: WebFetchRuntimePolicy {
+                enabled: false,
+                ..WebFetchRuntimePolicy::default()
+            },
+            browser: BrowserRuntimePolicy {
+                enabled: false,
+                ..BrowserRuntimePolicy::default()
+            },
+            ..ToolRuntimeConfig::default()
+        };
+        let narrowing = ToolRuntimeNarrowing {
+            web_fetch: WebFetchRuntimeNarrowing {
+                timeout_seconds: Some(5),
+                ..WebFetchRuntimeNarrowing::default()
+            },
+            browser: BrowserRuntimeNarrowing {
+                max_sessions: Some(2),
+                ..BrowserRuntimeNarrowing::default()
+            },
+        };
+
+        assert_eq!(
+            base.delegate_child_prompt_summary(&narrowing),
+            None,
+            "should return None when all narrowed tools are disabled"
         );
     }
 
