@@ -195,7 +195,7 @@ pub struct WebToolConfig {
     pub max_redirects: usize,
 }
 
-pub const DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS: u64 = 10;
+pub const DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS: u64 = 30;
 pub const DEFAULT_WEB_SEARCH_MAX_RESULTS: usize = 5;
 pub(crate) const MIN_WEB_SEARCH_TIMEOUT_SECONDS: usize = 1;
 pub(crate) const MAX_WEB_SEARCH_TIMEOUT_SECONDS: usize = 60;
@@ -533,6 +533,45 @@ impl ToolConfig {
                 example_env_name: "LOONGCLAW_WEB_SEARCH_PROVIDER".to_owned(),
                 suggested_env_name: Some("LOONGCLAW_WEB_SEARCH_PROVIDER".to_owned()),
                 extra_message_variables,
+            });
+        }
+        // Validate that keyed providers have their API keys configured
+        if self.web_search.default_provider == "brave"
+            && self
+                .web_search
+                .brave_api_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_none()
+        {
+            issues.push(ConfigValidationIssue {
+                severity: super::shared::ConfigValidationSeverity::Error,
+                code: super::shared::ConfigValidationCode::MissingRequiredField,
+                field_path: "tools.web_search.brave_api_key".to_owned(),
+                inline_field_path: "tools.web_search.brave_api_key".to_owned(),
+                example_env_name: "BRAVE_API_KEY".to_owned(),
+                suggested_env_name: Some("BRAVE_API_KEY".to_owned()),
+                extra_message_variables: std::collections::BTreeMap::new(),
+            });
+        }
+        if self.web_search.default_provider == "tavily"
+            && self
+                .web_search
+                .tavily_api_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_none()
+        {
+            issues.push(ConfigValidationIssue {
+                severity: super::shared::ConfigValidationSeverity::Error,
+                code: super::shared::ConfigValidationCode::MissingRequiredField,
+                field_path: "tools.web_search.tavily_api_key".to_owned(),
+                inline_field_path: "tools.web_search.tavily_api_key".to_owned(),
+                example_env_name: "TAVILY_API_KEY".to_owned(),
+                suggested_env_name: Some("TAVILY_API_KEY".to_owned()),
+                extra_message_variables: std::collections::BTreeMap::new(),
             });
         }
         issues

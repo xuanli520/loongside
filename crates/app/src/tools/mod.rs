@@ -1749,7 +1749,8 @@ mod tests {
     #[cfg(all(
         feature = "tool-file",
         feature = "tool-shell",
-        feature = "memory-sqlite"
+        feature = "memory-sqlite",
+        feature = "tool-websearch"
     ))]
     #[test]
     fn tool_registry_returns_runtime_discoverable_tools_for_default_config() {

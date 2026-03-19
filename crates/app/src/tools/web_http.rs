@@ -105,6 +105,8 @@ pub fn build_ssrf_safe_client(
         .dns_resolver(Arc::new(resolver))
         .timeout(std::time::Duration::from_secs(timeout_seconds))
         .user_agent(user_agent)
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
         .build()
         .map_err(|error| format!("failed to build SSRF-safe HTTP client: {error}"))
 }
@@ -170,5 +172,6 @@ pub(crate) fn is_private_or_special_ipv6(ip: std::net::Ipv6Addr) -> bool {
     let segments = ip.segments();
     ((segments[0] & 0xfe00) == 0xfc00)
         || ((segments[0] & 0xffc0) == 0xfe80)
+        || ((segments[0] & 0xffc0) == 0xfec0)
         || (segments[0] == 0x2001 && segments[1] == 0x0db8)
 }

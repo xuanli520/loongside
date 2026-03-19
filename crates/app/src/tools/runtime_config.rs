@@ -399,12 +399,18 @@ impl ToolRuntimeConfig {
             .unwrap_or(crate::config::DEFAULT_WEB_FETCH_MAX_REDIRECTS);
         let web_search_enabled = parse_env_bool("LOONGCLAW_WEB_SEARCH_ENABLED").unwrap_or(true);
         let web_search_default_provider = parse_env_string("LOONGCLAW_WEB_SEARCH_PROVIDER")
+            .map(|provider| provider.to_ascii_lowercase())
+            .filter(|provider| {
+                matches!(provider.as_str(), "duckduckgo" | "ddg" | "brave" | "tavily")
+            })
             .unwrap_or_else(|| "duckduckgo".to_owned());
         let web_search_brave_api_key = std::env::var("BRAVE_API_KEY").ok();
         let web_search_tavily_api_key = std::env::var("TAVILY_API_KEY").ok();
         let web_search_timeout_seconds = parse_env_u64("LOONGCLAW_WEB_SEARCH_TIMEOUT_SECONDS")
+            .map(|seconds| seconds.clamp(1, 60))
             .unwrap_or(crate::config::DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS);
         let web_search_max_results = parse_env_usize("LOONGCLAW_WEB_SEARCH_MAX_RESULTS")
+            .map(|count| count.clamp(1, 10))
             .unwrap_or(crate::config::DEFAULT_WEB_SEARCH_MAX_RESULTS);
         let enabled = parse_env_bool("LOONGCLAW_EXTERNAL_SKILLS_ENABLED").unwrap_or(false);
         let require_download_approval =

@@ -52,14 +52,27 @@ fn execute_web_search_tool_enabled(
         ));
     }
 
-    let provider_override = payload.get("provider").and_then(Value::as_str);
+    let provider_override = match payload.get("provider") {
+        Some(value) => Some(
+            value
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "web.search payload.provider must be a string".to_owned())?,
+        ),
+        None => None,
+    };
 
-    let max_results = payload
-        .get("max_results")
-        .and_then(Value::as_u64)
-        .map(|v| v as usize)
-        .unwrap_or(config.web_search.max_results)
-        .clamp(1, 10);
+    let max_results = match payload.get("max_results") {
+        Some(value) => usize::try_from(
+            value
+                .as_u64()
+                .ok_or_else(|| "web.search payload.max_results must be an integer".to_owned())?,
+        )
+        .map_err(|error| format!("invalid web.search payload.max_results: {error}"))?,
+        None => config.web_search.max_results,
+    }
+    .clamp(1, 10);
 
     let provider = provider_override.unwrap_or(&config.web_search.default_provider);
 
@@ -249,9 +262,12 @@ async fn search_brave(
     timeout_seconds: u64,
     api_key: Option<&str>,
 ) -> Result<Value, String> {
-    let api_key = api_key.ok_or(
-        "Brave API key not configured. Set tools.web_search.brave_api_key in config or BRAVE_API_KEY environment variable.",
-    )?;
+    let api_key = api_key
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or(
+            "Brave API key not configured. Set tools.web_search.brave_api_key in config or BRAVE_API_KEY environment variable.",
+        )?;
 
     let url = reqwest::Url::parse_with_params(
         "https://api.search.brave.com/res/v1/web/search",
@@ -319,9 +335,12 @@ async fn search_tavily(
     timeout_seconds: u64,
     api_key: Option<&str>,
 ) -> Result<Value, String> {
-    let api_key = api_key.ok_or(
-        "Tavily API key not configured. Set tools.web_search.tavily_api_key in config or TAVILY_API_KEY environment variable.",
-    )?;
+    let api_key = api_key
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or(
+            "Tavily API key not configured. Set tools.web_search.tavily_api_key in config or TAVILY_API_KEY environment variable.",
+        )?;
 
     let client = super::web_http::build_ssrf_safe_client(
         false, // deny private hosts by default
