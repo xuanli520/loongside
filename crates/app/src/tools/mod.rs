@@ -1742,7 +1742,8 @@ mod tests {
     ))]
     #[test]
     fn tool_registry_returns_runtime_discoverable_tools_for_default_config() {
-        let entries = tool_registry();
+        let config = runtime_config::ToolRuntimeConfig::default();
+        let entries = tool_registry_with_config(Some(&config));
         assert_eq!(entries.len(), 23);
         let names: Vec<&str> = entries.iter().map(|e| e.name).collect();
         assert!(names.contains(&"approval_request_resolve"));
@@ -1785,7 +1786,8 @@ mod tests {
     ))]
     #[test]
     fn tool_registry_returns_runtime_discoverable_tools_for_default_config_no_websearch() {
-        let entries = tool_registry();
+        let config = runtime_config::ToolRuntimeConfig::default();
+        let entries = tool_registry_with_config(Some(&config));
         assert_eq!(entries.len(), 22);
         let names: Vec<&str> = entries.iter().map(|e| e.name).collect();
         assert!(names.contains(&"approval_request_resolve"));

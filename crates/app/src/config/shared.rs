@@ -72,6 +72,7 @@ pub(super) enum ConfigValidationCode {
     UnknownChannelDefaultAccount,
     ImplicitActiveProvider,
     UnknownActiveProvider,
+    UnknownSearchProvider,
     MissingRequiredField,
 }
 
@@ -95,6 +96,9 @@ impl ConfigValidationCode {
             }
             ConfigValidationCode::UnknownActiveProvider => {
                 "config.provider_selection.unknown_active"
+            }
+            ConfigValidationCode::UnknownSearchProvider => {
+                "config.web_search.unknown_provider"
             }
             ConfigValidationCode::MissingRequiredField => "config.missing_required_field",
         }
@@ -130,6 +134,9 @@ impl ConfigValidationCode {
             ConfigValidationCode::UnknownActiveProvider => {
                 "urn:loongclaw:problem:config.provider_selection.unknown_active"
             }
+            ConfigValidationCode::UnknownSearchProvider => {
+                "urn:loongclaw:problem:config.web_search.unknown_provider"
+            }
             ConfigValidationCode::MissingRequiredField => {
                 "urn:loongclaw:problem:config.missing_required_field"
             }
@@ -155,6 +162,9 @@ impl ConfigValidationCode {
             }
             ConfigValidationCode::UnknownActiveProvider => {
                 "config.provider_selection.unknown_active.title"
+            }
+            ConfigValidationCode::UnknownSearchProvider => {
+                "config.web_search.unknown_provider.title"
             }
             ConfigValidationCode::MissingRequiredField => "config.missing_required_field.title",
         }
@@ -184,6 +194,7 @@ impl ConfigValidationCode {
             ConfigValidationCode::UnknownChannelDefaultAccount => "Unknown Channel Default Account",
             ConfigValidationCode::ImplicitActiveProvider => "Implicit Active Provider Selection",
             ConfigValidationCode::UnknownActiveProvider => "Unknown Active Provider Selection",
+            ConfigValidationCode::UnknownSearchProvider => "Unknown Web Search Provider",
             ConfigValidationCode::MissingRequiredField => "Missing Required Field",
         }
     }
@@ -219,6 +230,9 @@ impl ConfigValidationCode {
             }
             ConfigValidationCode::UnknownActiveProvider => {
                 "[{code}] {field_path} points to `{requested_profile_id}`, but configured provider profiles are: {configured_profile_ids}. LoongClaw recovered to `{selected_profile_id}` using {selection_basis}. update `{field_path}` to an available profile id"
+            }
+            ConfigValidationCode::UnknownSearchProvider => {
+                "[{code}] {field_path} is set to `{provider_value}`, which is not a valid web search provider. valid options are: {valid_providers}. set `{field_path}` to one of the valid providers"
             }
             ConfigValidationCode::MissingRequiredField => {
                 "[{code}] {field_path} is required but not configured. set `{suggested_env_name}` environment variable or configure `{inline_field_path}` in your config file"

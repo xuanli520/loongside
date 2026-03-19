@@ -1,8 +1,13 @@
 use loongclaw_contracts::{ToolCoreOutcome, ToolCoreRequest};
-use serde_json::{Value, json};
 
 #[cfg(feature = "tool-websearch")]
 use regex::Regex;
+
+#[cfg(feature = "tool-websearch")]
+use reqwest::Url;
+
+#[cfg(feature = "tool-websearch")]
+use serde_json::{Value, json};
 
 #[cfg(feature = "tool-websearch")]
 const MAX_QUERY_LENGTH: usize = 500;
@@ -206,37 +211,21 @@ fn parse_duckduckgo_html(html: &str, query: &str, max_results: usize) -> Result<
 
 #[cfg(feature = "tool-websearch")]
 fn decode_ddg_url(raw: &str) -> String {
-    if let Some(idx) = raw.find("uddg=") {
-        let encoded = &raw[idx + 5..];
-        let encoded = encoded.split('&').next().unwrap_or(encoded);
-        if let Ok(decoded) = urlencoding_decode(encoded) {
-            return decoded;
+    // Only treat as a DDG redirect if it's a valid DDG redirect URL
+    // Check if the URL is a DuckDuckGo redirect (duckduckgo.com/l/ or has duckduckgo host with uddg=)
+    if let Ok(url) = Url::parse(raw) {
+        let is_ddg_host = url
+            .host_str()
+            .map(|h| h.ends_with("duckduckgo.com"))
+            .unwrap_or(false);
+        let is_ddg_redirect = is_ddg_host && url.path().starts_with("/l/");
+        if is_ddg_redirect
+            && let Some(encoded) = url.query_pairs().find(|(k, _)| k == "uddg").map(|(_, v)| v)
+        {
+            return encoded.into_owned();
         }
     }
     raw.to_string()
-}
-
-#[cfg(feature = "tool-websearch")]
-fn urlencoding_decode(s: &str) -> Result<String, String> {
-    let mut bytes = Vec::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '+' {
-            bytes.push(b' ');
-        } else if c == '%' {
-            let hex: String = chars.by_ref().take(2).collect();
-            if hex.len() != 2 {
-                return Err("Invalid percent encoding: truncated escape sequence".to_owned());
-            }
-            let byte = u8::from_str_radix(&hex, 16)
-                .map_err(|e| format!("Invalid percent encoding: {e}"))?;
-            bytes.push(byte);
-        } else {
-            let mut buf = [0u8; 4];
-            bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
-        }
-    }
-    String::from_utf8(bytes).map_err(|e| format!("Invalid UTF-8 in decoded value: {e}"))
 }
 
 #[cfg(feature = "tool-websearch")]
@@ -522,20 +511,13 @@ mod tests {
     fn web_search_accepts_query_at_max_length() {
         // Test that a query exactly at MAX_QUERY_LENGTH is accepted
         let max_query = "x".repeat(MAX_QUERY_LENGTH);
-        // This should not error - we're just checking validation passes
-        // (it will fail at runtime since we don't have a real network, but validation passes)
-        let result = execute_web_search_tool_with_config(
-            request(json!({"query": max_query})),
+        // Use an unknown provider to short-circuit after validation without hitting the network
+        let error = execute_web_search_tool_with_config(
+            request(json!({"query": max_query, "provider": "unknown"})),
             &test_config(),
-        );
-        // The result should not contain a length validation error
-        // (it may fail for other reasons like network, but not for length)
-        if let Err(e) = result {
-            assert!(
-                !e.contains("exceeds maximum length"),
-                "unexpected length error: {e}"
-            );
-        }
+        )
+        .expect_err("validation should pass before provider dispatch");
+        assert!(error.contains("Unknown search provider"));
     }
 
     #[test]
@@ -655,17 +637,5 @@ mod tests {
         let error =
             parse_brave_response(&json, "test", 5).expect_err("should reject invalid format");
         assert!(error.contains("Invalid Brave API response format"));
-    }
-
-    #[test]
-    fn urlencoding_decode_handles_utf8_sequences() {
-        let decoded = urlencoding_decode("caf%C3%A9").expect("valid encoded utf8 should decode");
-        assert_eq!(decoded, "café");
-    }
-
-    #[test]
-    fn urlencoding_decode_rejects_truncated_escape() {
-        let error = urlencoding_decode("abc%").expect_err("truncated escape should fail");
-        assert!(error.contains("Invalid percent encoding"));
     }
 }
