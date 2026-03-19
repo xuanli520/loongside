@@ -40,12 +40,14 @@ fn execute_web_search_tool_enabled(
         .as_object()
         .ok_or_else(|| "web.search payload must be an object".to_owned())?;
 
-    let query = payload
-        .get("query")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .ok_or_else(|| "web.search requires payload.query".to_owned())?;
+    let query = match payload.get("query") {
+        Some(value) => value
+            .as_str()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| "web.search requires payload.query to be a string".to_owned())?,
+        None => return Err("web.search requires payload.query".to_owned()),
+    };
     if query.chars().count() > MAX_QUERY_LENGTH {
         return Err(format!(
             "web.search payload.query exceeds maximum length ({MAX_QUERY_LENGTH} characters)"
@@ -150,16 +152,9 @@ fn parse_duckduckgo_html(html: &str, query: &str, max_results: usize) -> Result<
     let link_regex = ddg_link_regex();
     let snippet_regex = ddg_snippet_regex();
 
-    let links: Vec<_> = link_regex
-        .captures_iter(html)
-        .take(max_results + 2)
-        .collect();
-    let snippets: Vec<_> = snippet_regex
-        .captures_iter(html)
-        .take(max_results + 2)
-        .collect();
+    let link_matches: Vec<_> = link_regex.captures_iter(html).collect();
 
-    if links.is_empty() {
+    if link_matches.is_empty() {
         return Ok(json!({
             "query": query,
             "provider": "duckduckgo",
@@ -168,14 +163,32 @@ fn parse_duckduckgo_html(html: &str, query: &str, max_results: usize) -> Result<
     }
 
     let mut results = Vec::new();
-    for (i, caps) in links.iter().take(max_results).enumerate() {
+    let link_matches_to_process: Vec<_> = link_matches.iter().take(max_results).collect();
+
+    for (i, caps) in link_matches_to_process.iter().enumerate() {
+        let Some(full_match) = caps.get(0) else {
+            continue;
+        };
         let url = decode_ddg_url(&caps[1]);
         let title = strip_html_tags(&caps[2]);
-        let snippet = snippets
-            .get(i)
-            .and_then(|caps| caps.get(1))
-            .map(|m| strip_html_tags(m.as_str()))
-            .unwrap_or_default();
+
+        let search_start = full_match.end();
+        let search_end = link_matches_to_process
+            .get(i + 1)
+            .and_then(|next_caps| next_caps.get(0))
+            .map(|m| m.start())
+            .unwrap_or(html.len());
+
+        let snippet = if search_start < search_end {
+            let region = &html[search_start..search_end];
+            snippet_regex
+                .captures(region)
+                .and_then(|c| c.get(1))
+                .map(|m| strip_html_tags(m.as_str()))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
 
         results.push(json!({
             "title": title.trim(),
@@ -452,6 +465,17 @@ mod tests {
     }
 
     #[test]
+    fn web_search_rejects_non_string_query() {
+        let error =
+            execute_web_search_tool_with_config(request(json!({"query": 123})), &test_config())
+                .expect_err("should reject non-string query");
+        assert!(
+            error.contains("payload.query to be a string"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn web_search_rejects_empty_query() {
         let error =
             execute_web_search_tool_with_config(request(json!({"query": ""})), &test_config())
@@ -530,6 +554,47 @@ mod tests {
         let html = "<html><body>No results</body></html>";
         let result = parse_duckduckgo_html(html, "test", 5).unwrap();
         assert!(result["results"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_duckduckgo_html_handles_missing_snippet_without_misalignment() {
+        // Regression test: verify that a missing snippet in the middle result
+        // doesn't cause subsequent snippets to shift onto wrong titles/URLs
+        let html = r#"
+            <a class="result__a" href="https://first.com">First Title</a>
+            <a class="result__snippet">First snippet</a>
+            <a class="result__a" href="https://second.com">Second Title</a>
+            <!-- Second result has no snippet -->
+            <a class="result__a" href="https://third.com">Third Title</a>
+            <a class="result__snippet">Third snippet</a>
+        "#;
+        let result = parse_duckduckgo_html(html, "test", 5).unwrap();
+        let results = result["results"]
+            .as_array()
+            .expect("results should be array");
+
+        assert_eq!(results.len(), 3, "should have 3 results");
+
+        // First result: has title, URL, and snippet
+        assert_eq!(results[0]["title"], "First Title");
+        assert_eq!(results[0]["url"], "https://first.com");
+        assert_eq!(results[0]["snippet"], "First snippet");
+
+        // Second result: has title and URL, but no snippet
+        assert_eq!(results[1]["title"], "Second Title");
+        assert_eq!(results[1]["url"], "https://second.com");
+        assert_eq!(
+            results[1]["snippet"], "",
+            "second result should have empty snippet"
+        );
+
+        // Third result: has title, URL, and snippet (not shifted from second)
+        assert_eq!(results[2]["title"], "Third Title");
+        assert_eq!(results[2]["url"], "https://third.com");
+        assert_eq!(
+            results[2]["snippet"], "Third snippet",
+            "third snippet should not be shifted"
+        );
     }
 
     #[test]

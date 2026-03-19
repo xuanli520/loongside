@@ -44,7 +44,6 @@ pub mod shell_policy_ext;
 mod web_fetch;
 #[cfg(any(feature = "tool-webfetch", feature = "tool-websearch"))]
 mod web_http;
-#[cfg(feature = "tool-websearch")]
 mod web_search;
 
 pub use catalog::{
@@ -707,7 +706,6 @@ fn execute_discoverable_tool_core_with_config(
         }
         #[cfg(feature = "tool-webfetch")]
         "web.fetch" => web_fetch::execute_web_fetch_tool_with_config(request, config),
-        #[cfg(feature = "tool-websearch")]
         "web.search" => web_search::execute_web_search_tool_with_config(request, config),
         _ => Err(format!(
             "tool_not_found: unknown tool `{}`",
@@ -1539,17 +1537,8 @@ mod tests {
     fn test_tool_runtime_config(root: PathBuf) -> runtime_config::ToolRuntimeConfig {
         runtime_config::ToolRuntimeConfig {
             shell_allow: BTreeSet::from(["echo".to_owned(), "cat".to_owned(), "ls".to_owned()]),
-            shell_deny: BTreeSet::new(),
-            shell_default_mode: crate::tools::shell_policy_ext::ShellPolicyDefault::Deny,
             file_root: Some(root),
-            config_path: None,
-            sessions_enabled: true,
             messages_enabled: true,
-            delegate_enabled: true,
-            browser: Default::default(),
-            browser_companion: Default::default(),
-            web_fetch: Default::default(),
-            web_search: Default::default(),
             external_skills: runtime_config::ExternalSkillsRuntimePolicy {
                 enabled: true,
                 require_download_approval: true,
@@ -1558,8 +1547,7 @@ mod tests {
                 install_root: None,
                 auto_expose_installed: false,
             },
-            #[cfg(feature = "feishu-integration")]
-            feishu: None,
+            ..Default::default()
         }
     }
 
@@ -2351,20 +2339,9 @@ mod tests {
 
         let config = runtime_config::ToolRuntimeConfig {
             shell_allow: BTreeSet::new(),
-            shell_deny: BTreeSet::new(),
-            shell_default_mode: crate::tools::shell_policy_ext::ShellPolicyDefault::Deny,
             file_root: Some(root.clone()),
-            config_path: None,
-            sessions_enabled: true,
             messages_enabled: true,
-            delegate_enabled: true,
-            browser: Default::default(),
-            browser_companion: Default::default(),
-            web_fetch: Default::default(),
-            web_search: Default::default(),
-            external_skills: runtime_config::ExternalSkillsRuntimePolicy::default(),
-            #[cfg(feature = "feishu-integration")]
-            feishu: None,
+            ..Default::default()
         };
         let outcome = execute_tool_core_with_config(
             ToolCoreRequest {

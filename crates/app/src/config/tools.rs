@@ -783,6 +783,19 @@ mod tests {
         assert_eq!(config.web.timeout_seconds, 15);
         assert_eq!(config.web.max_bytes, 1_048_576);
         assert_eq!(config.web.max_redirects, 3);
+        // web_search defaults
+        assert!(config.web_search.enabled);
+        assert_eq!(config.web_search.default_provider, "duckduckgo");
+        assert_eq!(
+            config.web_search.timeout_seconds,
+            DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS
+        );
+        assert_eq!(
+            config.web_search.max_results,
+            DEFAULT_WEB_SEARCH_MAX_RESULTS
+        );
+        assert!(config.web_search.brave_api_key.is_none());
+        assert!(config.web_search.tavily_api_key.is_none());
     }
 
     #[cfg(feature = "config-toml")]
