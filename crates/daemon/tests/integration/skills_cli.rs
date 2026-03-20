@@ -1000,6 +1000,163 @@ fn execute_skills_command_list_prefers_nearest_project_ancestor_for_duplicate_sk
 }
 
 #[test]
+fn execute_skills_command_list_shows_operator_only_and_ineligible_skill_metadata() {
+    let root = unique_temp_dir("loongclaw-skills-cli-manifest");
+    let home = unique_temp_dir("loongclaw-skills-cli-manifest-home");
+    let config_path = write_external_skills_config(&root, true);
+    fs::create_dir_all(&home).expect("create home root");
+    write_file(
+        &root,
+        "source/demo-skill/SKILL.md",
+        "---\nname: demo-skill\ndescription: operator-only demo skill.\nmodel_visibility: hidden\nrequires_env:\n  - DEMO_SKILL_TOKEN\n---\n\n# Demo Skill\n\nOperator should still be able to inspect this skill.\n",
+    );
+    let _env = SkillsCliEnvironmentGuard::set(&[("HOME", Some(home.to_string_lossy().as_ref()))]);
+
+    loongclaw_daemon::skills_cli::execute_skills_command(
+        loongclaw_daemon::skills_cli::SkillsCommandOptions {
+            config: Some(config_path.display().to_string()),
+            json: false,
+            command: loongclaw_daemon::skills_cli::SkillsCommands::Install {
+                path: "source/demo-skill".to_owned(),
+                skill_id: None,
+                replace: false,
+            },
+        },
+    )
+    .expect("skills install should succeed");
+
+    let list = loongclaw_daemon::skills_cli::execute_skills_command(
+        loongclaw_daemon::skills_cli::SkillsCommandOptions {
+            config: Some(config_path.display().to_string()),
+            json: false,
+            command: loongclaw_daemon::skills_cli::SkillsCommands::List,
+        },
+    )
+    .expect("skills list should succeed");
+    let demo_skill = list.outcome.payload["skills"]
+        .as_array()
+        .expect("skills should be an array")
+        .iter()
+        .find(|skill| skill["skill_id"] == "demo-skill")
+        .expect("operator CLI should keep operator-only skills visible");
+    assert_eq!(demo_skill["scope"], "managed");
+    assert_eq!(demo_skill["model_visibility"], "hidden");
+    assert_eq!(demo_skill["eligibility"]["available"], false);
+    assert_eq!(
+        demo_skill["eligibility"]["missing_env"],
+        serde_json::json!(["DEMO_SKILL_TOKEN"])
+    );
+
+    let rendered = loongclaw_daemon::skills_cli::render_skills_cli_text(&list)
+        .expect("text rendering should succeed");
+    assert!(
+        rendered.contains("model_visibility=hidden"),
+        "CLI text should explain model visibility to operators: {rendered}"
+    );
+    assert!(
+        rendered.contains("eligible=false"),
+        "CLI text should explain eligibility state to operators: {rendered}"
+    );
+
+    let info = loongclaw_daemon::skills_cli::execute_skills_command(
+        loongclaw_daemon::skills_cli::SkillsCommandOptions {
+            config: Some(config_path.display().to_string()),
+            json: false,
+            command: loongclaw_daemon::skills_cli::SkillsCommands::Info {
+                skill_id: "demo-skill".to_owned(),
+            },
+        },
+    )
+    .expect("skills info should succeed for operator-only skills");
+    assert_eq!(info.outcome.payload["skill"]["model_visibility"], "hidden");
+    assert_eq!(
+        info.outcome.payload["skill"]["eligibility"]["available"],
+        false
+    );
+
+    fs::remove_dir_all(&root).ok();
+    fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn execute_skills_command_list_keeps_inactive_managed_winner_visible_to_operator() {
+    let root = unique_temp_dir("loongclaw-skills-cli-inactive-winner");
+    let home = unique_temp_dir("loongclaw-skills-cli-inactive-winner-home");
+    let config_path = write_external_skills_config(&root, true);
+    fs::create_dir_all(&home).expect("create home root");
+    write_file(
+        &root,
+        "source/demo-skill/SKILL.md",
+        "# Managed Demo Skill\n\nManaged winner should stay visible to the operator.\n",
+    );
+    write_file(
+        &home,
+        ".agents/skills/demo-skill/SKILL.md",
+        "---\nname: demo-skill\ndescription: user fallback should stay shadowed.\n---\n\n# User Demo Skill\n\nDo not silently take over.\n",
+    );
+    let _env = SkillsCliEnvironmentGuard::set(&[("HOME", Some(home.to_string_lossy().as_ref()))]);
+
+    loongclaw_daemon::skills_cli::execute_skills_command(
+        loongclaw_daemon::skills_cli::SkillsCommandOptions {
+            config: Some(config_path.display().to_string()),
+            json: false,
+            command: loongclaw_daemon::skills_cli::SkillsCommands::Install {
+                path: "source/demo-skill".to_owned(),
+                skill_id: None,
+                replace: false,
+            },
+        },
+    )
+    .expect("skills install should succeed");
+
+    let index_path = root.join("managed-skills").join("index.json");
+    let mut index: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&index_path).expect("read index"))
+            .expect("parse index");
+    index["skills"][0]["active"] = serde_json::json!(false);
+    fs::write(
+        &index_path,
+        serde_json::to_string_pretty(&index).expect("encode index"),
+    )
+    .expect("write index");
+
+    let list = loongclaw_daemon::skills_cli::execute_skills_command(
+        loongclaw_daemon::skills_cli::SkillsCommandOptions {
+            config: Some(config_path.display().to_string()),
+            json: false,
+            command: loongclaw_daemon::skills_cli::SkillsCommands::List,
+        },
+    )
+    .expect("skills list should succeed");
+    let demo_skill = list.outcome.payload["skills"]
+        .as_array()
+        .expect("skills should be an array")
+        .iter()
+        .find(|skill| skill["skill_id"] == "demo-skill")
+        .expect("operator CLI should keep the inactive managed winner visible");
+    assert_eq!(demo_skill["scope"], "managed");
+    assert_eq!(demo_skill["active"], false);
+    assert!(
+        list.outcome.payload["shadowed_skills"]
+            .as_array()
+            .expect("shadowed skills should be an array")
+            .iter()
+            .any(|skill| skill["skill_id"] == "demo-skill" && skill["scope"] == "user"),
+        "lower-scope duplicate should remain shadowed for operator debugging"
+    );
+
+    let rendered = loongclaw_daemon::skills_cli::render_skills_cli_text(&list)
+        .expect("text rendering should succeed");
+    assert!(
+        rendered.contains("demo-skill [inactive]"),
+        "CLI text should make inactive winners obvious: {rendered}"
+    );
+
+    fs::remove_dir_all(&root).ok();
+    fs::remove_dir_all(&home).ok();
+}
+
+#[test]
 fn execute_skills_command_installs_bundled_browser_companion_preview() {
     let root = unique_temp_dir("loongclaw-skills-cli-bundled-install");
     let _env = SkillsCliEnvironmentGuard::set(&[]);
