@@ -544,7 +544,6 @@ fn unix_ts_now() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
