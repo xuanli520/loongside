@@ -16,6 +16,7 @@
 - 2026-03-20: Implemented `Commands::Welcome`, `resolve_default_entry_command()`, `run_welcome_cli()`, and the no-args handoff in `crates/daemon/src/main.rs`.
 - 2026-03-20: Green tests passed for `first_run_entry` and `welcome_subcommand_help_advertises_first_run_shortcuts`.
 - 2026-03-21: `task verify` initially failed on a pre-existing `cargo deny` advisory for `rustls-webpki 0.103.9`; updated `Cargo.lock` to `rustls-webpki 0.103.10`, then reran `task verify` successfully.
+- 2026-03-21: After opening PR `#407`, GitHub `advisory-checks` still failed on `cargo audit` for `aws-lc-sys 0.38.0` (`RUSTSEC-2026-0048`, `RUSTSEC-2026-0044`); updated `Cargo.lock` via `aws-lc-rs 1.16.2` -> `aws-lc-sys 0.39.0` and reran local verification before pushing the follow-up.
 
 ## Review / Results
 
@@ -25,3 +26,4 @@
   - `cargo test -p loongclaw-daemon first_run_entry -- --nocapture`
   - `cargo test -p loongclaw-daemon welcome_subcommand_help_advertises_first_run_shortcuts -- --nocapture`
   - `task verify`
+  - `cargo audit`
