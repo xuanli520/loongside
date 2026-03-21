@@ -50,16 +50,20 @@ fn welcome_subcommand_help_advertises_first_run_shortcuts() {
         "welcome help should frame the configured path as a quick-command entrypoint: {help}"
     );
     assert!(
-        help.contains("loongclaw ask"),
-        "welcome help should mention ask as a next step: {help}"
+        help.contains("loongclaw ask --config <path>"),
+        "welcome help should mention ask with an explicit config placeholder: {help}"
     );
     assert!(
-        help.contains("loongclaw chat"),
-        "welcome help should mention chat as a next step: {help}"
+        help.contains("loongclaw chat --config <path>"),
+        "welcome help should mention chat with an explicit config placeholder: {help}"
     );
     assert!(
-        help.contains("loongclaw doctor"),
-        "welcome help should mention doctor as a next step: {help}"
+        help.contains("loongclaw doctor --config <path>"),
+        "welcome help should mention doctor with an explicit config placeholder: {help}"
+    );
+    assert!(
+        help.contains("LOONGCLAW_CONFIG_PATH"),
+        "welcome help should explain how config-path environment overrides interact with the quick commands: {help}"
     );
 }
 
