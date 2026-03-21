@@ -23,6 +23,8 @@ change against the repo's existing shell and release gates.
 - [x] Run targeted shell regression checks and repo verification.
 - [x] Clear the pre-existing `cargo deny` advisory gate so `task verify` can go
       green on this branch.
+- [x] Clear the newly surfaced `cargo audit` advisories in `aws-lc-sys` so PR
+      Security checks pass.
 
 ## Progress Notes
 
@@ -61,6 +63,13 @@ change against the repo's existing shell and release gates.
   update from `rustls-webpki 0.103.9` to `0.103.10`, matching the
   `RUSTSEC-2026-0049` remediation guidance without widening the dependency
   surface beyond the affected crate.
+- 2026-03-21: Reproduced the PR Security failure locally with `cargo audit`,
+  which surfaced `RUSTSEC-2026-0044` and `RUSTSEC-2026-0048` through
+  `aws-lc-sys 0.38.0` via `aws-lc-rs 1.16.1`.
+- 2026-03-21: Cleared the Security gate with the narrow compatible lockfile
+  update `aws-lc-rs 1.16.1 -> 1.16.2` and `aws-lc-sys 0.38.0 -> 0.39.0`,
+  matching the advisory remediation without changing application code or
+  release-contract behavior.
 
 ## Review / Results
 
@@ -80,3 +89,6 @@ change against the repo's existing shell and release gates.
   `cargo deny check advisories` and full `task verify` are green on this
   branch. Remaining `cargo deny` output is warning-only duplicate/license noise,
   not a failing advisory gate.
+- 2026-03-21: Security follow-up verification passed:
+  `cargo audit`, `cargo deny check advisories bans sources`, and full
+  `task verify` are green after the AWS-LC lockfile update.
