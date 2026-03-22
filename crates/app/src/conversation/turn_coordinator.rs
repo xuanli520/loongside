@@ -6723,7 +6723,11 @@ mod tests {
             max_active_children: 1,
             timeout_seconds: 60,
             allow_shell_in_child: false,
-            child_tool_allowlist: vec!["file.read".to_owned(), "file.write".to_owned()],
+            child_tool_allowlist: vec![
+                "file.read".to_owned(),
+                "file.write".to_owned(),
+                "file.edit".to_owned(),
+            ],
             runtime_narrowing: crate::tools::runtime_config::ToolRuntimeNarrowing::default(),
             kernel_bound: false,
         };
@@ -6835,7 +6839,11 @@ mod tests {
             max_active_children: 1,
             timeout_seconds: 60,
             allow_shell_in_child: false,
-            child_tool_allowlist: vec!["file.read".to_owned(), "file.write".to_owned()],
+            child_tool_allowlist: vec![
+                "file.read".to_owned(),
+                "file.write".to_owned(),
+                "file.edit".to_owned(),
+            ],
             runtime_narrowing: crate::tools::runtime_config::ToolRuntimeNarrowing::default(),
             kernel_bound: false,
         };
