@@ -14,6 +14,9 @@ env:
   BIN_NAME: loongclaw
   PACKAGE_NAME: loongclaw
   LINUX_ARM64_GLIBC_FLOOR: "2.17"
+  LINUX_ARM64_ZIG_VERSION: "0.13.0"
+  LINUX_ARM64_ZIG_SHA256: "d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea"
+  CARGO_ZIGBUILD_VERSION: "0.22.1"
 
 jobs:
   verify-release:
@@ -117,13 +120,17 @@ jobs:
       - name: Install Zig and cargo-zigbuild
         if: matrix.use_zig == true
         run: |
-          # 下载 Zig（版本 0.13.0）
-          curl -L https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz -o zig.tar.xz
-          tar xf zig.tar.xz
-          # 将 Zig 添加到 PATH
-          echo "$(pwd)/zig-linux-x86_64-0.13.0" >> $GITHUB_PATH
-          # 安装 cargo-zigbuild
-          cargo install cargo-zigbuild --locked
+          set -euo pipefail
+          zig_tarball="zig-linux-x86_64-${{ env.LINUX_ARM64_ZIG_VERSION }}.tar.xz"
+          zig_dir="zig-linux-x86_64-${{ env.LINUX_ARM64_ZIG_VERSION }}"
+          curl -fSL "https://ziglang.org/download/${{ env.LINUX_ARM64_ZIG_VERSION }}/${zig_tarball}" -o "$zig_tarball"
+          echo "${{ env.LINUX_ARM64_ZIG_SHA256 }}  ${zig_tarball}" | shasum -a 256 --check -
+          tar -xf "$zig_tarball"
+          [ -d "$zig_dir" ] || (echo "Missing extracted Zig directory: $zig_dir" && exit 1)
+          chmod +x "$zig_dir/zig"
+          echo "$PWD/$zig_dir" >> "$GITHUB_PATH"
+          rm -f "$zig_tarball"
+          cargo install "cargo-zigbuild" --version "${{ env.CARGO_ZIGBUILD_VERSION }}" --locked
 
       # 使用 cargo-zigbuild 构建 aarch64 目标（指定 glibc 2.17）
       - name: Build release binary with cargo-zigbuild
@@ -132,7 +139,7 @@ jobs:
           LOONGCLAW_RELEASE_BUILD: "1"
         run: |
           cargo zigbuild --release --locked -p loongclaw-daemon --bin ${{ env.BIN_NAME }} \
-            --target aarch64-unknown-linux-gnu.2.17
+            --target "${{ matrix.target }}.${{ env.LINUX_ARM64_GLIBC_FLOOR }}"
 
       # 其他目标使用普通 cargo build
       - name: Build release binary (native)
