@@ -7749,8 +7749,11 @@ mod tests {
             .as_str()
             .expect("resource output path");
         assert!(
-            std::path::Path::new(saved_path)
-                .ends_with(std::path::Path::new("artifacts").join("images").join("incoming.png")),
+            std::path::Path::new(saved_path).ends_with(
+                std::path::Path::new("artifacts")
+                    .join("images")
+                    .join("incoming.png")
+            ),
             "saved_path {saved_path} should end with artifacts/images/incoming.png",
         );
         assert_eq!(
@@ -7927,8 +7930,11 @@ mod tests {
             .as_str()
             .expect("resource output path");
         assert!(
-            std::path::Path::new(saved_path)
-                .ends_with(std::path::Path::new("artifacts").join("audio").join("voice.ogg")),
+            std::path::Path::new(saved_path).ends_with(
+                std::path::Path::new("artifacts")
+                    .join("audio")
+                    .join("voice.ogg")
+            ),
             "saved_path {saved_path} should end with artifacts/audio/voice.ogg",
         );
         assert_eq!(
@@ -8102,8 +8108,11 @@ mod tests {
             .as_str()
             .expect("resource output path");
         assert!(
-            std::path::Path::new(saved_path)
-                .ends_with(std::path::Path::new("artifacts").join("media").join("preview.png")),
+            std::path::Path::new(saved_path).ends_with(
+                std::path::Path::new("artifacts")
+                    .join("media")
+                    .join("preview.png")
+            ),
             "saved_path {saved_path} should end with artifacts/media/preview.png",
         );
         assert_eq!(
@@ -8273,8 +8282,11 @@ mod tests {
             .as_str()
             .expect("resource output path");
         assert!(
-            std::path::Path::new(saved_path)
-                .ends_with(std::path::Path::new("artifacts").join("post").join("image.jpg")),
+            std::path::Path::new(saved_path).ends_with(
+                std::path::Path::new("artifacts")
+                    .join("post")
+                    .join("image.jpg")
+            ),
             "saved_path {saved_path} should end with artifacts/post/image.jpg",
         );
         assert_eq!(
