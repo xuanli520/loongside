@@ -2762,7 +2762,7 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "tokio",
- "wasmparser 0.245.1",
+ "wasmparser 0.246.1",
  "wasmtime",
  "wat",
 ]
@@ -5164,8 +5164,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "71cde4757396defafd25417cfb36aa3161027d06d865b0c24baaae229aac005d"
 dependencies = [
  "bitflags 2.11.0",
+ "hashbrown 0.16.1",
  "indexmap",
  "semver",
+ "serde",
 ]
 
 [[package]]
