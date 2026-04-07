@@ -53,9 +53,9 @@
 - Rule: each release must name at least one hotspot metric paid down or explicitly state why no paydown happened.
 
 ## Detail Links
-- [Architecture gate](../../scripts/check_architecture_boundaries.sh)
-- [Release template](TEMPLATE.md)
-- [CI workflow](../../.github/workflows/ci.yml)
+- [Architecture gate](../../../scripts/check_architecture_boundaries.sh)
+- [Release template](README.md)
+- [CI workflow](../../../.github/workflows/ci.yml)
 
 <!-- arch-hotspot key=spec_runtime lines=3455 functions=65 -->
 <!-- arch-hotspot key=spec_execution lines=3547 functions=43 -->

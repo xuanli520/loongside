@@ -55,7 +55,7 @@
 
 ## Detail Links
 - [Architecture gate](../../scripts/check_architecture_boundaries.sh)
-- [Release template](TEMPLATE.md)
+- [Release template](support/README.md)
 - [CI workflow](../../.github/workflows/ci.yml)
 
 <!-- arch-hotspot key=spec_runtime lines=3528 functions=65 -->

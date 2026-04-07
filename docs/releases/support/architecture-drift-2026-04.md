@@ -73,7 +73,7 @@ release review. It is not part of the primary public release trail.
 
 ## Detail Links
 - [Architecture gate](../../../scripts/check_architecture_boundaries.sh)
-- [Release template](TEMPLATE.md)
+- [Release template](README.md)
 - [CI workflow](../../../.github/workflows/ci.yml)
 
 ## Do Not Use This File For
