@@ -6,7 +6,7 @@ SCRIPT_UNDER_TEST="$REPO_ROOT/scripts/install.sh"
 . "$REPO_ROOT/scripts/release_artifact_lib.sh"
 PACKAGE_NAME="loong"
 PRIMARY_BIN_NAME="loong"
-LEGACY_BIN_NAME="loong"
+LEGACY_BIN_NAME="loongclaw"
 
 assert_contains() {
   local file="$1"
@@ -635,7 +635,7 @@ run_release_override_install_and_onboard_test() {
 
   assert_installed_binary_pair "$install_dir" "fixture-binary"
   assert_contains "$output_file" "Installed loong to"
-  assert_contains "$output_file" "Installed compatible loong command to"
+  assert_contains "$output_file" "Installed compatible loongclaw command to"
   assert_contains "$output_file" "Running guided onboarding"
   assert_contains "$marker" "onboard"
 }

@@ -201,13 +201,13 @@ detect_release_host_platform() {
 prefix="${HOME}/.local/bin"
 run_onboard=0
 install_source=0
-release_version="${LOONG_INSTALL_VERSION:-latest}"
-release_repo="${LOONG_INSTALL_REPO:-eastreams/loong}"
-release_base_url="${LOONG_INSTALL_RELEASE_BASE_URL:-https://github.com/${release_repo}/releases}"
-target_libc="${LOONG_INSTALL_TARGET_LIBC:-auto}"
+release_version="${LOONG_INSTALL_VERSION:-${LOONGCLAW_INSTALL_VERSION:-latest}}"
+release_repo="${LOONG_INSTALL_REPO:-${LOONGCLAW_INSTALL_REPO:-eastreams/loong}}"
+release_base_url="${LOONG_INSTALL_RELEASE_BASE_URL:-${LOONGCLAW_INSTALL_RELEASE_BASE_URL:-https://github.com/${release_repo}/releases}}"
+target_libc="${LOONG_INSTALL_TARGET_LIBC:-${LOONGCLAW_INSTALL_TARGET_LIBC:-auto}}"
 package_name="loong"
 bin_name="loong"
-legacy_bin_name="loong"
+legacy_bin_name="loongclaw"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -858,7 +858,7 @@ else
 fi
 
 printf '==> Installed loong to %s\n' "${prefix}/${bin_name}"
-printf '==> Installed compatible loong command to %s\n' "${prefix}/${legacy_bin_name}"
+printf '==> Installed compatible loongclaw command to %s\n' "${prefix}/${legacy_bin_name}"
 
 should_print_source_hint=0
 
