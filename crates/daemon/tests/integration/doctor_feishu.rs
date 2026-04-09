@@ -12,6 +12,13 @@ fn temp_doctor_feishu_dir(label: &str) -> std::path::PathBuf {
 }
 
 fn sample_feishu_config(dir: &std::path::Path) -> mvp::config::LoongClawConfig {
+    sample_feishu_config_with_capabilities(dir, mvp::config::FeishuCapabilityConfig::default())
+}
+
+fn sample_feishu_config_with_capabilities(
+    dir: &std::path::Path,
+    capabilities: mvp::config::FeishuCapabilityConfig,
+) -> mvp::config::LoongClawConfig {
     let mut config = mvp::config::LoongClawConfig::default();
     config.feishu.enabled = true;
     config.feishu.account_id = Some("feishu_main".to_owned());
@@ -22,6 +29,7 @@ fn sample_feishu_config(dir: &std::path::Path) -> mvp::config::LoongClawConfig {
         "app-secret".to_owned(),
     ));
     config.feishu_integration.sqlite_path = dir.join("feishu.sqlite3").display().to_string();
+    config.feishu_integration.capabilities = capabilities;
     config
 }
 
@@ -204,6 +212,42 @@ fn doctor_warns_when_feishu_grant_lacks_message_write_scope() {
         write_check
             .detail
             .contains("loong feishu auth start --account feishu_main --capability message-write")
+    );
+}
+
+#[test]
+fn doctor_warns_when_config_requires_bitable_scope_but_grant_lacks_it() {
+    let temp_dir = temp_doctor_feishu_dir("bitable-scope-missing");
+    fs::create_dir_all(&temp_dir).expect("create temp dir");
+    let config = sample_feishu_config_with_capabilities(
+        &temp_dir,
+        mvp::config::FeishuCapabilityConfig {
+            bitable: true,
+            ..mvp::config::FeishuCapabilityConfig::default()
+        },
+    );
+    let now_s = loongclaw_daemon::feishu_support::unix_ts_now();
+    let store = mvp::channel::feishu::api::FeishuTokenStore::new(temp_dir.join("feishu.sqlite3"));
+    store
+        .save_grant(&sample_grant("feishu_main", now_s))
+        .expect("seed feishu grant");
+    let mut fixes = Vec::new();
+
+    let checks = loongclaw_daemon::doctor_cli::check_feishu_integration(&config, false, &mut fixes);
+
+    let scope_check = checks
+        .iter()
+        .find(|check| check.name.contains("feishu scope coverage"))
+        .expect("scope coverage check should exist");
+    assert_eq!(
+        scope_check.level,
+        loongclaw_daemon::doctor_cli::DoctorCheckLevel::Warn
+    );
+    assert!(scope_check.detail.contains("bitable:app"));
+    assert!(
+        scope_check
+            .detail
+            .contains("loong feishu auth start --account feishu_main")
     );
 }
 

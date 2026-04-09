@@ -12,6 +12,12 @@ use loongclaw_spec::CliResult;
 
 const FEISHU_GROUP_MESSAGE_READ_SCOPE: &str = "im:message.group_msg";
 const FEISHU_GROUP_MESSAGE_READ_SCOPE_LEGACY: &str = "im:message.group_msg:readonly";
+const FEISHU_OFFLINE_ACCESS_SCOPE: &str = "offline_access";
+const FEISHU_DOC_READ_SCOPE: &str = "docx:document:readonly";
+const FEISHU_MESSAGE_READ_SCOPE: &str = "im:message:readonly";
+const FEISHU_MESSAGE_SEARCH_SCOPE: &str = "search:message";
+const FEISHU_CALENDAR_READ_SCOPE: &str = "calendar:calendar:readonly";
+const FEISHU_BITABLE_SCOPE: &str = "bitable:app";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum FeishuAuthCapability {
@@ -30,6 +36,17 @@ impl FeishuAuthCapability {
             Self::All => "all",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum FeishuConfiguredCapability {
+    DocRead,
+    DocWrite,
+    MessageRead,
+    MessageSearch,
+    CalendarRead,
+    Bitable,
+    MessageWrite,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -70,8 +87,18 @@ impl FeishuDaemonContext {
         self.resolved.account.id.as_str()
     }
 
-    pub fn default_scopes(&self) -> Vec<String> {
-        self.config.feishu_integration.trimmed_default_scopes()
+    pub fn required_scopes(
+        &self,
+        override_scopes: &[String],
+        cli_capabilities: &[FeishuAuthCapability],
+        include_message_write: bool,
+    ) -> Vec<String> {
+        resolve_required_feishu_scopes(
+            &self.config.feishu_integration,
+            override_scopes,
+            cli_capabilities,
+            include_message_write,
+        )
     }
 }
 
@@ -165,6 +192,95 @@ pub fn resolve_scopes(
     }
 
     scopes
+}
+
+pub fn configured_capabilities_from_config(
+    config: &mvp::config::FeishuIntegrationConfig,
+) -> Vec<FeishuConfiguredCapability> {
+    let caps = &config.capabilities;
+    let mut resolved = Vec::new();
+    if caps.doc_read {
+        resolved.push(FeishuConfiguredCapability::DocRead);
+    }
+    if caps.doc_write {
+        resolved.push(FeishuConfiguredCapability::DocWrite);
+    }
+    if caps.message_read {
+        resolved.push(FeishuConfiguredCapability::MessageRead);
+    }
+    if caps.message_search {
+        resolved.push(FeishuConfiguredCapability::MessageSearch);
+    }
+    if caps.calendar_read {
+        resolved.push(FeishuConfiguredCapability::CalendarRead);
+    }
+    if caps.bitable {
+        resolved.push(FeishuConfiguredCapability::Bitable);
+    }
+    if caps.message_write {
+        resolved.push(FeishuConfiguredCapability::MessageWrite);
+    }
+    resolved
+}
+
+pub fn scopes_for_configured_capabilities(
+    capabilities: &[FeishuConfiguredCapability],
+) -> Vec<String> {
+    let mut scopes = Vec::new();
+    if !capabilities.is_empty() {
+        push_scope_if_missing(&mut scopes, FEISHU_OFFLINE_ACCESS_SCOPE);
+    }
+    for capability in capabilities {
+        match capability {
+            FeishuConfiguredCapability::DocRead => {
+                push_scope_if_missing(&mut scopes, FEISHU_DOC_READ_SCOPE);
+            }
+            FeishuConfiguredCapability::DocWrite => {
+                for scope in mvp::channel::feishu::api::FEISHU_DOC_WRITE_ACCEPTED_SCOPES {
+                    push_scope_if_missing(&mut scopes, scope);
+                }
+            }
+            FeishuConfiguredCapability::MessageRead => {
+                push_scope_if_missing(&mut scopes, FEISHU_MESSAGE_READ_SCOPE);
+                push_scope_if_missing(&mut scopes, FEISHU_GROUP_MESSAGE_READ_SCOPE);
+            }
+            FeishuConfiguredCapability::MessageSearch => {
+                push_scope_if_missing(&mut scopes, FEISHU_MESSAGE_SEARCH_SCOPE);
+            }
+            FeishuConfiguredCapability::CalendarRead => {
+                push_scope_if_missing(&mut scopes, FEISHU_CALENDAR_READ_SCOPE);
+            }
+            FeishuConfiguredCapability::Bitable => {
+                push_scope_if_missing(&mut scopes, FEISHU_BITABLE_SCOPE);
+            }
+            FeishuConfiguredCapability::MessageWrite => {
+                for scope in mvp::channel::feishu::api::FEISHU_MESSAGE_WRITE_RECOMMENDED_SCOPES {
+                    push_scope_if_missing(&mut scopes, scope);
+                }
+            }
+        }
+    }
+    scopes
+}
+
+pub fn resolve_required_feishu_scopes(
+    config: &mvp::config::FeishuIntegrationConfig,
+    override_scopes: &[String],
+    cli_capabilities: &[FeishuAuthCapability],
+    include_message_write: bool,
+) -> Vec<String> {
+    let default_scopes = if config.has_non_default_capability_config() {
+        scopes_for_configured_capabilities(&configured_capabilities_from_config(config))
+    } else {
+        config.trimmed_default_scopes()
+    };
+
+    resolve_scopes(
+        &default_scopes,
+        override_scopes,
+        cli_capabilities,
+        include_message_write,
+    )
 }
 
 pub fn normalized_auth_start_capabilities(
@@ -598,6 +714,94 @@ mod tests {
         assert!(scopes.iter().any(|scope| scope == "offline_access"));
         assert!(scopes.iter().any(|scope| scope == "docx:document:readonly"));
         assert!(scopes.iter().any(|scope| scope == "docx:document"));
+    }
+
+    #[test]
+    fn configured_capabilities_from_config_reflects_enabled_flags() {
+        let config = mvp::config::FeishuIntegrationConfig {
+            capabilities: mvp::config::FeishuCapabilityConfig {
+                doc_read: false,
+                doc_write: true,
+                message_read: false,
+                message_search: false,
+                calendar_read: false,
+                bitable: true,
+                message_write: false,
+            },
+            ..mvp::config::FeishuIntegrationConfig::default()
+        };
+
+        let capabilities = configured_capabilities_from_config(&config);
+
+        assert_eq!(
+            capabilities,
+            vec![
+                FeishuConfiguredCapability::DocWrite,
+                FeishuConfiguredCapability::Bitable,
+            ]
+        );
+    }
+
+    #[test]
+    fn scopes_for_configured_capabilities_include_offline_access_and_bitable() {
+        let scopes = scopes_for_configured_capabilities(&[
+            FeishuConfiguredCapability::DocRead,
+            FeishuConfiguredCapability::Bitable,
+        ]);
+
+        assert!(
+            scopes
+                .iter()
+                .any(|scope| scope == FEISHU_OFFLINE_ACCESS_SCOPE)
+        );
+        assert!(scopes.iter().any(|scope| scope == FEISHU_DOC_READ_SCOPE));
+        assert!(scopes.iter().any(|scope| scope == FEISHU_BITABLE_SCOPE));
+    }
+
+    #[test]
+    fn resolve_required_feishu_scopes_prefers_config_capabilities_over_legacy_default_scopes() {
+        let config = mvp::config::FeishuIntegrationConfig {
+            default_scopes: vec!["offline_access".to_owned()],
+            capabilities: mvp::config::FeishuCapabilityConfig {
+                bitable: true,
+                ..mvp::config::FeishuCapabilityConfig::default()
+            },
+            ..mvp::config::FeishuIntegrationConfig::default()
+        };
+
+        let scopes = resolve_required_feishu_scopes(&config, &[], &[], false);
+
+        assert!(scopes.iter().any(|scope| scope == FEISHU_BITABLE_SCOPE));
+        assert!(scopes.iter().any(|scope| scope == FEISHU_DOC_READ_SCOPE));
+        assert!(
+            scopes
+                .iter()
+                .any(|scope| scope == FEISHU_MESSAGE_READ_SCOPE)
+        );
+    }
+
+    #[test]
+    fn resolve_required_feishu_scopes_falls_back_to_legacy_default_scopes_when_capabilities_match_defaults()
+     {
+        let config = mvp::config::FeishuIntegrationConfig {
+            default_scopes: vec![
+                "offline_access".to_owned(),
+                "docx:document:readonly".to_owned(),
+                "bitable:app".to_owned(),
+            ],
+            ..mvp::config::FeishuIntegrationConfig::default()
+        };
+
+        let scopes = resolve_required_feishu_scopes(&config, &[], &[], false);
+
+        assert_eq!(
+            scopes,
+            vec![
+                "offline_access".to_owned(),
+                "docx:document:readonly".to_owned(),
+                "bitable:app".to_owned(),
+            ]
+        );
     }
 
     #[test]

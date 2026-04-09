@@ -10,7 +10,7 @@ use crate::feishu_support::{
     FeishuAuthCapability, FeishuDaemonContext, build_account_recommendations,
     build_grant_recommendations, build_pkce_pair, feishu_auth_start_command_hint,
     generate_oauth_state, load_feishu_daemon_context, normalized_auth_start_capabilities,
-    resolve_scopes, unix_ts_now,
+    unix_ts_now,
 };
 
 const DEFAULT_FEISHU_REDIRECT_URI: &str = "http://127.0.0.1:34819/callback";
@@ -1055,12 +1055,7 @@ pub async fn execute_feishu_auth_start(args: &FeishuAuthStartArgs) -> CliResult<
     let client = context.build_client()?;
     let capabilities =
         normalized_auth_start_capabilities(&args.capabilities, args.include_message_write);
-    let scopes = resolve_scopes(
-        &context.default_scopes(),
-        &args.scopes,
-        &capabilities,
-        args.include_message_write,
-    );
+    let scopes = context.required_scopes(&args.scopes, &capabilities, args.include_message_write);
     let state = generate_oauth_state();
     let (code_verifier, code_challenge) = build_pkce_pair();
     let now_s = unix_ts_now();
@@ -1161,7 +1156,7 @@ pub async fn execute_feishu_auth_list(args: &FeishuAuthListArgs) -> CliResult<Va
         args.common.config.as_deref(),
         args.common.account.as_deref(),
     )?;
-    let required_scopes = context.default_scopes();
+    let required_scopes = context.required_scopes(&[], &[], false);
     let now_s = unix_ts_now();
     let inventory = mvp::channel::feishu::api::inspect_grants_for_account(
         &context.store,
@@ -1231,7 +1226,7 @@ pub async fn execute_feishu_auth_select(args: &FeishuAuthSelectArgs) -> CliResul
             &grant,
             context.resolved.configured_account_id.as_str(),
             now_s,
-            &context.default_scopes(),
+            &context.required_scopes(&[], &[], false),
             Some(open_id),
             Some(open_id),
         ),
@@ -1243,7 +1238,7 @@ pub async fn execute_feishu_auth_status(args: &FeishuGrantArgs) -> CliResult<Val
         args.common.config.as_deref(),
         args.common.account.as_deref(),
     )?;
-    let required_scopes = context.default_scopes();
+    let required_scopes = context.required_scopes(&[], &[], false);
     let now_s = unix_ts_now();
     let inventory = mvp::channel::feishu::api::inspect_grants_for_account(
         &context.store,

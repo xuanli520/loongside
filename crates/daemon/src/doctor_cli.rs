@@ -828,7 +828,12 @@ pub fn check_feishu_integration(
         }
 
         let now_s = chrono::Utc::now().timestamp();
-        let required_scopes = config.feishu_integration.trimmed_default_scopes();
+        let required_scopes = crate::feishu_support::resolve_required_feishu_scopes(
+            &config.feishu_integration,
+            &[],
+            &[],
+            false,
+        );
         let Some(latest) = inventory.grants.first() else {
             continue;
         };
@@ -979,14 +984,30 @@ pub fn check_feishu_integration(
                 DoctorCheckLevel::Warn
             },
             detail: if let Some(grant) = effective_grant {
-                format!(
-                    "configured_account={} account={} effective_open_id={} required_scopes={} missing_scopes={}",
-                    resolved.configured_account_id,
-                    resolved.account.id,
-                    grant.principal.open_id,
-                    required_scopes.join(","),
-                    effective_status.missing_scopes.join(",")
-                )
+                if effective_status.missing_scopes.is_empty() {
+                    format!(
+                        "configured_account={} account={} effective_open_id={} required_scopes={} missing_scopes={}",
+                        resolved.configured_account_id,
+                        resolved.account.id,
+                        grant.principal.open_id,
+                        required_scopes.join(","),
+                        effective_status.missing_scopes.join(",")
+                    )
+                } else {
+                    format!(
+                        "configured_account={} account={} effective_open_id={} required_scopes={} missing_scopes={}; rerun `{}`",
+                        resolved.configured_account_id,
+                        resolved.account.id,
+                        grant.principal.open_id,
+                        required_scopes.join(","),
+                        effective_status.missing_scopes.join(","),
+                        crate::feishu_support::feishu_auth_start_command_hint(
+                            resolved.configured_account_id.as_str(),
+                            false,
+                            false,
+                        )
+                    )
+                }
             } else {
                 format!(
                     "configured_account={} account={} cannot determine effective scope coverage until a selected grant exists; run `{}`",

@@ -5964,6 +5964,8 @@ mod tests {
         .expect_err("feishu doc create should reject readonly grant");
 
         assert!(error.contains("feishu.doc.create requires Feishu scopes [docx:document]"));
+        assert!(error.contains("update Feishu config if needed"));
+        assert!(error.contains("feishu auth start --account <account>"));
     }
 
     #[cfg(all(feature = "feishu-integration", feature = "channel-feishu"))]
@@ -7347,6 +7349,8 @@ mod tests {
         .expect_err("feishu doc append should reject readonly grant");
 
         assert!(error.contains("feishu.doc.append requires Feishu scopes [docx:document]"));
+        assert!(error.contains("update Feishu config if needed"));
+        assert!(error.contains("feishu auth start --account <account>"));
     }
 
     #[cfg(all(feature = "feishu-integration", feature = "channel-feishu"))]

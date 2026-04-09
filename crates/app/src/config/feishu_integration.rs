@@ -20,6 +20,38 @@ const FEISHU_GROUP_MESSAGE_READ_SCOPE: &str = "im:message.group_msg";
 const FEISHU_GROUP_MESSAGE_READ_SCOPE_LEGACY: &str = "im:message.group_msg:readonly";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FeishuCapabilityConfig {
+    #[serde(default = "default_true")]
+    pub doc_read: bool,
+    #[serde(default)]
+    pub doc_write: bool,
+    #[serde(default = "default_true")]
+    pub message_read: bool,
+    #[serde(default = "default_true")]
+    pub message_search: bool,
+    #[serde(default = "default_true")]
+    pub calendar_read: bool,
+    #[serde(default)]
+    pub bitable: bool,
+    #[serde(default)]
+    pub message_write: bool,
+}
+
+impl Default for FeishuCapabilityConfig {
+    fn default() -> Self {
+        Self {
+            doc_read: true,
+            doc_write: false,
+            message_read: true,
+            message_search: true,
+            calendar_read: true,
+            bitable: false,
+            message_write: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FeishuIntegrationConfig {
     #[serde(default = "default_feishu_sqlite_path")]
     pub sqlite_path: String,
@@ -35,6 +67,8 @@ pub struct FeishuIntegrationConfig {
     pub retry_max_backoff_ms: usize,
     #[serde(default = "default_scopes")]
     pub default_scopes: Vec<String>,
+    #[serde(default)]
+    pub capabilities: FeishuCapabilityConfig,
 }
 
 impl Default for FeishuIntegrationConfig {
@@ -47,6 +81,7 @@ impl Default for FeishuIntegrationConfig {
             retry_initial_backoff_ms: default_retry_initial_backoff_ms(),
             retry_max_backoff_ms: default_retry_max_backoff_ms(),
             default_scopes: default_scopes(),
+            capabilities: FeishuCapabilityConfig::default(),
         }
     }
 }
@@ -68,6 +103,10 @@ impl FeishuIntegrationConfig {
             normalized.push(scope);
         }
         normalized
+    }
+
+    pub fn has_non_default_capability_config(&self) -> bool {
+        self.capabilities != FeishuCapabilityConfig::default()
     }
 
     pub(super) fn validate(&self) -> Vec<ConfigValidationIssue> {
@@ -143,6 +182,10 @@ const fn default_retry_max_backoff_ms() -> usize {
     2_000
 }
 
+const fn default_true() -> bool {
+    true
+}
+
 fn default_scopes() -> Vec<String> {
     vec![
         "offline_access".to_owned(),
@@ -188,6 +231,18 @@ mod tests {
                 .iter()
                 .any(|scope| scope == "offline_access")
         );
+        assert_eq!(
+            config.capabilities,
+            FeishuCapabilityConfig {
+                doc_read: true,
+                doc_write: false,
+                message_read: true,
+                message_search: true,
+                calendar_read: true,
+                bitable: false,
+                message_write: false,
+            }
+        );
     }
 
     #[test]
@@ -219,6 +274,43 @@ mod tests {
                 "docs:document:readonly".to_owned()
             ]
         );
+        assert_eq!(
+            config.feishu_integration.capabilities,
+            FeishuCapabilityConfig::default()
+        );
+    }
+
+    #[test]
+    fn runtime_config_loads_feishu_capabilities_block() {
+        let raw = r#"
+            [feishu_integration.capabilities]
+            doc_read = true
+            bitable = true
+            message_write = false
+        "#;
+
+        let config: crate::config::LoongClawConfig = toml::from_str(raw).expect("parse config");
+
+        assert!(config.feishu_integration.capabilities.doc_read);
+        assert!(config.feishu_integration.capabilities.bitable);
+        assert!(!config.feishu_integration.capabilities.message_write);
+        assert!(config.feishu_integration.capabilities.message_read);
+    }
+
+    #[test]
+    fn feishu_integration_detects_non_default_capability_configuration() {
+        let default_config = FeishuIntegrationConfig::default();
+        assert!(!default_config.has_non_default_capability_config());
+
+        let custom_config = FeishuIntegrationConfig {
+            capabilities: FeishuCapabilityConfig {
+                bitable: true,
+                ..FeishuCapabilityConfig::default()
+            },
+            ..FeishuIntegrationConfig::default()
+        };
+
+        assert!(custom_config.has_non_default_capability_config());
     }
 
     #[test]
