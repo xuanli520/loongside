@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::shared::{
     ConfigValidationIssue, DEFAULT_FEISHU_SQLITE_FILE, default_loongclaw_home, expand_path,
@@ -51,7 +51,7 @@ impl Default for FeishuCapabilityConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct FeishuIntegrationConfig {
     #[serde(default = "default_feishu_sqlite_path")]
     pub sqlite_path: String,
@@ -67,8 +67,51 @@ pub struct FeishuIntegrationConfig {
     pub retry_max_backoff_ms: usize,
     #[serde(default = "default_scopes")]
     pub default_scopes: Vec<String>,
-    #[serde(default)]
     pub capabilities: FeishuCapabilityConfig,
+    #[serde(default, skip_serializing, skip_deserializing)]
+    pub capabilities_explicitly_configured: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct FeishuIntegrationConfigSerde {
+    #[serde(default = "default_feishu_sqlite_path")]
+    sqlite_path: String,
+    #[serde(default = "default_oauth_state_ttl_s")]
+    oauth_state_ttl_s: usize,
+    #[serde(default = "default_request_timeout_s")]
+    request_timeout_s: usize,
+    #[serde(default = "default_retry_max_attempts")]
+    retry_max_attempts: usize,
+    #[serde(default = "default_retry_initial_backoff_ms")]
+    retry_initial_backoff_ms: usize,
+    #[serde(default = "default_retry_max_backoff_ms")]
+    retry_max_backoff_ms: usize,
+    #[serde(default = "default_scopes")]
+    default_scopes: Vec<String>,
+    #[serde(default)]
+    capabilities: Option<FeishuCapabilityConfig>,
+}
+
+impl<'de> Deserialize<'de> for FeishuIntegrationConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = FeishuIntegrationConfigSerde::deserialize(deserializer)?;
+        let capabilities_explicitly_configured = raw.capabilities.is_some();
+
+        Ok(Self {
+            sqlite_path: raw.sqlite_path,
+            oauth_state_ttl_s: raw.oauth_state_ttl_s,
+            request_timeout_s: raw.request_timeout_s,
+            retry_max_attempts: raw.retry_max_attempts,
+            retry_initial_backoff_ms: raw.retry_initial_backoff_ms,
+            retry_max_backoff_ms: raw.retry_max_backoff_ms,
+            default_scopes: raw.default_scopes,
+            capabilities: raw.capabilities.unwrap_or_default(),
+            capabilities_explicitly_configured,
+        })
+    }
 }
 
 impl Default for FeishuIntegrationConfig {
@@ -82,6 +125,7 @@ impl Default for FeishuIntegrationConfig {
             retry_max_backoff_ms: default_retry_max_backoff_ms(),
             default_scopes: default_scopes(),
             capabilities: FeishuCapabilityConfig::default(),
+            capabilities_explicitly_configured: false,
         }
     }
 }
@@ -105,8 +149,8 @@ impl FeishuIntegrationConfig {
         normalized
     }
 
-    pub fn has_non_default_capability_config(&self) -> bool {
-        self.capabilities != FeishuCapabilityConfig::default()
+    pub fn has_explicit_capability_config(&self) -> bool {
+        self.capabilities_explicitly_configured
     }
 
     pub(super) fn validate(&self) -> Vec<ConfigValidationIssue> {
@@ -298,11 +342,42 @@ mod tests {
     }
 
     #[test]
-    fn feishu_integration_detects_non_default_capability_configuration() {
+    fn runtime_config_marks_explicit_feishu_capabilities_block_even_when_values_match_defaults() {
+        let raw = r#"
+            [feishu_integration.capabilities]
+            doc_read = true
+            doc_write = false
+            message_read = true
+            message_search = true
+            calendar_read = true
+            bitable = false
+            message_write = false
+        "#;
+
+        let config: crate::config::LoongClawConfig = toml::from_str(raw).expect("parse config");
+
+        assert!(config.feishu_integration.has_explicit_capability_config());
+    }
+
+    #[test]
+    fn runtime_config_keeps_capabilities_implicit_when_block_is_absent() {
+        let raw = r#"
+            [feishu_integration]
+            request_timeout_s = 20
+        "#;
+
+        let config: crate::config::LoongClawConfig = toml::from_str(raw).expect("parse config");
+
+        assert!(!config.feishu_integration.has_explicit_capability_config());
+    }
+
+    #[test]
+    fn feishu_integration_tracks_explicit_capability_configuration() {
         let default_config = FeishuIntegrationConfig::default();
-        assert!(!default_config.has_non_default_capability_config());
+        assert!(!default_config.has_explicit_capability_config());
 
         let custom_config = FeishuIntegrationConfig {
+            capabilities_explicitly_configured: true,
             capabilities: FeishuCapabilityConfig {
                 bitable: true,
                 ..FeishuCapabilityConfig::default()
@@ -310,7 +385,7 @@ mod tests {
             ..FeishuIntegrationConfig::default()
         };
 
-        assert!(custom_config.has_non_default_capability_config());
+        assert!(custom_config.has_explicit_capability_config());
     }
 
     #[test]

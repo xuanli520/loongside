@@ -269,7 +269,7 @@ pub fn resolve_required_feishu_scopes(
     cli_capabilities: &[FeishuAuthCapability],
     include_message_write: bool,
 ) -> Vec<String> {
-    let default_scopes = if config.has_non_default_capability_config() {
+    let default_scopes = if config.has_explicit_capability_config() {
         scopes_for_configured_capabilities(&configured_capabilities_from_config(config))
     } else {
         config.trimmed_default_scopes()
@@ -762,6 +762,7 @@ mod tests {
     fn resolve_required_feishu_scopes_prefers_config_capabilities_over_legacy_default_scopes() {
         let config = mvp::config::FeishuIntegrationConfig {
             default_scopes: vec!["offline_access".to_owned()],
+            capabilities_explicitly_configured: true,
             capabilities: mvp::config::FeishuCapabilityConfig {
                 bitable: true,
                 ..mvp::config::FeishuCapabilityConfig::default()
@@ -781,9 +782,9 @@ mod tests {
     }
 
     #[test]
-    fn resolve_required_feishu_scopes_falls_back_to_legacy_default_scopes_when_capabilities_match_defaults()
+    fn resolve_required_feishu_scopes_uses_explicit_default_capability_block_instead_of_legacy_default_scopes()
      {
-        let config = mvp::config::FeishuIntegrationConfig {
+        let mut config = mvp::config::FeishuIntegrationConfig {
             default_scopes: vec![
                 "offline_access".to_owned(),
                 "docx:document:readonly".to_owned(),
@@ -791,17 +792,30 @@ mod tests {
             ],
             ..mvp::config::FeishuIntegrationConfig::default()
         };
+        config.capabilities_explicitly_configured = true;
 
         let scopes = resolve_required_feishu_scopes(&config, &[], &[], false);
 
-        assert_eq!(
-            scopes,
-            vec![
+        assert!(!scopes.iter().any(|scope| scope == FEISHU_BITABLE_SCOPE));
+        assert!(scopes.iter().any(|scope| scope == FEISHU_DOC_READ_SCOPE));
+    }
+
+    #[test]
+    fn resolve_required_feishu_scopes_falls_back_to_legacy_default_scopes_when_capability_block_is_absent()
+     {
+        let config = mvp::config::FeishuIntegrationConfig {
+            default_scopes: vec![
                 "offline_access".to_owned(),
                 "docx:document:readonly".to_owned(),
                 "bitable:app".to_owned(),
-            ]
-        );
+            ],
+            capabilities_explicitly_configured: false,
+            ..mvp::config::FeishuIntegrationConfig::default()
+        };
+
+        let scopes = resolve_required_feishu_scopes(&config, &[], &[], false);
+
+        assert!(scopes.iter().any(|scope| scope == FEISHU_BITABLE_SCOPE));
     }
 
     #[test]

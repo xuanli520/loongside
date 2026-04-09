@@ -30,6 +30,17 @@ fn sample_feishu_config_with_capabilities(
     ));
     config.feishu_integration.sqlite_path = dir.join("feishu.sqlite3").display().to_string();
     config.feishu_integration.capabilities = capabilities;
+    config.feishu_integration.capabilities_explicitly_configured = true;
+    config
+}
+
+fn sample_feishu_config_with_capabilities_and_default_scopes(
+    dir: &std::path::Path,
+    capabilities: mvp::config::FeishuCapabilityConfig,
+    default_scopes: Vec<String>,
+) -> mvp::config::LoongClawConfig {
+    let mut config = sample_feishu_config_with_capabilities(dir, capabilities);
+    config.feishu_integration.default_scopes = default_scopes;
     config
 }
 
@@ -249,6 +260,43 @@ fn doctor_warns_when_config_requires_bitable_scope_but_grant_lacks_it() {
             .detail
             .contains("loong feishu auth start --account feishu_main")
     );
+}
+
+#[test]
+fn doctor_ignores_legacy_bitable_default_scope_when_capability_block_is_explicit() {
+    let temp_dir = temp_doctor_feishu_dir("explicit-default-capabilities");
+    fs::create_dir_all(&temp_dir).expect("create temp dir");
+    let config = sample_feishu_config_with_capabilities_and_default_scopes(
+        &temp_dir,
+        mvp::config::FeishuCapabilityConfig::default(),
+        vec![
+            "offline_access".to_owned(),
+            "docx:document:readonly".to_owned(),
+            "im:message:readonly".to_owned(),
+            "im:message.group_msg".to_owned(),
+            "search:message".to_owned(),
+            "calendar:calendar:readonly".to_owned(),
+            "bitable:app".to_owned(),
+        ],
+    );
+    let now_s = loongclaw_daemon::feishu_support::unix_ts_now();
+    let store = mvp::channel::feishu::api::FeishuTokenStore::new(temp_dir.join("feishu.sqlite3"));
+    store
+        .save_grant(&sample_grant("feishu_main", now_s))
+        .expect("seed feishu grant");
+    let mut fixes = Vec::new();
+
+    let checks = loongclaw_daemon::doctor_cli::check_feishu_integration(&config, false, &mut fixes);
+
+    let scope_check = checks
+        .iter()
+        .find(|check| check.name.contains("feishu scope coverage"))
+        .expect("scope coverage check should exist");
+    assert_eq!(
+        scope_check.level,
+        loongclaw_daemon::doctor_cli::DoctorCheckLevel::Pass
+    );
+    assert!(!scope_check.detail.contains("bitable:app"));
 }
 
 #[test]
