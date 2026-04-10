@@ -1073,12 +1073,13 @@ fn parse_pending_approval_input_decision(input: &str) -> Option<PendingApprovalI
     }
 }
 
+#[allow(dead_code)]
 impl ConversationTurnCoordinator {
     pub fn new() -> Self {
         Self
     }
 
-    pub async fn compact_session(
+    pub(crate) async fn compact_session(
         &self,
         config: &LoongClawConfig,
         session_id: &str,
@@ -1102,7 +1103,7 @@ impl ConversationTurnCoordinator {
             .await
     }
 
-    pub async fn compact_session_with_runtime<R: ConversationRuntime + ?Sized>(
+    pub(crate) async fn compact_session_with_runtime<R: ConversationRuntime + ?Sized>(
         &self,
         config: &LoongClawConfig,
         session_id: &str,
@@ -1164,7 +1165,7 @@ impl ConversationTurnCoordinator {
         Ok(report)
     }
 
-    pub async fn handle_turn(
+    pub(crate) async fn handle_turn(
         &self,
         config: &LoongClawConfig,
         session_id: &str,
@@ -1184,7 +1185,7 @@ impl ConversationTurnCoordinator {
         .await
     }
 
-    pub async fn handle_turn_with_ingress(
+    pub(crate) async fn handle_turn_with_ingress(
         &self,
         config: &LoongClawConfig,
         session_id: &str,
@@ -1209,7 +1210,7 @@ impl ConversationTurnCoordinator {
         .await
     }
 
-    pub async fn handle_turn_with_acp_options(
+    pub(crate) async fn handle_turn_with_acp_options(
         &self,
         config: &LoongClawConfig,
         session_id: &str,
@@ -1230,7 +1231,7 @@ impl ConversationTurnCoordinator {
         .await
     }
 
-    pub async fn repair_turn_checkpoint_tail(
+    pub(crate) async fn repair_turn_checkpoint_tail(
         &self,
         config: &LoongClawConfig,
         session_id: &str,
@@ -1320,7 +1321,7 @@ impl ConversationTurnCoordinator {
         .await
     }
 
-    pub async fn probe_turn_checkpoint_tail_runtime_gate(
+    pub(crate) async fn probe_turn_checkpoint_tail_runtime_gate(
         &self,
         config: &LoongClawConfig,
         session_id: &str,
@@ -1356,7 +1357,7 @@ impl ConversationTurnCoordinator {
         .await
     }
 
-    pub async fn probe_turn_checkpoint_tail_runtime_gate_with_limit(
+    pub(crate) async fn probe_turn_checkpoint_tail_runtime_gate_with_limit(
         &self,
         config: &LoongClawConfig,
         session_id: &str,
@@ -1390,7 +1391,7 @@ impl ConversationTurnCoordinator {
         .await
     }
 
-    pub async fn handle_turn_with_acp_event_sink(
+    pub(crate) async fn handle_turn_with_acp_event_sink(
         &self,
         config: &LoongClawConfig,
         session_id: &str,
@@ -1411,7 +1412,7 @@ impl ConversationTurnCoordinator {
         .await
     }
 
-    pub async fn handle_turn_with_address(
+    pub(crate) async fn handle_turn_with_address(
         &self,
         config: &LoongClawConfig,
         address: &ConversationSessionAddress,
@@ -1431,7 +1432,7 @@ impl ConversationTurnCoordinator {
         .await
     }
 
-    pub async fn handle_turn_with_address_and_acp_event_sink(
+    pub(crate) async fn handle_turn_with_address_and_acp_event_sink(
         &self,
         config: &LoongClawConfig,
         address: &ConversationSessionAddress,
@@ -1452,7 +1453,7 @@ impl ConversationTurnCoordinator {
         .await
     }
 
-    pub async fn handle_turn_with_address_and_acp_options_and_ingress(
+    pub(crate) async fn handle_turn_with_address_and_acp_options_and_ingress(
         &self,
         config: &LoongClawConfig,
         address: &ConversationSessionAddress,
@@ -1476,7 +1477,7 @@ impl ConversationTurnCoordinator {
         .await
     }
 
-    pub async fn handle_turn_with_address_and_acp_options(
+    pub(crate) async fn handle_turn_with_address_and_acp_options(
         &self,
         config: &LoongClawConfig,
         address: &ConversationSessionAddress,
@@ -1499,7 +1500,7 @@ impl ConversationTurnCoordinator {
         .await
     }
 
-    pub async fn handle_turn_with_address_and_acp_options_and_ingress_and_observer(
+    pub(crate) async fn handle_turn_with_address_and_acp_options_and_ingress_and_observer(
         &self,
         config: &LoongClawConfig,
         address: &ConversationSessionAddress,
@@ -1525,7 +1526,7 @@ impl ConversationTurnCoordinator {
         .await
     }
 
-    pub async fn handle_turn_with_address_and_acp_options_and_observer(
+    pub(crate) async fn handle_turn_with_address_and_acp_options_and_observer(
         &self,
         config: &LoongClawConfig,
         address: &ConversationSessionAddress,
@@ -1589,7 +1590,7 @@ impl ConversationTurnCoordinator {
         Ok(runtime)
     }
 
-    pub async fn handle_turn_with_runtime<R: ConversationRuntime + ?Sized>(
+    pub(crate) async fn handle_turn_with_runtime<R: ConversationRuntime + ?Sized>(
         &self,
         config: &LoongClawConfig,
         session_id: &str,
@@ -1611,7 +1612,7 @@ impl ConversationTurnCoordinator {
         .await
     }
 
-    pub async fn handle_turn_with_runtime_and_ingress<R: ConversationRuntime + ?Sized>(
+    pub(crate) async fn handle_turn_with_runtime_and_ingress<R: ConversationRuntime + ?Sized>(
         &self,
         config: &LoongClawConfig,
         session_id: &str,
@@ -1636,7 +1637,9 @@ impl ConversationTurnCoordinator {
         .await
     }
 
-    pub async fn repair_turn_checkpoint_tail_with_runtime<R: ConversationRuntime + ?Sized>(
+    pub(crate) async fn repair_turn_checkpoint_tail_with_runtime<
+        R: ConversationRuntime + ?Sized,
+    >(
         &self,
         config: &LoongClawConfig,
         session_id: &str,
@@ -1719,7 +1722,7 @@ impl ConversationTurnCoordinator {
         }
     }
 
-    pub async fn probe_turn_checkpoint_tail_runtime_gate_with_runtime<
+    pub(crate) async fn probe_turn_checkpoint_tail_runtime_gate_with_runtime<
         R: ConversationRuntime + ?Sized,
     >(
         &self,
@@ -1738,7 +1741,7 @@ impl ConversationTurnCoordinator {
         .await
     }
 
-    pub async fn probe_turn_checkpoint_tail_runtime_gate_with_runtime_and_limit<
+    pub(crate) async fn probe_turn_checkpoint_tail_runtime_gate_with_runtime_and_limit<
         R: ConversationRuntime + ?Sized,
     >(
         &self,
@@ -1766,7 +1769,9 @@ impl ConversationTurnCoordinator {
         }
     }
 
-    pub async fn handle_turn_with_runtime_and_acp_options<R: ConversationRuntime + ?Sized>(
+    pub(crate) async fn handle_turn_with_runtime_and_acp_options<
+        R: ConversationRuntime + ?Sized,
+    >(
         &self,
         config: &LoongClawConfig,
         session_id: &str,
@@ -1790,7 +1795,9 @@ impl ConversationTurnCoordinator {
         .await
     }
 
-    pub async fn handle_turn_with_runtime_and_acp_event_sink<R: ConversationRuntime + ?Sized>(
+    pub(crate) async fn handle_turn_with_runtime_and_acp_event_sink<
+        R: ConversationRuntime + ?Sized,
+    >(
         &self,
         config: &LoongClawConfig,
         session_id: &str,
@@ -1813,7 +1820,7 @@ impl ConversationTurnCoordinator {
         .await
     }
 
-    pub async fn handle_turn_with_runtime_and_address<R: ConversationRuntime + ?Sized>(
+    pub(crate) async fn handle_turn_with_runtime_and_address<R: ConversationRuntime + ?Sized>(
         &self,
         config: &LoongClawConfig,
         address: &ConversationSessionAddress,
@@ -1836,7 +1843,7 @@ impl ConversationTurnCoordinator {
         .await
     }
 
-    pub async fn handle_turn_with_runtime_and_address_and_acp_options<
+    pub(crate) async fn handle_turn_with_runtime_and_address_and_acp_options<
         R: ConversationRuntime + ?Sized,
     >(
         &self,
@@ -1888,7 +1895,7 @@ impl ConversationTurnCoordinator {
         .await
     }
 
-    pub async fn handle_turn_with_runtime_and_address_and_acp_options_and_ingress_and_observer<
+    pub(crate) async fn handle_turn_with_runtime_and_address_and_acp_options_and_ingress_and_observer<
         R: ConversationRuntime + ?Sized,
     >(
         &self,
@@ -2249,7 +2256,7 @@ impl ConversationTurnCoordinator {
         .await
     }
 
-    pub async fn handle_turn_with_runtime_and_address_and_acp_event_sink<
+    pub(crate) async fn handle_turn_with_runtime_and_address_and_acp_event_sink<
         R: ConversationRuntime + ?Sized,
     >(
         &self,
@@ -7848,6 +7855,72 @@ mod tests {
             error,
             PRODUCTION_CONVERSATION_RUNTIME_REQUIRES_KERNEL_BINDING
         );
+    }
+
+    #[test]
+    fn generic_direct_capable_coordinator_entrypoints_are_not_public_api() {
+        let source = include_str!("turn_coordinator.rs");
+        let function_specs = [
+            ("compact_session", false),
+            ("compact_session_with_runtime", true),
+            ("handle_turn", false),
+            ("handle_turn_with_ingress", false),
+            ("handle_turn_with_acp_options", false),
+            ("repair_turn_checkpoint_tail", false),
+            ("probe_turn_checkpoint_tail_runtime_gate", false),
+            ("probe_turn_checkpoint_tail_runtime_gate_with_limit", false),
+            ("handle_turn_with_acp_event_sink", false),
+            ("handle_turn_with_address", false),
+            ("handle_turn_with_address_and_acp_event_sink", false),
+            (
+                "handle_turn_with_address_and_acp_options_and_ingress",
+                false,
+            ),
+            ("handle_turn_with_address_and_acp_options", false),
+            (
+                "handle_turn_with_address_and_acp_options_and_ingress_and_observer",
+                false,
+            ),
+            (
+                "handle_turn_with_address_and_acp_options_and_observer",
+                false,
+            ),
+            ("handle_turn_with_runtime", true),
+            ("handle_turn_with_runtime_and_ingress", true),
+            ("repair_turn_checkpoint_tail_with_runtime", true),
+            ("probe_turn_checkpoint_tail_runtime_gate_with_runtime", true),
+            (
+                "probe_turn_checkpoint_tail_runtime_gate_with_runtime_and_limit",
+                true,
+            ),
+            ("handle_turn_with_runtime_and_acp_options", true),
+            ("handle_turn_with_runtime_and_acp_event_sink", true),
+            ("handle_turn_with_runtime_and_address", true),
+            ("handle_turn_with_runtime_and_address_and_acp_options", true),
+            (
+                "handle_turn_with_runtime_and_address_and_acp_options_and_ingress_and_observer",
+                true,
+            ),
+            (
+                "handle_turn_with_runtime_and_address_and_acp_event_sink",
+                true,
+            ),
+        ];
+
+        for (function_name, generic) in function_specs {
+            let mut signature = String::from("pub async fn ");
+            signature.push_str(function_name);
+            if generic {
+                signature.push('<');
+            } else {
+                signature.push('(');
+            }
+
+            assert!(
+                !source.contains(signature.as_str()),
+                "generic direct-capable coordinator seam should stay internal: {function_name}"
+            );
+        }
     }
 
     #[test]
