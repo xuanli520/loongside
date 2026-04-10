@@ -764,7 +764,7 @@ impl ToolRuntimeConfig {
             shell_deny.iter(),
         );
         Self {
-            file_root: Some(config.tools.resolved_file_root()),
+            file_root: config.tools.configured_file_root(),
             memory_sqlite_path: Some(config.memory.resolved_sqlite_path()),
             selected_memory_system_id,
             shell_allow,
@@ -2204,6 +2204,15 @@ mod tests {
             ..ToolRuntimeConfig::default()
         };
         assert_eq!(config.file_root, Some(PathBuf::from("/tmp/test-root")));
+    }
+
+    #[test]
+    fn tool_runtime_config_from_loongclaw_config_keeps_file_root_unset_when_not_configured() {
+        let config = crate::config::LoongClawConfig::default();
+
+        let runtime = ToolRuntimeConfig::from_loongclaw_config(&config, None);
+
+        assert_eq!(runtime.file_root, None);
     }
 
     #[test]

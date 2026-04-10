@@ -45,10 +45,14 @@ pub fn initialize_runtime_environment(
         "LOONGCLAW_SHELL_DEFAULT_MODE",
         config.tools.shell_default_mode.as_str(),
     );
-    set_env_var(
-        "LOONGCLAW_FILE_ROOT",
-        config.tools.resolved_file_root().display().to_string(),
-    );
+    let configured_file_root = config.tools.configured_file_root();
+    match configured_file_root {
+        Some(configured_file_root) => {
+            let configured_file_root_text = configured_file_root.display().to_string();
+            set_env_var("LOONGCLAW_FILE_ROOT", configured_file_root_text);
+        }
+        None => remove_env_var("LOONGCLAW_FILE_ROOT"),
+    }
     set_env_var(
         "LOONGCLAW_TOOL_SESSIONS_ENABLED",
         bool_env(config.tools.sessions.enabled),
@@ -422,5 +426,17 @@ mod tests {
             std::env::var("LOONGCLAW_BROWSER_COMPANION_EXPECTED_VERSION").ok(),
             None
         );
+    }
+
+    #[test]
+    fn initialize_runtime_environment_leaves_file_root_unset_when_not_configured() {
+        let mut env = ScopedEnv::new();
+        clear_runtime_environment_exports(&mut env);
+        env.set("LOONGCLAW_FILE_ROOT", "/tmp/stale-root");
+        let config = LoongClawConfig::default();
+
+        initialize_runtime_environment(&config, None);
+
+        assert_eq!(std::env::var("LOONGCLAW_FILE_ROOT").ok(), None);
     }
 }

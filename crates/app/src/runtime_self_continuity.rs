@@ -291,7 +291,39 @@ pub(crate) const fn runtime_durable_recall_intro() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::LoongClawConfig;
     use serde_json::json;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use tempfile::tempdir;
+
+    struct ScopedCurrentDir {
+        _guard: MutexGuard<'static, ()>,
+        original: std::path::PathBuf,
+    }
+
+    impl ScopedCurrentDir {
+        fn lock() -> &'static Mutex<()> {
+            static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+            LOCK.get_or_init(|| Mutex::new(()))
+        }
+
+        fn enter(path: &std::path::Path) -> Self {
+            let guard = Self::lock().lock().expect("lock current dir test");
+            let original = std::env::current_dir().expect("read current dir");
+            std::env::set_current_dir(path).expect("set current dir");
+
+            Self {
+                _guard: guard,
+                original,
+            }
+        }
+    }
+
+    impl Drop for ScopedCurrentDir {
+        fn drop(&mut self) {
+            std::env::set_current_dir(&self.original).expect("restore current dir");
+        }
+    }
 
     #[test]
     fn runtime_self_continuity_from_event_payload_defaults_missing_tool_usage_policy_lane() {
@@ -383,6 +415,26 @@ mod tests {
         assert!(
             rendered.contains("Operator prefers concise technical summaries."),
             "expected projected profile text, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn resolve_runtime_self_continuity_for_config_does_not_treat_cwd_as_explicit_workspace_root() {
+        let temp_dir = tempdir().expect("tempdir");
+        let workspace_root = temp_dir.path();
+        let agents_path = workspace_root.join("AGENTS.md");
+        let mut config = LoongClawConfig::default();
+        let _guard = ScopedCurrentDir::enter(workspace_root);
+
+        std::fs::write(&agents_path, "cwd runtime self should stay advisory-only")
+            .expect("write AGENTS");
+        config.tools.file_root = None;
+
+        let continuity = resolve_runtime_self_continuity_for_config(&config);
+
+        assert_eq!(
+            continuity, None,
+            "implicit cwd fallback should not become a live runtime-self workspace root"
         );
     }
 }
