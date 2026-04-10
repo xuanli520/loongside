@@ -1089,6 +1089,19 @@ impl ConversationTurnCoordinator {
             .await
     }
 
+    pub async fn compact_production_session(
+        &self,
+        config: &LoongClawConfig,
+        session_id: &str,
+        binding: ConversationRuntimeBinding<'_>,
+    ) -> CliResult<ContextCompactionReport> {
+        let production_binding = require_production_kernel_binding(binding, None)?;
+        let runtime = DefaultConversationRuntime::from_config_or_env(config)?;
+
+        self.compact_session_with_runtime(config, session_id, &runtime, production_binding)
+            .await
+    }
+
     pub async fn compact_session_with_runtime<R: ConversationRuntime + ?Sized>(
         &self,
         config: &LoongClawConfig,
@@ -1228,6 +1241,24 @@ impl ConversationTurnCoordinator {
             .await
     }
 
+    pub async fn repair_production_turn_checkpoint_tail(
+        &self,
+        config: &LoongClawConfig,
+        session_id: &str,
+        binding: ConversationRuntimeBinding<'_>,
+    ) -> CliResult<TurnCheckpointTailRepairOutcome> {
+        let production_binding = require_production_kernel_binding(binding, None)?;
+        let runtime = DefaultConversationRuntime::from_config_or_env(config)?;
+
+        self.repair_turn_checkpoint_tail_with_runtime(
+            config,
+            session_id,
+            &runtime,
+            production_binding,
+        )
+        .await
+    }
+
     pub(crate) async fn load_turn_checkpoint_diagnostics(
         &self,
         config: &LoongClawConfig,
@@ -1245,6 +1276,18 @@ impl ConversationTurnCoordinator {
         .await
     }
 
+    pub(crate) async fn load_production_turn_checkpoint_diagnostics(
+        &self,
+        config: &LoongClawConfig,
+        session_id: &str,
+        binding: ConversationRuntimeBinding<'_>,
+    ) -> CliResult<TurnCheckpointDiagnostics> {
+        let production_binding = require_production_kernel_binding(binding, None)?;
+
+        self.load_turn_checkpoint_diagnostics(config, session_id, production_binding)
+            .await
+    }
+
     pub(crate) async fn load_turn_checkpoint_diagnostics_with_limit(
         &self,
         config: &LoongClawConfig,
@@ -1255,6 +1298,24 @@ impl ConversationTurnCoordinator {
         let runtime = DefaultConversationRuntime::from_config_or_env(config)?;
         self.load_turn_checkpoint_diagnostics_with_runtime_and_limit(
             config, session_id, limit, &runtime, binding,
+        )
+        .await
+    }
+
+    pub(crate) async fn load_production_turn_checkpoint_diagnostics_with_limit(
+        &self,
+        config: &LoongClawConfig,
+        session_id: &str,
+        limit: usize,
+        binding: ConversationRuntimeBinding<'_>,
+    ) -> CliResult<TurnCheckpointDiagnostics> {
+        let production_binding = require_production_kernel_binding(binding, None)?;
+
+        self.load_turn_checkpoint_diagnostics_with_limit(
+            config,
+            session_id,
+            limit,
+            production_binding,
         )
         .await
     }
@@ -1276,6 +1337,25 @@ impl ConversationTurnCoordinator {
         .await
     }
 
+    pub async fn probe_production_turn_checkpoint_tail_runtime_gate(
+        &self,
+        config: &LoongClawConfig,
+        session_id: &str,
+        binding: ConversationRuntimeBinding<'_>,
+    ) -> CliResult<Option<TurnCheckpointTailRepairRuntimeProbe>> {
+        let production_binding = require_production_kernel_binding(binding, None)?;
+        let runtime = DefaultConversationRuntime::from_config_or_env(config)?;
+
+        self.probe_turn_checkpoint_tail_runtime_gate_with_runtime_and_limit(
+            config,
+            session_id,
+            config.memory.sliding_window,
+            &runtime,
+            production_binding,
+        )
+        .await
+    }
+
     pub async fn probe_turn_checkpoint_tail_runtime_gate_with_limit(
         &self,
         config: &LoongClawConfig,
@@ -1286,6 +1366,26 @@ impl ConversationTurnCoordinator {
         let runtime = DefaultConversationRuntime::from_config_or_env(config)?;
         self.probe_turn_checkpoint_tail_runtime_gate_with_runtime_and_limit(
             config, session_id, limit, &runtime, binding,
+        )
+        .await
+    }
+
+    pub async fn probe_production_turn_checkpoint_tail_runtime_gate_with_limit(
+        &self,
+        config: &LoongClawConfig,
+        session_id: &str,
+        limit: usize,
+        binding: ConversationRuntimeBinding<'_>,
+    ) -> CliResult<Option<TurnCheckpointTailRepairRuntimeProbe>> {
+        let production_binding = require_production_kernel_binding(binding, None)?;
+        let runtime = DefaultConversationRuntime::from_config_or_env(config)?;
+
+        self.probe_turn_checkpoint_tail_runtime_gate_with_runtime_and_limit(
+            config,
+            session_id,
+            limit,
+            &runtime,
+            production_binding,
         )
         .await
     }
@@ -7661,6 +7761,93 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(phase_names, vec![ConversationTurnPhase::Failed]);
+    }
+
+    #[tokio::test]
+    async fn compact_production_session_rejects_direct_binding_before_runtime_bootstrap() {
+        let mut config = LoongClawConfig::default();
+        config.conversation.context_engine = Some("missing-maintenance-runtime".to_owned());
+
+        let coordinator = ConversationTurnCoordinator::new();
+        let result = coordinator
+            .compact_production_session(
+                &config,
+                "maintenance-session",
+                ConversationRuntimeBinding::direct(),
+            )
+            .await;
+        let error = result.expect_err("direct production maintenance binding should fail");
+
+        assert_eq!(
+            error,
+            PRODUCTION_CONVERSATION_RUNTIME_REQUIRES_KERNEL_BINDING
+        );
+    }
+
+    #[tokio::test]
+    async fn repair_production_turn_checkpoint_tail_rejects_direct_binding_before_runtime_bootstrap()
+     {
+        let mut config = LoongClawConfig::default();
+        config.conversation.context_engine = Some("missing-maintenance-runtime".to_owned());
+
+        let coordinator = ConversationTurnCoordinator::new();
+        let result = coordinator
+            .repair_production_turn_checkpoint_tail(
+                &config,
+                "maintenance-session",
+                ConversationRuntimeBinding::direct(),
+            )
+            .await;
+        let error = result.expect_err("direct production maintenance binding should fail");
+
+        assert_eq!(
+            error,
+            PRODUCTION_CONVERSATION_RUNTIME_REQUIRES_KERNEL_BINDING
+        );
+    }
+
+    #[tokio::test]
+    async fn load_production_turn_checkpoint_diagnostics_rejects_direct_binding_before_runtime_bootstrap()
+     {
+        let mut config = LoongClawConfig::default();
+        config.conversation.context_engine = Some("missing-maintenance-runtime".to_owned());
+
+        let coordinator = ConversationTurnCoordinator::new();
+        let result = coordinator
+            .load_production_turn_checkpoint_diagnostics(
+                &config,
+                "maintenance-session",
+                ConversationRuntimeBinding::direct(),
+            )
+            .await;
+        let error = result.expect_err("direct production maintenance binding should fail");
+
+        assert_eq!(
+            error,
+            PRODUCTION_CONVERSATION_RUNTIME_REQUIRES_KERNEL_BINDING
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_production_turn_checkpoint_tail_runtime_gate_rejects_direct_binding_before_runtime_bootstrap()
+     {
+        let mut config = LoongClawConfig::default();
+        config.conversation.context_engine = Some("missing-maintenance-runtime".to_owned());
+
+        let coordinator = ConversationTurnCoordinator::new();
+        let result = coordinator
+            .probe_production_turn_checkpoint_tail_runtime_gate(
+                &config,
+                "maintenance-session",
+                ConversationRuntimeBinding::direct(),
+            )
+            .await;
+        let error = result.expect_err("direct production maintenance binding should fail");
+
+        assert_eq!(
+            error,
+            PRODUCTION_CONVERSATION_RUNTIME_REQUIRES_KERNEL_BINDING
+        );
     }
 
     #[test]

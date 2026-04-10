@@ -2190,7 +2190,9 @@ async fn print_turn_checkpoint_summary(
     #[cfg(feature = "memory-sqlite")]
     {
         let diagnostics = turn_coordinator
-            .load_turn_checkpoint_diagnostics_with_limit(config, session_id, limit, binding)
+            .load_production_turn_checkpoint_diagnostics_with_limit(
+                config, session_id, limit, binding,
+            )
             .await?;
         let render_width = detect_cli_chat_render_width();
         let rendered_lines = render_turn_checkpoint_summary_lines_with_width(
@@ -2229,7 +2231,7 @@ async fn print_turn_checkpoint_repair(
     #[cfg(feature = "memory-sqlite")]
     {
         let outcome = turn_coordinator
-            .repair_turn_checkpoint_tail(config, session_id, binding)
+            .repair_production_turn_checkpoint_tail(config, session_id, binding)
             .await?;
         let render_width = detect_cli_chat_render_width();
         let rendered_lines =
