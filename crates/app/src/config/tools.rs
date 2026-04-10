@@ -2109,6 +2109,11 @@ blocked_domains = ["internal.example", " INTERNAL.EXAMPLE "]
 
     #[test]
     fn configured_file_root_expands_explicit_paths_without_fallback() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let mut env = ScopedEnv::new();
+        env.set("HOME", home.path());
+        env.set("USERPROFILE", home.path());
+
         let config = ToolConfig {
             file_root: Some("~/workspace-root".to_owned()),
             ..ToolConfig::default()

@@ -6804,6 +6804,7 @@ mod tests {
         ConversationTurnObserver, ConversationTurnPhase, ConversationTurnToolState,
     };
     use crate::session::repository::FinalizeSessionTerminalResult;
+    use regex::Regex;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
@@ -8008,64 +8009,62 @@ mod tests {
     #[test]
     fn generic_direct_capable_coordinator_entrypoints_are_not_public_api() {
         let source = include_str!("turn_coordinator.rs");
-        let function_specs = [
-            ("compact_session", false),
-            ("compact_session_with_runtime", true),
-            ("handle_turn", false),
-            ("handle_turn_with_ingress", false),
-            ("handle_turn_with_acp_options", false),
-            ("repair_turn_checkpoint_tail", false),
-            ("probe_turn_checkpoint_tail_runtime_gate", false),
-            ("probe_turn_checkpoint_tail_runtime_gate_with_limit", false),
-            ("handle_turn_with_acp_event_sink", false),
-            ("handle_turn_with_address", false),
-            ("handle_turn_with_address_and_acp_event_sink", false),
-            (
-                "handle_turn_with_address_and_acp_options_and_ingress",
-                false,
-            ),
-            ("handle_turn_with_address_and_acp_options", false),
-            (
-                "handle_turn_with_address_and_acp_options_and_ingress_and_observer",
-                false,
-            ),
-            (
-                "handle_turn_with_address_and_acp_options_and_observer",
-                false,
-            ),
-            ("handle_turn_with_runtime", true),
-            ("handle_turn_with_runtime_and_ingress", true),
-            ("repair_turn_checkpoint_tail_with_runtime", true),
-            ("probe_turn_checkpoint_tail_runtime_gate_with_runtime", true),
-            (
-                "probe_turn_checkpoint_tail_runtime_gate_with_runtime_and_limit",
-                true,
-            ),
-            ("handle_turn_with_runtime_and_acp_options", true),
-            ("handle_turn_with_runtime_and_acp_event_sink", true),
-            ("handle_turn_with_runtime_and_address", true),
-            ("handle_turn_with_runtime_and_address_and_acp_options", true),
-            (
-                "handle_turn_with_runtime_and_address_and_acp_options_and_ingress_and_observer",
-                true,
-            ),
-            (
-                "handle_turn_with_runtime_and_address_and_acp_event_sink",
-                true,
-            ),
+        let function_names = [
+            "compact_session",
+            "compact_session_with_runtime",
+            "handle_turn",
+            "handle_turn_with_ingress",
+            "handle_turn_with_acp_options",
+            "repair_turn_checkpoint_tail",
+            "probe_turn_checkpoint_tail_runtime_gate",
+            "probe_turn_checkpoint_tail_runtime_gate_with_limit",
+            "handle_turn_with_acp_event_sink",
+            "handle_turn_with_address",
+            "handle_turn_with_address_and_acp_event_sink",
+            "handle_turn_with_address_and_acp_options_and_ingress",
+            "handle_turn_with_address_and_acp_options",
+            "handle_turn_with_address_and_acp_options_and_ingress_and_observer",
+            "handle_turn_with_address_and_acp_options_and_observer",
+            "handle_turn_with_runtime",
+            "handle_turn_with_runtime_and_ingress",
+            "repair_turn_checkpoint_tail_with_runtime",
+            "probe_turn_checkpoint_tail_runtime_gate_with_runtime",
+            "probe_turn_checkpoint_tail_runtime_gate_with_runtime_and_limit",
+            "handle_turn_with_runtime_and_acp_options",
+            "handle_turn_with_runtime_and_acp_event_sink",
+            "handle_turn_with_runtime_and_address",
+            "handle_turn_with_runtime_and_address_and_acp_options",
+            "handle_turn_with_runtime_and_address_and_acp_options_and_ingress_and_observer",
+            "handle_turn_with_runtime_and_address_and_acp_event_sink",
         ];
+        let signature_pattern = Regex::new(
+            r"(?m)^(?:(?:\s*///[^\n]*\n)|(?:\s*#\[[^\n]+\]\s*\n))*\s*(?P<visibility>pub(?:\([^)]*\))?\s+)?async\s+fn\s+(?P<name>[A-Za-z0-9_]+)\b",
+        )
+        .expect("signature regex should compile");
+        let mut public_function_names = Vec::new();
 
-        for (function_name, generic) in function_specs {
-            let mut signature = String::from("pub async fn ");
-            signature.push_str(function_name);
-            if generic {
-                signature.push('<');
-            } else {
-                signature.push('(');
+        for captures in signature_pattern.captures_iter(source) {
+            let Some(name_match) = captures.name("name") else {
+                continue;
+            };
+            let visibility = captures
+                .name("visibility")
+                .map(|match_value| match_value.as_str().trim())
+                .unwrap_or("");
+            if visibility != "pub" {
+                continue;
             }
 
+            let function_name = name_match.as_str().to_owned();
+            public_function_names.push(function_name);
+        }
+
+        for function_name in function_names {
+            let is_public = public_function_names
+                .iter()
+                .any(|public_name| public_name == function_name);
             assert!(
-                !source.contains(signature.as_str()),
+                !is_public,
                 "generic direct-capable coordinator seam should stay internal: {function_name}"
             );
         }
