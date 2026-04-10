@@ -21,15 +21,12 @@ fn temp_feishu_cli_dir(label: &str) -> std::path::PathBuf {
 }
 
 fn write_sample_feishu_config(dir: &std::path::Path) -> std::path::PathBuf {
-    write_sample_feishu_config_with_capabilities(
-        dir,
-        mvp::config::FeishuCapabilityConfig::default(),
-    )
+    write_sample_feishu_config_with_capabilities(dir, None)
 }
 
 fn write_sample_feishu_config_with_capabilities(
     dir: &std::path::Path,
-    capabilities: mvp::config::FeishuCapabilityConfig,
+    capabilities: Option<mvp::config::FeishuCapabilityConfig>,
 ) -> std::path::PathBuf {
     fs::create_dir_all(dir).expect("create temp feishu config dir");
     let config_path = dir.join("loongclaw.toml");
@@ -45,7 +42,10 @@ fn write_sample_feishu_config_with_capabilities(
         "app-secret".to_owned(),
     ));
     config.feishu_integration.sqlite_path = sqlite_path.display().to_string();
-    config.feishu_integration.capabilities = capabilities;
+    if let Some(capabilities) = capabilities {
+        config.feishu_integration.capabilities = capabilities;
+        config.feishu_integration.capabilities_explicitly_configured = true;
+    }
 
     mvp::config::write(config_path.to_str(), &config, true).expect("write sample feishu config");
     config_path
@@ -72,6 +72,7 @@ fn write_sample_feishu_config_with_capabilities_and_default_scopes(
     config.feishu_integration.sqlite_path = sqlite_path.display().to_string();
     config.feishu_integration.default_scopes = default_scopes;
     config.feishu_integration.capabilities = capabilities;
+    config.feishu_integration.capabilities_explicitly_configured = true;
 
     mvp::config::write(config_path.to_str(), &config, true).expect("write sample feishu config");
     config_path
@@ -208,18 +209,21 @@ fn sample_grant_covering_default_coarse_capabilities(
     now_s: i64,
 ) -> mvp::channel::feishu::api::FeishuGrant {
     let mut grant = sample_grant(account_id, open_id, access_token, refresh_token, now_s);
-    grant.scopes = mvp::channel::feishu::api::FeishuGrantScopeSet::from_scopes([
-        "offline_access",
-        "docx:document:readonly",
-        "docx:document",
-        "im:message:readonly",
-        "im:message.group_msg",
-        "search:message",
-        "im:message",
-        "im:message:send_as_bot",
-        "im:message:send",
-        "calendar:calendar:readonly",
-    ]);
+    let config = mvp::config::FeishuIntegrationConfig {
+        capabilities: mvp::config::FeishuCapabilityConfig {
+            docs: true,
+            messages: true,
+            calendar: true,
+            bitable: false,
+        },
+        capabilities_explicitly_configured: true,
+        ..mvp::config::FeishuIntegrationConfig::default()
+    };
+    grant.scopes = mvp::channel::feishu::api::FeishuGrantScopeSet::from_scopes(
+        loongclaw_daemon::feishu_support::scopes_for_configured_capabilities(
+            &loongclaw_daemon::feishu_support::configured_capabilities_from_config(&config),
+        ),
+    );
     grant
 }
 
@@ -3981,12 +3985,12 @@ async fn feishu_auth_start_uses_config_derived_bitable_scope_without_manual_scop
     let temp_dir = temp_feishu_cli_dir("auth-start-config-bitable");
     let config_path = write_sample_feishu_config_with_capabilities(
         &temp_dir,
-        mvp::config::FeishuCapabilityConfig {
+        Some(mvp::config::FeishuCapabilityConfig {
             docs: true,
             messages: true,
             calendar: true,
             bitable: true,
-        },
+        }),
     );
     let args = loongclaw_daemon::feishu_cli::FeishuAuthStartArgs {
         common: loongclaw_daemon::feishu_cli::FeishuCommonArgs {
@@ -5231,12 +5235,12 @@ async fn feishu_auth_status_reports_missing_config_derived_bitable_scope() {
     let temp_dir = temp_feishu_cli_dir("auth-status-config-bitable-gap");
     let config_path = write_sample_feishu_config_with_capabilities(
         &temp_dir,
-        mvp::config::FeishuCapabilityConfig {
+        Some(mvp::config::FeishuCapabilityConfig {
             docs: true,
             messages: true,
             calendar: true,
             bitable: true,
-        },
+        }),
     );
     let now_s = loongclaw_daemon::feishu_support::unix_ts_now();
     let store = mvp::channel::feishu::api::FeishuTokenStore::new(temp_dir.join("feishu.sqlite3"));

@@ -12,7 +12,10 @@ fn temp_doctor_feishu_dir(label: &str) -> std::path::PathBuf {
 }
 
 fn sample_feishu_config(dir: &std::path::Path) -> mvp::config::LoongClawConfig {
-    sample_feishu_config_with_capabilities(dir, mvp::config::FeishuCapabilityConfig::default())
+    let mut config =
+        sample_feishu_config_with_capabilities(dir, mvp::config::FeishuCapabilityConfig::default());
+    config.feishu_integration.capabilities_explicitly_configured = false;
+    config
 }
 
 fn sample_feishu_config_with_capabilities(
@@ -78,18 +81,21 @@ fn sample_grant_covering_default_coarse_capabilities(
     now_s: i64,
 ) -> mvp::channel::feishu::api::FeishuGrant {
     let mut grant = sample_grant(account_id, now_s);
-    grant.scopes = mvp::channel::feishu::api::FeishuGrantScopeSet::from_scopes([
-        "offline_access",
-        "docx:document:readonly",
-        "docx:document",
-        "im:message:readonly",
-        "im:message.group_msg",
-        "search:message",
-        "im:message",
-        "im:message:send_as_bot",
-        "im:message:send",
-        "calendar:calendar:readonly",
-    ]);
+    let config = mvp::config::FeishuIntegrationConfig {
+        capabilities: mvp::config::FeishuCapabilityConfig {
+            docs: true,
+            messages: true,
+            calendar: true,
+            bitable: false,
+        },
+        capabilities_explicitly_configured: true,
+        ..mvp::config::FeishuIntegrationConfig::default()
+    };
+    grant.scopes = mvp::channel::feishu::api::FeishuGrantScopeSet::from_scopes(
+        loongclaw_daemon::feishu_support::scopes_for_configured_capabilities(
+            &loongclaw_daemon::feishu_support::configured_capabilities_from_config(&config),
+        ),
+    );
     grant
 }
 

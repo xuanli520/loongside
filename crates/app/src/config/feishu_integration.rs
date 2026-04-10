@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::shared::{
     ConfigValidationIssue, DEFAULT_FEISHU_SQLITE_FILE, default_loongclaw_home, expand_path,
@@ -42,25 +42,42 @@ impl Default for FeishuCapabilityConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeishuIntegrationConfig {
-    #[serde(default = "default_feishu_sqlite_path")]
     pub sqlite_path: String,
-    #[serde(default = "default_oauth_state_ttl_s")]
     pub oauth_state_ttl_s: usize,
-    #[serde(default = "default_request_timeout_s")]
     pub request_timeout_s: usize,
-    #[serde(default = "default_retry_max_attempts")]
     pub retry_max_attempts: usize,
-    #[serde(default = "default_retry_initial_backoff_ms")]
     pub retry_initial_backoff_ms: usize,
-    #[serde(default = "default_retry_max_backoff_ms")]
     pub retry_max_backoff_ms: usize,
-    #[serde(default = "default_scopes")]
     pub default_scopes: Vec<String>,
     pub capabilities: FeishuCapabilityConfig,
-    #[serde(default, skip_serializing, skip_deserializing)]
     pub capabilities_explicitly_configured: bool,
+}
+
+impl Serialize for FeishuIntegrationConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let mut state = serializer.serialize_struct(
+            "FeishuIntegrationConfig",
+            7 + usize::from(self.capabilities_explicitly_configured),
+        )?;
+        state.serialize_field("sqlite_path", &self.sqlite_path)?;
+        state.serialize_field("oauth_state_ttl_s", &self.oauth_state_ttl_s)?;
+        state.serialize_field("request_timeout_s", &self.request_timeout_s)?;
+        state.serialize_field("retry_max_attempts", &self.retry_max_attempts)?;
+        state.serialize_field("retry_initial_backoff_ms", &self.retry_initial_backoff_ms)?;
+        state.serialize_field("retry_max_backoff_ms", &self.retry_max_backoff_ms)?;
+        state.serialize_field("default_scopes", &self.default_scopes)?;
+        if self.capabilities_explicitly_configured {
+            state.serialize_field("capabilities", &self.capabilities)?;
+        }
+        state.end()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -355,6 +372,16 @@ mod tests {
         let config: crate::config::LoongClawConfig = toml::from_str(raw).expect("parse config");
 
         assert!(!config.feishu_integration.has_explicit_capability_config());
+    }
+
+    #[test]
+    fn serializing_implicit_capabilities_omits_capabilities_block() {
+        let config = FeishuIntegrationConfig::default();
+
+        let serialized = toml::to_string(&config).expect("serialize config");
+
+        assert!(!serialized.contains("[capabilities]"));
+        assert!(!serialized.contains("capabilities"));
     }
 
     #[test]

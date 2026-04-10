@@ -752,11 +752,27 @@ mod tests {
         );
         assert!(scopes.iter().any(|scope| scope == FEISHU_DOC_READ_SCOPE));
         assert!(scopes.iter().any(|scope| scope == FEISHU_BITABLE_SCOPE));
-        assert!(scopes.iter().any(|scope| scope == "base:table:read"));
-        assert!(scopes.iter().any(|scope| scope == "base:record:create"));
-        assert!(scopes.iter().any(|scope| scope == "base:record:retrieve"));
-        assert!(scopes.iter().any(|scope| scope == "base:record:write"));
-        assert!(scopes.iter().any(|scope| scope == "drive:drive:readonly"));
+        assert!(
+            scopes
+                .iter()
+                .any(|scope| scope == FEISHU_BITABLE_TABLE_READ_SCOPE)
+        );
+        assert!(
+            scopes
+                .iter()
+                .any(|scope| scope == FEISHU_BITABLE_RECORD_CREATE_SCOPE)
+        );
+        assert!(
+            scopes
+                .iter()
+                .any(|scope| scope == FEISHU_BITABLE_RECORD_RETRIEVE_SCOPE)
+        );
+        assert!(
+            scopes
+                .iter()
+                .any(|scope| scope == FEISHU_BITABLE_RECORD_WRITE_SCOPE)
+        );
+        assert!(scopes.iter().any(|scope| scope == FEISHU_DRIVE_READ_SCOPE));
     }
 
     #[test]
