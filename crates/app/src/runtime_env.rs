@@ -53,6 +53,13 @@ pub fn initialize_runtime_environment(
         }
         None => remove_env_var("LOONGCLAW_FILE_ROOT"),
     }
+    let workspace_root = std::env::current_dir()
+        .ok()
+        .unwrap_or_else(|| config.tools.resolved_file_root());
+    set_env_var(
+        "LOONGCLAW_WORKSPACE_ROOT",
+        workspace_root.display().to_string(),
+    );
     set_env_var(
         "LOONGCLAW_TOOL_SESSIONS_ENABLED",
         bool_env(config.tools.sessions.enabled),
@@ -215,6 +222,7 @@ mod tests {
             "LOONGCLAW_SHELL_DENY",
             "LOONGCLAW_SHELL_DEFAULT_MODE",
             "LOONGCLAW_FILE_ROOT",
+            "LOONGCLAW_WORKSPACE_ROOT",
             "LOONGCLAW_TOOL_SESSIONS_ALLOW_MUTATION",
             "LOONGCLAW_EXTERNAL_SKILLS_ENABLED",
             "LOONGCLAW_EXTERNAL_SKILLS_REQUIRE_DOWNLOAD_APPROVAL",
@@ -295,6 +303,13 @@ mod tests {
         assert_eq!(
             std::env::var("LOONGCLAW_FILE_ROOT").ok().as_deref(),
             Some("/tmp/loongclaw-runtime-file-root")
+        );
+        let expected_workspace_root =
+            std::env::current_dir().expect("current_dir should resolve during runtime env tests");
+        let expected_workspace_root = expected_workspace_root.display().to_string();
+        assert_eq!(
+            std::env::var("LOONGCLAW_WORKSPACE_ROOT").ok().as_deref(),
+            Some(expected_workspace_root.as_str())
         );
         assert_eq!(
             std::env::var("LOONGCLAW_TOOL_SESSIONS_ALLOW_MUTATION")

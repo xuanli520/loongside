@@ -502,9 +502,16 @@ fn initialize_cli_turn_runtime_with_loaded_config(
     session_requirement: CliSessionRequirement,
     initialize_runtime_environment: bool,
 ) -> CliResult<CliTurnRuntime> {
+    let mut config = config;
     if !config.cli.enabled {
         return Err("CLI channel is disabled by config.cli.enabled=false".to_owned());
     }
+
+    let runtime_workspace_root = std::env::current_dir()
+        .ok()
+        .unwrap_or_else(|| config.tools.resolved_file_root());
+    let runtime_workspace_root = runtime_workspace_root.display().to_string();
+    config.tools.runtime_workspace_root = Some(runtime_workspace_root);
 
     if initialize_runtime_environment {
         crate::runtime_env::initialize_runtime_environment(&config, Some(&resolved_path));

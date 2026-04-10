@@ -51,6 +51,8 @@ pub(crate) const RUNTIME_PLUGIN_SUPPORTED_BRIDGE_LABELS: &[&str] = &[
 pub struct ToolConfig {
     #[serde(default)]
     pub file_root: Option<String>,
+    #[serde(skip)]
+    pub runtime_workspace_root: Option<String>,
     /// Commands to allow. Defaults to empty — no commands are allowed unless
     /// explicitly configured.
     #[serde(default = "default_shell_allow")]
@@ -541,6 +543,7 @@ impl Default for ToolConfig {
     fn default() -> Self {
         Self {
             file_root: None,
+            runtime_workspace_root: None,
             shell_allow: default_shell_allow(),
             shell_deny: Vec::new(),
             shell_default_mode: default_shell_default_mode(),
@@ -700,6 +703,17 @@ impl ToolFileRootResolution {
 }
 
 impl ToolConfig {
+    pub fn configured_runtime_workspace_root(&self) -> Option<PathBuf> {
+        let raw_workspace_root = self.runtime_workspace_root.as_deref()?;
+        let trimmed_workspace_root = raw_workspace_root.trim();
+        if trimmed_workspace_root.is_empty() {
+            return None;
+        }
+
+        let workspace_root = PathBuf::from(trimmed_workspace_root);
+        Some(workspace_root)
+    }
+
     pub fn configured_file_root(&self) -> Option<PathBuf> {
         let raw_path = self.file_root.as_deref()?;
         let trimmed_path = raw_path.trim();

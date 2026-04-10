@@ -96,8 +96,16 @@ pub(crate) fn resolve_runtime_self_continuity(
 pub(crate) fn resolve_runtime_self_continuity_for_config(
     config: &LoongClawConfig,
 ) -> Option<RuntimeSelfContinuity> {
+    resolve_runtime_self_continuity_for_config_with_workspace_root(config, None)
+}
+
+pub(crate) fn resolve_runtime_self_continuity_for_config_with_workspace_root(
+    config: &LoongClawConfig,
+    workspace_root_override: Option<&Path>,
+) -> Option<RuntimeSelfContinuity> {
     let tool_runtime_config = ToolRuntimeConfig::from_loongclaw_config(config, None);
-    let workspace_root = tool_runtime_config.file_root.as_deref();
+    let configured_workspace_root = tool_runtime_config.effective_workspace_root();
+    let workspace_root = workspace_root_override.or(configured_workspace_root);
     let profile_note = config.memory.trimmed_profile_note();
     let personalization = config.memory.trimmed_personalization();
     resolve_runtime_self_continuity(
@@ -393,6 +401,34 @@ mod tests {
         assert_eq!(
             merged.runtime_self.tool_usage_policy,
             vec!["Search memory before guessing workspace facts.".to_owned()]
+        );
+    }
+
+    #[test]
+    fn resolve_runtime_self_continuity_for_config_prefers_runtime_workspace_root() {
+        let temp_dir = tempdir().expect("tempdir");
+        let workspace_root = temp_dir.path().join("workspace-root");
+        let decoy_tool_root = temp_dir.path().join("tool-root");
+        let agents_path = workspace_root.join("AGENTS.md");
+        let agents_text = "Keep runtime self rooted in the active workspace.";
+        let mut config = LoongClawConfig::default();
+
+        std::fs::create_dir_all(&workspace_root).expect("create workspace root");
+        std::fs::create_dir_all(&decoy_tool_root).expect("create decoy tool root");
+        std::fs::write(&agents_path, agents_text).expect("write AGENTS");
+
+        config.tools.file_root = Some(decoy_tool_root.display().to_string());
+        config.tools.runtime_workspace_root = Some(workspace_root.display().to_string());
+
+        let continuity = resolve_runtime_self_continuity_for_config(&config)
+            .expect("workspace-root continuity should load");
+
+        assert!(
+            continuity
+                .runtime_self
+                .standing_instructions
+                .iter()
+                .any(|entry| entry.contains(agents_text))
         );
     }
 
