@@ -16,10 +16,12 @@ use super::{
     auth_profile_runtime::ProviderAuthProfile,
     contracts::{
         CompletionPayloadMode, ProviderApiError, ProviderCapabilityContract,
-        ProviderRuntimeContract, adapt_payload_mode_for_error, parse_provider_api_error,
+        ProviderRuntimeContract, ProviderTransportMode, adapt_payload_mode_for_error,
+        parse_provider_api_error,
     },
     failover::{
-        ModelRequestError, ProviderFailoverReason, ProviderFailoverStage, build_model_request_error,
+        ModelRequestError, ProviderFailoverReason, ProviderFailoverStage,
+        build_model_request_error, build_model_request_error_with_rate_limit,
     },
     policy,
     request_planner::{
@@ -244,6 +246,7 @@ where
                 let status = response.status;
                 let response_headers = response.headers;
                 let response_body = response.body;
+                let response_rate_limit = response.rate_limit;
 
                 if status.is_success() {
                     let parsed = parse_success(&response_body).ok_or_else(|| {
@@ -319,7 +322,7 @@ where
                         ));
                     }
                     ModelStatusOutcome::Fail { reason } => {
-                        return Err(build_model_request_error(
+                        return Err(build_model_request_error_with_rate_limit(
                             render_status_failure_message(
                                 runtime.provider,
                                 reason,
@@ -337,6 +340,7 @@ where
                             runtime.request_policy.max_attempts,
                             Some(status_code),
                             Some(api_error.clone()),
+                            response_rate_limit,
                         ));
                     }
                 }
@@ -513,6 +517,7 @@ where
                 let status = response.status;
                 let response_headers = response.headers;
                 let response_body = response.body;
+                let response_rate_limit = response.rate_limit;
 
                 let api_error = parse_provider_api_error(&response_body);
                 if let Some(next_mode) = adapt_payload_mode_for_error(
@@ -564,7 +569,7 @@ where
                         ));
                     }
                     ModelStatusOutcome::Fail { reason } => {
-                        return Err(build_model_request_error(
+                        return Err(build_model_request_error_with_rate_limit(
                             render_status_failure_message(
                                 runtime.provider,
                                 reason,
@@ -582,6 +587,7 @@ where
                             runtime.request_policy.max_attempts,
                             Some(status_code),
                             Some(api_error.clone()),
+                            response_rate_limit,
                         ));
                     }
                 }
@@ -728,52 +734,9 @@ where
     PreStatusError: FnMut(&ProviderApiError) -> bool,
 {
     let model_name = runtime.model.to_owned();
-    let stream = match execute_streaming_model_request(runtime, build_body, |data: Value| {
-        let event_type = data.get("type").and_then(|v| v.as_str())?;
-        if event_type == "content_block_start" {
-            let content_block = data.get("content_block")?;
-            if content_block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
-                let name = content_block
-                    .get("name")
-                    .and_then(|v| v.as_str())?
-                    .to_owned();
-                let id = content_block.get("id").and_then(|v| v.as_str())?.to_owned();
-                let index = data.get("index").and_then(|v| v.as_u64())? as usize;
-                return Some(StreamingEvent::ToolCallStart { index, name, id });
-            }
-        }
-        if event_type == "content_block_delta" {
-            let delta = data.get("delta")?;
-            let delta_type = delta.get("type").and_then(|v| v.as_str())?;
-            if delta_type == "text_delta" {
-                let text = delta.get("text").and_then(|v| v.as_str())?;
-                return Some(StreamingEvent::Text(text.to_owned()));
-            }
-            if delta_type == "input_json_delta" {
-                let partial = delta.get("partial_json").and_then(|v| v.as_str())?;
-                let index = data.get("index").and_then(|v| v.as_u64())? as usize;
-                return Some(StreamingEvent::ToolInputPartial {
-                    index,
-                    partial_json: partial.to_owned(),
-                });
-            }
-        }
-        if event_type == "message_stop" {
-            return Some(StreamingEvent::Done);
-        }
-        if event_type == "message_start" || event_type == "message_delta" {
-            return Some(StreamingEvent::Meta(data));
-        }
-        if event_type == "error" {
-            let message = data
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(|m| m.as_str())
-                .unwrap_or("unknown streaming error")
-                .to_owned();
-            return Some(StreamingEvent::StreamError(message));
-        }
-        None
+    let transport_mode = runtime.runtime_contract.transport_mode;
+    let stream = match execute_streaming_model_request(runtime, build_body, move |data: Value| {
+        parse_streaming_event(transport_mode, data)
     })
     .await
     {
@@ -918,6 +881,91 @@ where
         tool_intents,
         raw_meta: accumulator.meta,
     })
+}
+
+fn parse_streaming_event(
+    transport_mode: ProviderTransportMode,
+    data: Value,
+) -> Option<StreamingEvent> {
+    match transport_mode {
+        ProviderTransportMode::AnthropicMessages => parse_anthropic_streaming_event(data),
+        ProviderTransportMode::OpenAiChatCompletions | ProviderTransportMode::KimiApi => {
+            parse_openai_streaming_event(data)
+        }
+        ProviderTransportMode::Responses
+        | ProviderTransportMode::BedrockConverse
+        | ProviderTransportMode::GoogleGenerateContent => None,
+    }
+}
+
+fn parse_anthropic_streaming_event(data: Value) -> Option<StreamingEvent> {
+    let event_type = data.get("type").and_then(|v| v.as_str())?;
+    if event_type == "content_block_start" {
+        let content_block = data.get("content_block")?;
+        if content_block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
+            let name = content_block
+                .get("name")
+                .and_then(|v| v.as_str())?
+                .to_owned();
+            let id = content_block.get("id").and_then(|v| v.as_str())?.to_owned();
+            let index = data.get("index").and_then(|v| v.as_u64())? as usize;
+            return Some(StreamingEvent::ToolCallStart { index, name, id });
+        }
+    }
+    if event_type == "content_block_delta" {
+        let delta = data.get("delta")?;
+        let delta_type = delta.get("type").and_then(|v| v.as_str())?;
+        if delta_type == "text_delta" {
+            let text = delta.get("text").and_then(|v| v.as_str())?;
+            return Some(StreamingEvent::Text(text.to_owned()));
+        }
+        if delta_type == "input_json_delta" {
+            let partial = delta.get("partial_json").and_then(|v| v.as_str())?;
+            let index = data.get("index").and_then(|v| v.as_u64())? as usize;
+            return Some(StreamingEvent::ToolInputPartial {
+                index,
+                partial_json: partial.to_owned(),
+            });
+        }
+    }
+    if event_type == "message_stop" {
+        return Some(StreamingEvent::Done);
+    }
+    if event_type == "message_start" || event_type == "message_delta" {
+        return Some(StreamingEvent::Meta(data));
+    }
+    if event_type == "error" {
+        let message = data
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown streaming error")
+            .to_owned();
+        return Some(StreamingEvent::StreamError(message));
+    }
+    None
+}
+
+fn parse_openai_streaming_event(data: Value) -> Option<StreamingEvent> {
+    if data.get("type").and_then(Value::as_str) == Some("message_stop") {
+        return Some(StreamingEvent::Done);
+    }
+    let choice = data
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())?;
+    if choice
+        .get("finish_reason")
+        .and_then(Value::as_str)
+        .is_some()
+    {
+        return Some(StreamingEvent::Done);
+    }
+    let text = choice
+        .get("delta")
+        .and_then(|delta| delta.get("content"))
+        .and_then(Value::as_str)?;
+    Some(StreamingEvent::Text(text.to_owned()))
 }
 
 #[derive(Clone)]
@@ -1361,6 +1409,7 @@ mod tests {
                     }
                 }]
             }),
+            rate_limit: None,
         })]);
         let runtime = ModelRequestRuntime {
             provider: &provider,
@@ -1590,6 +1639,7 @@ mod tests {
                         "message": "bad request"
                     }
                 }),
+                rate_limit: None,
             },
         );
         let runtime = StreamingModelRequestRuntime {
