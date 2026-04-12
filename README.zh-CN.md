@@ -148,65 +148,72 @@ loong chat                   # 进入多轮对话
 loong doctor --fix           # 检查环境并自动修复常见问题
 ```
 
-`onboard` 是支持的 first-run 路径。它应该把你带到可用的 provider 配置和明确的下一条命令，而不是先逼你手改原始配置。
+走完 `onboard` 就够了 —— 它会把一份能跑的配置写到 `~/.loong/config.toml`，不需要你手写 TOML。如果你想再加一个 provider 或接入频道，下面几段是 dev 分支当前的实际形态。
 
-首轮上手路径刻意保持简短。完整 provider 设置、channel 配置和操作变体，应该放在 docs，而不是继续往首页里塞。
-
-当你真的需要落到原始配置时，env-backed secret 会显式写出来：
+#### Providers
 
 ```toml
+active_provider = "openai"
+
 [providers.openai]
 kind = "openai"
 api_key = { env = "OPENAI_API_KEY" }
+model = "auto"
+
+[providers.volcengine]
+kind = "volcengine"
+api_key = { env = "ARK_API_KEY" }
+model = "auto"
 ```
 
-`api_key = { env = "OPENAI_API_KEY" }` 的意思是“从这个环境变量读取 secret”。`api_key = "OPENAI_API_KEY"` 则会把 `OPENAI_API_KEY` 当成字面量 key 值本身。
+- `active_provider` 决定当前运行的 lane，直接改字段或重跑一次 `loong onboard` 都能切换。
+- `api_key = { env = "OPENAI_API_KEY" }` 表示从环境变量读取；写成 `api_key = "OPENAI_API_KEY"` 会被当成字面量密钥值，这是常见踩坑。
+- `model = "auto"` 走 provider 端自动发现；如果你所在区域或账号下自动发现不稳，改成 `model = "<具体 id>"` 固定即可。
 
-<a id="start-paths"></a>
-## 从哪里开始
+#### 接入频道 —— 以飞书为例
 
-| 如果你需要…… | 从这里开始 |
-| --- | --- |
-| 先尽快得到第一条有效结果 | `onboard`、`ask`、`chat`、`doctor` |
-| 想直接跟着一条完整的 provider + channel 路径走 | [常见路线](site/use-loong/common-setups.mdx) 与其下对应的 playbook 页面 |
-| 不靠猜测完成 provider / model 选择 | `onboard`、`list-models`、[Provider 与 Model 选择](site/use-loong/providers-and-models.mdx) 以及 [Provider 路线示例](site/use-loong/provider-recipes.mdx) |
-| 增加交付接入频道，但不把支持范围说大 | [接入频道选择](site/use-loong/channels.mdx)、[Gateway 与监督](site/use-loong/gateway-and-supervision.mdx)、[Channel 路线示例](site/use-loong/channel-recipes.mdx) 与完整的 [Channel Setup](docs/product-specs/channel-setup.md) 说明 |
-| 理解当前 runtime surface 以及受治理的扩展边界 | [使用 Loong](site/use-loong/overview.mdx)、[工具与记忆](site/use-loong/tools-and-memory.mdx)、[ARCHITECTURE.md](ARCHITECTURE.md)、[参与贡献](CONTRIBUTING.md) |
+```toml
+[feishu]
+enabled = true
+domain = "feishu"                         # 国际版 Lark 改成 "lark"
+mode = "websocket"
+receive_id_type = "chat_id"
+app_id = { env = "FEISHU_APP_ID" }
+app_secret = { env = "FEISHU_APP_SECRET" }
+allowed_chat_ids = ["oc_ops_room"]
+```
+
+先快速验证一下：
+
+```bash
+loong doctor
+loong feishu-send --receive-id "ou_example_user" --text "hello from loong"
+loong feishu-serve
+```
+
+完整的 provider / channel 矩阵、多账号配置与长期托管模型，继续看下面的 [文档](#documentation) 表。
 
 <a id="documentation"></a>
-## 文档入口
+## 文档
 
-先从 `site/` 开始，它是 Mintlify 部署的 reader-facing docs 源码。`docs/`
-留在仓库里，承载公开 source spec 和支撑性的 reference markdown。
-
-如果你是直接在仓库里阅读，这里的 docs 链接会刻意指向已提交的 docs
-源码树，这样 repo reader 能直接从与 Mintlify 部署一致的材料开始。
-
-| 如果你想…… | 从这里开始 |
+| | |
 | --- | --- |
-| 快速拿到第一条有效结果 | [快速上手](site/get-started/overview.mdx) |
-| 理解项目为什么存在，以及它背后的产品立场 | [Loong 的缘起与定位](site/reference/why-loong.mdx) |
-| 不自己拼接文档，直接跟一条完整 rollout path 走 | [常见路线](site/use-loong/common-setups.mdx) |
-| 先理解共享的公开配置形态 | [配置模式](site/use-loong/configuration-patterns.mdx) |
-| 直接看 provider / channel 的实操路径 | [Provider 指南](site/use-loong/provider-guides/index.mdx)、[Provider 路线示例](site/use-loong/provider-recipes.mdx)、[Channel 指南](site/use-loong/channel-guides/index.mdx) 与 [Channel 路线示例](site/use-loong/channel-recipes.mdx) |
-| 理解当前操作者模型 | [使用 Loong](site/use-loong/overview.mdx) |
-| 评估架构与扩展边界 | [扩展 Loong](site/build-on-loong/overview.mdx) |
-| 查看路线、策略、可靠性与发布信息 | [参考资料](site/reference/overview.mdx) |
-| 直接读仓库里的 source-level public contract | [ARCHITECTURE.md](ARCHITECTURE.md)、[Channel Setup](docs/product-specs/channel-setup.md)、[Roadmap](docs/ROADMAP.md) 与 [Reliability](docs/RELIABILITY.md) |
-
-如果你是直接在仓库里读源码文档，建议先从 [文档总览](site/index.mdx) 开始。
+| 快速上手 | [Get Started](site/get-started/overview.mdx)，或直接用 `onboard` / `ask` / `chat` / `doctor` |
+| 完整路径 | [Common Setups](site/use-loong/common-setups.mdx) |
+| 选 Provider | [Provider Guides](site/use-loong/provider-guides/index.mdx) 与 [Provider Recipes](site/use-loong/provider-recipes.mdx) |
+| 接入频道 | [Channel Guides](site/use-loong/channel-guides/index.mdx) 与 [Channel Recipes](site/use-loong/channel-recipes.mdx) |
+| 长期托管 | [Gateway 与监督](site/use-loong/gateway-and-supervision.mdx) |
+| 设计立场 | [Why Loong](site/reference/why-loong.mdx) |
+| 架构与扩展 | [Build On Loong](site/build-on-loong/overview.mdx) |
+| 参考资料 | [Reference](site/reference/overview.mdx) |
 
 <a id="architecture"></a>
-## 架构速览
+## 架构
 
-Loong 目前是一个 7-crate Rust workspace，但更有用的 public 读法不只是
-“谁依赖谁”。按源码里的真实 ownership 来看，它其实更接近五层：稳定
-contract 词汇层、受治理的 kernel、product/runtime layer、deterministic
-spec/bench rails，以及 daemon assembly layer。
+Loong 是一个 7-crate Rust workspace，依赖图严格无环，围绕一个受治理的
+kernel 组织，将 contract、安全、执行、编排几个关注点分开。
 
 ```text
-direct dependency DAG
-
 contracts  (stable contract vocabulary)
 ├── kernel   -> contracts
 ├── protocol (independent transport foundation)
@@ -216,21 +223,8 @@ contracts  (stable contract vocabulary)
 └── daemon   -> app, bench, contracts, kernel, spec
 ```
 
-按职责看，这些 crate 可以再收敛成五个公开 ownership zone：
-
-- **稳定 contract 层**：`contracts` 负责共享的 capability、policy、audit、runtime、tool、memory 词汇和类型。
-- **受治理的 kernel 层**：`kernel` 负责 audit、policy、harness orchestration、runtime/tool/memory/connector planes、plugin 与 integration control、bootstrap、architecture awareness。
-- **product/runtime layer**：`app` 负责 providers、channels、tools、memory backends、chat、conversation、session、config、presentation 等产品运行时能力。
-- **deterministic rails**：`spec` 负责可复现的 execution scenarios 和 bootstrap builders，`bench` 负责构建在这些 rails 之上的 benchmark 与 pressure gates。
-- **operator assembly layer**：`daemon` 把下层能力接成真正可运行的 CLI 与 service entrypoints，例如 `onboard`、`ask`、`chat`、`doctor`、`gateway`、`tasks`、`skills` 和 plugin workflows。
-
-最重要的三条架构规则是：
-
-- governance-first：policy、approval、audit 都在真实执行路径里
-- additive evolution：公共 contract 应该在不破坏集成的前提下持续增长
-- small core, rich seams：专用化应该通过 adapter、pack 和受控 assembly 完成，而不是反复改内核
-
-完整分层模型见 [ARCHITECTURE.md](ARCHITECTURE.md) 与 [Layered Kernel Design](docs/design-docs/layered-kernel-design.md)。
+ownership 分区、分层执行模型（L0–L9）以及设计原则，见
+[ARCHITECTURE.md](ARCHITECTURE.md)。
 
 ## 贡献
 

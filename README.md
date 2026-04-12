@@ -148,68 +148,73 @@ loong chat                   # Start a multi-turn conversation
 loong doctor --fix           # Check environment and auto-fix common issues
 ```
 
-`onboard` is the supported first-run path. It should get you to a working provider configuration and a concrete next command without making you hand-edit raw config first.
+Running `onboard` is enough for the golden path — it writes a working config to `~/.loong/config.toml` without asking you to hand-edit TOML. The snippets below show what that file looks like on `dev` today, when you want to add another provider or wire up a channel.
 
-The first-run path stays intentionally short. Full provider setup, channel configuration, and operational variants belong in docs instead of the landing page.
-
-When you do need raw config, env-backed secrets are written explicitly:
+#### Providers
 
 ```toml
+active_provider = "openai"
+
 [providers.openai]
 kind = "openai"
 api_key = { env = "OPENAI_API_KEY" }
+model = "auto"
+
+[providers.volcengine]
+kind = "volcengine"
+api_key = { env = "ARK_API_KEY" }
+model = "auto"
 ```
 
-`api_key = { env = "OPENAI_API_KEY" }` means "read the secret from that environment variable". `api_key = "OPENAI_API_KEY"` would instead treat `OPENAI_API_KEY` as the literal key value itself.
+- `active_provider` selects which lane runs; switch by editing the field or by running `loong onboard` again.
+- `api_key = { env = "OPENAI_API_KEY" }` reads the secret from that environment variable. `api_key = "OPENAI_API_KEY"` would instead treat the string as the literal key value — a common pitfall.
+- `model = "auto"` uses provider-side discovery; pin `model = "<id>"` when discovery is unreliable for your region or account.
 
-<a id="start-paths"></a>
-## Start Paths
+#### Channels — Lark
 
-| If you are trying to... | Start here |
-| --- | --- |
-| reach first value quickly | `onboard`, `ask`, `chat`, and `doctor` |
-| follow one complete provider-plus-channel rollout path | [Common Setups](site/use-loong/common-setups.mdx) and the dedicated playbooks under it |
-| choose a provider or model without guessing | `onboard`, `list-models`, [Providers And Models](site/use-loong/providers-and-models.mdx), and [Provider Recipes](site/use-loong/provider-recipes.mdx) |
-| add channels without overclaiming support | [Channels](site/use-loong/channels.mdx), [Gateway And Supervision](site/use-loong/gateway-and-supervision.mdx), [Channel Recipes](site/use-loong/channel-recipes.mdx), and the full [Channel Setup](docs/product-specs/channel-setup.md) contract |
-| understand the current runtime surface and governed extension seams | [Use Loong](site/use-loong/overview.mdx), [Tools And Memory](site/use-loong/tools-and-memory.mdx), [ARCHITECTURE.md](ARCHITECTURE.md), and [Contributing](CONTRIBUTING.md) |
+```toml
+[feishu]
+enabled = true
+domain = "lark"                           # use "feishu" for the China Feishu lane
+mode = "websocket"
+receive_id_type = "chat_id"
+app_id = { env = "LARK_APP_ID" }
+app_secret = { env = "LARK_APP_SECRET" }
+allowed_chat_ids = ["oc_ops_room"]
+```
+
+Smoke-test before anything else:
+
+```bash
+loong doctor
+loong feishu-send --receive-id "ou_example_user" --text "hello from loong"
+loong feishu-serve
+```
+
+For the full provider and channel matrices, multi-account setups, and the long-running delivery model, see the [Documentation](#documentation) table below.
 
 <a id="documentation"></a>
 ## Documentation
 
-Start in `site/` for the reader-facing docs that Mintlify deploys. Keep `docs/`
-for public source specs and supporting reference markdown.
-
-When you open the repository directly, the docs links below point into the
-checked-in docs source on purpose so repository readers can start from the same
-material that Mintlify deploys.
-
-| If you want to... | Start here |
+| | |
 | --- | --- |
-| get first value quickly | [Get Started](site/get-started/overview.mdx) |
-| understand why the project exists and what stance shapes it | [Why Loong](site/reference/why-loong.mdx) |
-| follow one complete rollout path without stitching docs together | [Common Setups](site/use-loong/common-setups.mdx) |
-| understand the shared public config shape first | [Configuration Patterns](site/use-loong/configuration-patterns.mdx) |
-| follow the practical provider and channel setup paths | [Provider Guides](site/use-loong/provider-guides/index.mdx), [Provider Recipes](site/use-loong/provider-recipes.mdx), [Channel Guides](site/use-loong/channel-guides/index.mdx), and [Channel Recipes](site/use-loong/channel-recipes.mdx) |
-| understand the current operator model | [Use Loong](site/use-loong/overview.mdx) |
-| evaluate the architecture and extension seams | [Build On Loong](site/build-on-loong/overview.mdx) |
-| check roadmap, policy, reliability, and releases | [Reference](site/reference/overview.mdx) |
-| read the source-level public contracts in the repo | [ARCHITECTURE.md](ARCHITECTURE.md), [Channel Setup](docs/product-specs/channel-setup.md), [Roadmap](docs/ROADMAP.md), and [Reliability](docs/RELIABILITY.md) |
-
-If you are reading through repository source rather than a deployed docs site,
-start at [Docs Overview](site/index.mdx).
+| Get started | [Get Started](site/get-started/overview.mdx), or just run `onboard` / `ask` / `chat` / `doctor` |
+| Full rollout path | [Common Setups](site/use-loong/common-setups.mdx) |
+| Pick a provider | [Provider Guides](site/use-loong/provider-guides/index.mdx) and [Provider Recipes](site/use-loong/provider-recipes.mdx) |
+| Wire up channels | [Channel Guides](site/use-loong/channel-guides/index.mdx) and [Channel Recipes](site/use-loong/channel-recipes.mdx) |
+| Long-running delivery | [Gateway And Supervision](site/use-loong/gateway-and-supervision.mdx) |
+| Design stance | [Why Loong](site/reference/why-loong.mdx) |
+| Architecture and extension | [Build On Loong](site/build-on-loong/overview.mdx) |
+| Reference | [Reference](site/reference/overview.mdx) |
 
 <a id="architecture"></a>
-## Architecture At A Glance
+## Architecture
 
-Loong is organized as a 7-crate Rust workspace, but the more useful public
-reading is not just "which crate depends on which." The codebase is really split
-across five ownership layers: a stable contract vocabulary, a governed kernel,
-a product/runtime layer, deterministic spec and benchmark rails, and a daemon
-assembly layer.
+Loong is a 7-crate Rust workspace with a strict acyclic dependency graph,
+organized around a governed kernel that separates contracts, security,
+execution, and orchestration.
 
 ```text
-direct dependency DAG
-
 contracts  (stable contract vocabulary)
 ├── kernel   -> contracts
 ├── protocol (independent transport foundation)
@@ -219,21 +224,8 @@ contracts  (stable contract vocabulary)
 └── daemon   -> app, bench, contracts, kernel, spec
 ```
 
-In practice, those crates group into five public ownership zones:
-
-- **Stable contracts**: `contracts` owns the shared capability, policy, audit, runtime, tool, and memory vocabulary that other crates build on.
-- **Governed kernel**: `kernel` owns audit, policy, harness orchestration, runtime/tool/memory/connector planes, plugin and integration control, bootstrap, and architecture awareness.
-- **Product/runtime layer**: `app` owns providers, channels, tools, memory backends, chat, conversation, session, config, and presentation surfaces.
-- **Deterministic rails**: `spec` owns reproducible execution scenarios and bootstrap builders, while `bench` owns benchmark and pressure gates on top of those rails.
-- **Operator assembly**: `daemon` wires the lower layers into the runnable CLI and service entrypoints such as `onboard`, `ask`, `chat`, `doctor`, `gateway`, `tasks`, `skills`, and plugin workflows.
-
-Three design rules matter most:
-
-- governance-first: policy, approvals, and audit stay in the real execution path
-- additive evolution: public contracts should grow without breaking integrations
-- small core, rich seams: specialization should happen through adapters, packs, and controlled assembly rather than repeated kernel mutation
-
-For the full layered execution model, see [ARCHITECTURE.md](ARCHITECTURE.md) and [Layered Kernel Design](docs/design-docs/layered-kernel-design.md).
+For ownership zones, the layered execution model (L0–L9), and design
+principles, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 <a id="contributing"></a>
 ## Contributing
