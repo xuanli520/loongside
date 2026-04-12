@@ -163,11 +163,38 @@ fn tool_lease_secret() -> Result<String, String> {
         return Ok(cached_secret);
     }
 
+    let load_lock = tool_lease_secret_load_lock();
+    let lock = load_lock.lock();
+    let _lock = match lock {
+        Ok(lock) => lock,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    let cached_secret = cached_tool_lease_secret(secret_path.as_path());
+    if let Some(cached_secret) = cached_secret {
+        return Ok(cached_secret);
+    }
+
     let loaded_secret = load_or_create_tool_lease_secret(secret_path.as_path())?;
     cache_tool_lease_secret(secret_path, loaded_secret.clone());
     Ok(loaded_secret)
 }
 
+#[cfg(test)]
+fn default_tool_lease_secret_path() -> PathBuf {
+    let explicit_home = std::env::var_os("LOONG_HOME");
+    let explicit_home = explicit_home.filter(|value| !value.is_empty());
+    if explicit_home.is_some() {
+        let loongclaw_home = crate::config::default_loongclaw_home();
+        return loongclaw_home.join(TOOL_LEASE_SECRET_FILE_NAME);
+    }
+
+    let stable_test_home =
+        std::env::temp_dir().join(format!("loongclaw-test-tool-lease-{}", std::process::id()));
+    stable_test_home.join(TOOL_LEASE_SECRET_FILE_NAME)
+}
+
+#[cfg(not(test))]
 fn default_tool_lease_secret_path() -> PathBuf {
     let loongclaw_home = crate::config::default_loongclaw_home();
     loongclaw_home.join(TOOL_LEASE_SECRET_FILE_NAME)
@@ -331,6 +358,11 @@ fn cache_tool_lease_secret(secret_path: PathBuf, secret: String) {
 fn tool_lease_secret_cache() -> &'static Mutex<HashMap<PathBuf, String>> {
     static TOOL_LEASE_SECRET_CACHE: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
     TOOL_LEASE_SECRET_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn tool_lease_secret_load_lock() -> &'static Mutex<()> {
+    static TOOL_LEASE_SECRET_LOAD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    TOOL_LEASE_SECRET_LOAD_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 fn now_unix_seconds() -> u64 {

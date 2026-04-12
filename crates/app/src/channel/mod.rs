@@ -1,6 +1,7 @@
 #[cfg(test)]
 use crate::config::LoongClawConfig;
 
+pub(crate) mod access_policy;
 mod catalog;
 mod commands;
 mod core;

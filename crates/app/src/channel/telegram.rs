@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::HashMap,
     fmt::Write as _,
     fs,
     path::{Path, PathBuf},
@@ -15,7 +15,7 @@ use crate::config::{self, ResolvedTelegramChannelConfig, TelegramStreamingMode};
 use super::{
     ChannelAdapter, ChannelDelivery, ChannelInboundMessage, ChannelOutboundMessage,
     ChannelOutboundTarget, ChannelOutboundTargetKind, ChannelPlatform, ChannelSession,
-    ChannelStreamingMode,
+    ChannelStreamingMode, access_policy::ChannelInboundAccessPolicy,
 };
 
 const TELEGRAM_MAX_MESSAGE_LENGTH: usize = 4096;
@@ -29,7 +29,7 @@ pub(super) struct TelegramAdapter {
     base_url: String,
     timeout_s: u64,
     offset_tracker: TelegramOffsetTracker,
-    allowlist: BTreeSet<i64>,
+    access_policy: ChannelInboundAccessPolicy<i64>,
     http_client: reqwest::Client,
     ack_reactions: bool,
     streaming_mode: TelegramStreamingMode,
@@ -99,13 +99,18 @@ impl TelegramAdapter {
             telegram_offset_path_for_account(offset_home.as_path(), config.account.id.as_str());
         let next_offset =
             load_offset_for_account(offset_home.as_path(), config.account.id.as_str()).unwrap_or(0);
+        let access_policy = ChannelInboundAccessPolicy::from_i64_lists(
+            config.allowed_chat_ids.as_slice(),
+            config.allowed_sender_ids.as_slice(),
+        );
+
         Self {
             account_id: config.account.id.clone(),
             token,
             base_url: config.base_url.clone(),
             timeout_s: config.polling_timeout_s.clamp(1, 50),
             offset_tracker: TelegramOffsetTracker::new(offset_path, next_offset),
-            allowlist: config.allowed_chat_ids.iter().copied().collect(),
+            access_policy,
             http_client: reqwest::Client::new(),
             ack_reactions: config.ack_reactions,
             streaming_mode: config.streaming_mode,
@@ -561,7 +566,7 @@ impl ChannelAdapter for TelegramAdapter {
 
         let (inbox, next_offset) = parse_telegram_updates(
             &payload,
-            &self.allowlist,
+            &self.access_policy,
             self.offset_tracker.current_offset(),
             self.account_id.as_str(),
         )?;
@@ -771,7 +776,7 @@ fn build_telegram_send_target(
 
 pub(super) fn parse_telegram_updates(
     payload: &Value,
-    allowlist: &BTreeSet<i64>,
+    access_policy: &ChannelInboundAccessPolicy<i64>,
     current_offset: i64,
     account_id: &str,
 ) -> CliResult<(Vec<ChannelInboundMessage>, Option<i64>)> {
@@ -810,7 +815,12 @@ pub(super) fn parse_telegram_updates(
             .and_then(|chat| chat.get("id"))
             .and_then(Value::as_i64)
             .unwrap_or_default();
-        let allowed = allowlist.contains(&chat_id);
+        let sender_id = message
+            .get("from")
+            .and_then(|sender| sender.get("id"))
+            .and_then(Value::as_i64);
+        let sender_ref = sender_id.as_ref();
+        let allowed = access_policy.allows(&chat_id, sender_ref);
         if !allowed {
             continue;
         }
@@ -849,7 +859,7 @@ pub(super) fn parse_telegram_updates(
                     .get("message_id")
                     .and_then(Value::as_i64)
                     .map(|value| value.to_string()),
-                sender_principal_key: None,
+                sender_principal_key: sender_id.map(|value| format!("telegram:user:{value}")),
                 thread_root_id: None,
                 parent_message_id: None,
                 resources: Vec::new(),
@@ -934,9 +944,10 @@ mod tests {
             ]
         });
 
-        let allowlist = BTreeSet::from([123_i64]);
-        let (inbox, next_offset) = parse_telegram_updates(&payload, &allowlist, 50, "bot_123456")
-            .expect("parse telegram updates");
+        let access_policy = ChannelInboundAccessPolicy::from_i64_lists(&[123_i64], &[]);
+        let (inbox, next_offset) =
+            parse_telegram_updates(&payload, &access_policy, 50, "bot_123456")
+                .expect("parse telegram updates");
 
         assert_eq!(inbox.len(), 1);
         assert_eq!(inbox[0].session.session_key(), "telegram:bot_123456:123");
@@ -964,12 +975,54 @@ mod tests {
             ]
         });
 
-        let allowlist = BTreeSet::new();
-        let (inbox, next_offset) = parse_telegram_updates(&payload, &allowlist, 0, "bot_123456")
-            .expect("parse telegram updates");
+        let access_policy = ChannelInboundAccessPolicy::from_i64_lists(&[], &[]);
+        let (inbox, next_offset) =
+            parse_telegram_updates(&payload, &access_policy, 0, "bot_123456")
+                .expect("parse telegram updates");
 
         assert!(inbox.is_empty());
         assert_eq!(next_offset, Some(9));
+    }
+
+    #[test]
+    fn telegram_parser_filters_non_allowlisted_senders_without_partitioning_session() {
+        let payload = json!({
+            "ok": true,
+            "result": [
+                {
+                    "update_id": 200,
+                    "message": {
+                        "message_id": 77,
+                        "text": "allowed sender",
+                        "chat": {"id": 123},
+                        "from": {"id": 7}
+                    }
+                },
+                {
+                    "update_id": 201,
+                    "message": {
+                        "message_id": 78,
+                        "text": "blocked sender",
+                        "chat": {"id": 123},
+                        "from": {"id": 8}
+                    }
+                }
+            ]
+        });
+
+        let access_policy = ChannelInboundAccessPolicy::from_i64_lists(&[123_i64], &[7_i64]);
+        let (inbox, next_offset) =
+            parse_telegram_updates(&payload, &access_policy, 0, "bot_123456")
+                .expect("parse telegram updates");
+
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].text, "allowed sender");
+        assert_eq!(inbox[0].session.session_key(), "telegram:bot_123456:123");
+        assert_eq!(
+            inbox[0].delivery.sender_principal_key.as_deref(),
+            Some("telegram:user:7")
+        );
+        assert_eq!(next_offset, Some(202));
     }
 
     #[test]
@@ -1195,9 +1248,10 @@ mod tests {
             ]
         });
 
-        let allowlist = BTreeSet::from([123_i64]);
-        let (inbox, _next_offset) = parse_telegram_updates(&payload, &allowlist, 0, "bot_123456")
-            .expect("parse telegram updates");
+        let access_policy = ChannelInboundAccessPolicy::from_i64_lists(&[123_i64], &[]);
+        let (inbox, _next_offset) =
+            parse_telegram_updates(&payload, &access_policy, 0, "bot_123456")
+                .expect("parse telegram updates");
 
         assert_eq!(inbox.len(), 1);
         assert_eq!(inbox[0].session.thread_id, Some("42".to_string()));

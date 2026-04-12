@@ -16,7 +16,8 @@ use super::runtime::state::ChannelOperationRuntimeTracker;
 use super::{
     CHANNEL_OPERATION_SERVE_ID, ChannelDelivery, ChannelDeliveryResource, ChannelInboundMessage,
     ChannelOutboundTarget, ChannelOutboundTargetKind, ChannelPlatform, ChannelServeStopHandle,
-    ChannelSession, ChannelTurnFeedbackPolicy, process_inbound_with_provider, runtime::state,
+    ChannelSession, ChannelTurnFeedbackPolicy, access_policy::ChannelInboundAccessPolicy,
+    process_inbound_with_provider, runtime::state,
 };
 
 const WECOM_SUBSCRIBE_CMD: &str = "aibot_subscribe";
@@ -373,6 +374,7 @@ async fn run_wecom_serve_session(
         kernel: kernel_ctx.kernel.clone(),
         token: kernel_ctx.token.clone(),
     });
+    let access_policy = build_wecom_access_policy(resolved);
 
     loop {
         let next_frame = tokio::select! {
@@ -391,7 +393,7 @@ async fn run_wecom_serve_session(
         }
 
         if command == WECOM_MESSAGE_CALLBACK_CMD {
-            let parsed = match parse_wecom_inbound_message(&next_frame, resolved) {
+            let parsed = match parse_wecom_inbound_message(&next_frame, resolved, &access_policy) {
                 Ok(parsed) => parsed,
                 Err(error) => {
                     emit_wecom_warning(format!("ignore malformed wecom inbound callback: {error}"));
@@ -401,14 +403,6 @@ async fn run_wecom_serve_session(
             let Some(parsed) = parsed else {
                 continue;
             };
-
-            let conversation_id = parsed.message.session.conversation_id.as_str();
-            if !is_wecom_allowed_conversation(resolved, conversation_id) {
-                emit_wecom_warning(format!(
-                    "ignore wecom inbound callback from non-allowlisted conversation `{conversation_id}`"
-                ));
-                continue;
-            }
 
             let mark_run_start_result = runtime.mark_run_start().await;
             if let Err(error) = mark_run_start_result {
@@ -476,6 +470,7 @@ async fn run_wecom_serve_session(
 fn parse_wecom_inbound_message(
     value: &Value,
     resolved: &ResolvedWecomChannelConfig,
+    access_policy: &ChannelInboundAccessPolicy<String>,
 ) -> CliResult<Option<WecomParsedInboundMessage>> {
     let req_id = json_string_at(value, &["headers", "req_id"])
         .ok_or_else(|| "wecom inbound callback missing headers.req_id".to_owned())?;
@@ -495,6 +490,11 @@ fn parse_wecom_inbound_message(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| format!("wecom:user:{value}"));
+    let sender_id = sender_user_id.as_deref();
+    let allowed = access_policy.allows_str(conversation_id.as_str(), sender_id);
+    if !allowed {
+        return Ok(None);
+    }
     let resources = extract_wecom_resources(body);
 
     let session = ChannelSession::with_account(
@@ -767,16 +767,14 @@ fn ensure_wecom_send_runtime_is_exclusive(resolved: &ResolvedWecomChannelConfig)
     ))
 }
 
-fn is_wecom_allowed_conversation(
+fn build_wecom_access_policy(
     resolved: &ResolvedWecomChannelConfig,
-    conversation_id: &str,
-) -> bool {
-    resolved
-        .allowed_conversation_ids
-        .iter()
-        .map(String::as_str)
-        .map(str::trim)
-        .any(|allowed| allowed == conversation_id.trim())
+) -> ChannelInboundAccessPolicy<String> {
+    ChannelInboundAccessPolicy::from_string_lists(
+        resolved.allowed_conversation_ids.as_slice(),
+        resolved.allowed_sender_ids.as_slice(),
+        false,
+    )
 }
 
 async fn wait_for_wecom_reconnect_or_stop(
@@ -1329,7 +1327,8 @@ mod tests {
             }
         });
 
-        let parsed = parse_wecom_inbound_message(&payload, &resolved)
+        let access_policy = build_wecom_access_policy(&resolved);
+        let parsed = parse_wecom_inbound_message(&payload, &resolved, &access_policy)
             .expect("parse inbound message")
             .expect("inbound message should exist");
 
@@ -1349,6 +1348,38 @@ mod tests {
             parsed.message.delivery.sender_principal_key.as_deref(),
             Some("wecom:user:user_demo")
         );
+    }
+
+    #[test]
+    fn parse_wecom_inbound_message_ignores_non_allowlisted_sender() {
+        let config = build_wecom_test_config("http://127.0.0.1:9", "ws://127.0.0.1:9");
+        let mut resolved = config
+            .wecom
+            .resolve_account(None)
+            .expect("resolve wecom account");
+        resolved.allowed_sender_ids = vec!["user_allowed".to_owned()];
+        let access_policy = build_wecom_access_policy(&resolved);
+        let payload = json!({
+            "headers": {
+                "req_id": "req-123"
+            },
+            "body": {
+                "chatid": "group_demo",
+                "chattype": "group",
+                "from": {
+                    "userid": "user_blocked"
+                },
+                "msgtype": "text",
+                "text": {
+                    "content": "hello group"
+                }
+            }
+        });
+
+        let parsed = parse_wecom_inbound_message(&payload, &resolved, &access_policy)
+            .expect("parse inbound message");
+
+        assert!(parsed.is_none());
     }
 
     #[tokio::test]

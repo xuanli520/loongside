@@ -173,6 +173,13 @@ use crate::conversation::{ConversationRuntime, ConversationRuntimeBinding};
 #[cfg(test)]
 use crate::conversation::{ConversationTurnCoordinator, ProviderErrorMode};
 
+#[cfg(any(
+    feature = "channel-telegram",
+    feature = "channel-feishu",
+    feature = "channel-matrix",
+    feature = "channel-wecom"
+))]
+use super::access_policy::ChannelInboundAccessPolicy;
 pub(super) use super::commands::{
     ChannelCommandContext, ChannelSendCommandSpec, run_channel_send_command,
 };
@@ -2890,10 +2897,13 @@ pub(crate) async fn send_text_to_known_session(
                             .to_owned(),
                     );
                 }
-                if !crate::channel::feishu::feishu_allowlist_allows_chat(
-                    &resolved.allowed_chat_ids,
-                    &conversation_id,
-                ) {
+                let access_policy = ChannelInboundAccessPolicy::from_string_lists(
+                    resolved.allowed_chat_ids.as_slice(),
+                    resolved.allowed_sender_ids.as_slice(),
+                    true,
+                );
+                let target_allowed = access_policy.allows_str(conversation_id.as_str(), None);
+                if !target_allowed {
                     return Err(format!(
                         "sessions_send_target_not_allowed: feishu target `{conversation_id}` is not present in feishu.allowed_chat_ids"
                     ));
@@ -3434,7 +3444,12 @@ fn normalized_feishu_callback_context(
 pub(super) fn validate_telegram_security_config(
     config: &ResolvedTelegramChannelConfig,
 ) -> CliResult<()> {
-    if config.allowed_chat_ids.is_empty() {
+    let access_policy = ChannelInboundAccessPolicy::from_i64_lists(
+        config.allowed_chat_ids.as_slice(),
+        config.allowed_sender_ids.as_slice(),
+    );
+    let has_allowlist = access_policy.has_conversation_restrictions();
+    if !has_allowlist {
         return Err(
             "telegram.allowed_chat_ids is empty; configure at least one trusted chat id".to_owned(),
         );
@@ -3446,10 +3461,12 @@ pub(super) fn validate_telegram_security_config(
 pub(super) fn validate_feishu_security_config(
     config: &ResolvedFeishuChannelConfig,
 ) -> CliResult<()> {
-    let has_allowlist = config
-        .allowed_chat_ids
-        .iter()
-        .any(|value| !value.trim().is_empty());
+    let access_policy = ChannelInboundAccessPolicy::from_string_lists(
+        config.allowed_chat_ids.as_slice(),
+        config.allowed_sender_ids.as_slice(),
+        true,
+    );
+    let has_allowlist = access_policy.has_conversation_restrictions();
     if !has_allowlist {
         return Err(
             "feishu.allowed_chat_ids is empty; configure at least one trusted chat id".to_owned(),
@@ -3486,10 +3503,12 @@ pub(super) fn validate_feishu_security_config(
 pub(super) fn validate_matrix_security_config(
     config: &ResolvedMatrixChannelConfig,
 ) -> CliResult<()> {
-    let has_allowlist = config
-        .allowed_room_ids
-        .iter()
-        .any(|value| !value.trim().is_empty());
+    let access_policy = ChannelInboundAccessPolicy::from_string_lists(
+        config.allowed_room_ids.as_slice(),
+        config.allowed_sender_ids.as_slice(),
+        false,
+    );
+    let has_allowlist = access_policy.has_conversation_restrictions();
     if !has_allowlist {
         return Err(
             "matrix.allowed_room_ids is empty; configure at least one trusted room id".to_owned(),
@@ -3526,10 +3545,12 @@ pub(super) fn validate_matrix_security_config(
 
 #[cfg(feature = "channel-wecom")]
 pub(super) fn validate_wecom_security_config(config: &ResolvedWecomChannelConfig) -> CliResult<()> {
-    let has_allowlist = config
-        .allowed_conversation_ids
-        .iter()
-        .any(|value| !value.trim().is_empty());
+    let access_policy = ChannelInboundAccessPolicy::from_string_lists(
+        config.allowed_conversation_ids.as_slice(),
+        config.allowed_sender_ids.as_slice(),
+        false,
+    );
+    let has_allowlist = access_policy.has_conversation_restrictions();
     if !has_allowlist {
         return Err(
             "wecom.allowed_conversation_ids is empty; configure at least one trusted conversation id"

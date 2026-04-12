@@ -129,6 +129,7 @@ Telegram setup remains the simplest shipped bot surface:
 - enable the channel
 - provide one bot token
 - allowlist trusted chat ids
+- optionally allowlist trusted sender ids through `telegram.allowed_sender_ids`
 - run `loong telegram-serve` for reply-loop automation
 - use `loong telegram-send` for direct operator sends
 
@@ -139,6 +140,7 @@ selected mode:
 
 - both webhook and websocket modes require `app_id`, `app_secret`, and
   `allowed_chat_ids`
+- optional sender gating can be layered with `feishu.allowed_sender_ids`
 - webhook mode additionally requires `verification_token` and `encrypt_key`
 - websocket mode must not be blocked on webhook-only secrets
 - `loong feishu-send` supports both `receive_id` and `message_reply`
@@ -150,6 +152,7 @@ Matrix uses a sync-loop transport with explicit homeserver configuration:
 
 - configure `access_token` and `base_url`
 - allowlist trusted room ids
+- optionally allowlist trusted sender ids through `matrix.allowed_sender_ids`
 - set `user_id` when self-message filtering is enabled
 - use `matrix-send` for direct room delivery and `matrix-serve` for the sync
   reply loop
@@ -162,6 +165,7 @@ long-connection transport:
 - configure `bot_id` and `secret`
 - allowlist trusted `conversation_id` values through
   `wecom.allowed_conversation_ids`
+- optionally allowlist trusted sender ids through `wecom.allowed_sender_ids`
 - use `wecom-serve` to own the long connection and auto-reply loop
 - use `wecom-send` for proactive sends when no active `wecom-serve` session is
   holding the same bot account

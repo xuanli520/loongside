@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, VecDeque},
+    collections::VecDeque,
     convert::Infallible,
     path::PathBuf,
     pin::Pin,
@@ -25,7 +25,8 @@ use crate::KernelContext;
 use crate::channel::feishu::api::{FeishuClient, resources::cards};
 use crate::channel::{
     ChannelInboundMessage, ChannelOutboundTarget, ChannelTurnFeedbackPolicy,
-    process_inbound_with_provider, runtime::state::ChannelOperationRuntimeTracker,
+    access_policy::ChannelInboundAccessPolicy, process_inbound_with_provider,
+    runtime::state::ChannelOperationRuntimeTracker,
 };
 use crate::config::{LoongClawConfig, ResolvedFeishuChannelConfig};
 use crate::crypto::timing_safe_eq;
@@ -45,7 +46,7 @@ pub(super) struct FeishuWebhookState {
     account_id: String,
     verification_token: Option<String>,
     encrypt_key: Option<String>,
-    allowed_chat_ids: BTreeSet<String>,
+    access_policy: ChannelInboundAccessPolicy<String>,
     ack_reactions: bool,
     ignore_bot_messages: bool,
     seen_events: Arc<Mutex<RecentIdCache>>,
@@ -92,17 +93,18 @@ impl FeishuWebhookState {
         kernel_ctx: KernelContext,
         runtime: Arc<ChannelOperationRuntimeTracker>,
     ) -> Self {
+        let access_policy = ChannelInboundAccessPolicy::from_string_lists(
+            resolved.allowed_chat_ids.as_slice(),
+            resolved.allowed_sender_ids.as_slice(),
+            true,
+        );
+
         Self {
             configured_account_id: resolved.configured_account_id.clone(),
             account_id: resolved.account.id.clone(),
             verification_token: resolved.verification_token(),
             encrypt_key: resolved.encrypt_key(),
-            allowed_chat_ids: resolved
-                .allowed_chat_ids
-                .iter()
-                .map(|value| value.trim().to_owned())
-                .filter(|value| !value.is_empty())
-                .collect(),
+            access_policy,
             ack_reactions: resolved.ack_reactions,
             ignore_bot_messages: resolved.ignore_bot_messages,
             config,
@@ -119,10 +121,10 @@ impl FeishuWebhookState {
         &self,
         payload: &Value,
     ) -> CliResult<FeishuWebhookAction> {
-        super::payload::parse_feishu_inbound_payload(
+        super::payload::parse_feishu_inbound_payload_with_access_policy(
             payload,
             super::payload::FeishuTransportAuth::websocket(),
-            &self.allowed_chat_ids,
+            &self.access_policy,
             self.ignore_bot_messages,
             self.configured_account_id.as_str(),
             self.account_id.as_str(),
@@ -460,11 +462,11 @@ async fn handle_feishu_webhook_payload(
 ) -> Result<FeishuWebhookSuccessResponse, (StatusCode, String)> {
     verify_feishu_signature(headers, raw_body, &payload, state.encrypt_key.as_deref())?;
 
-    let parsed = super::payload::parse_feishu_webhook_payload(
+    let parsed = super::payload::parse_feishu_webhook_payload_with_access_policy(
         &payload,
         state.verification_token.as_deref(),
         state.encrypt_key.as_deref(),
-        &state.allowed_chat_ids,
+        &state.access_policy,
         state.ignore_bot_messages,
         state.configured_account_id.as_str(),
         state.account_id.as_str(),

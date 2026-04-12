@@ -992,7 +992,7 @@ fn render_channel_surfaces_text_reports_aliases_and_operation_health() {
         channel_send_command("feishu")
     )));
     assert!(rendered.contains(&format!(
-        "op serve ({}) misconfigured: allowed_chat_ids is empty target_kinds=message_reply requirements=enabled,app_id,app_secret,mode,allowed_chat_ids,verification_token,encrypt_key",
+        "op serve ({}) misconfigured: allowed_chat_ids is empty target_kinds=message_reply requirements=enabled,app_id,app_secret,mode,allowed_chat_ids,allowed_sender_ids,verification_token,encrypt_key",
         channel_serve_command("feishu")
     )));
     assert!(rendered.contains("WeCom [wecom]"));
@@ -1002,7 +1002,7 @@ fn render_channel_surfaces_text_reports_aliases_and_operation_health() {
         channel_send_command("wecom")
     )));
     assert!(rendered.contains(&format!(
-        "op serve ({}) ready: ready target_kinds=conversation requirements=enabled,bot_id,secret,allowed_conversation_ids,websocket_url,ping_interval_s",
+        "op serve ({}) ready: ready target_kinds=conversation requirements=enabled,bot_id,secret,allowed_conversation_ids,allowed_sender_ids,websocket_url,ping_interval_s",
         channel_serve_command("wecom")
     )));
     assert!(rendered.contains("running=false"));
@@ -1616,6 +1616,7 @@ fn build_channels_cli_json_payload_includes_operation_requirement_metadata() {
                     "app_secret",
                     "mode",
                     "allowed_chat_ids",
+                    "allowed_sender_ids",
                     "verification_token",
                     "encrypt_key",
                 ])

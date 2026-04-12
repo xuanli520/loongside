@@ -181,6 +181,8 @@ pub struct TelegramChannelConfig {
     #[serde(default)]
     pub allowed_chat_ids: Vec<i64>,
     #[serde(default)]
+    pub allowed_sender_ids: Vec<i64>,
+    #[serde(default)]
     pub acp: ChannelAcpConfig,
     #[serde(default)]
     pub streaming_mode: TelegramStreamingMode,
@@ -292,6 +294,8 @@ pub struct TelegramAccountConfig {
     #[serde(default)]
     pub allowed_chat_ids: Option<Vec<i64>>,
     #[serde(default)]
+    pub allowed_sender_ids: Option<Vec<i64>>,
+    #[serde(default)]
     pub acp: Option<ChannelAcpConfig>,
     #[serde(default)]
     pub streaming_mode: Option<TelegramStreamingMode>,
@@ -310,6 +314,7 @@ pub struct ResolvedTelegramChannelConfig {
     pub base_url: String,
     pub polling_timeout_s: u64,
     pub allowed_chat_ids: Vec<i64>,
+    pub allowed_sender_ids: Vec<i64>,
     pub acp: ChannelAcpConfig,
     pub streaming_mode: TelegramStreamingMode,
     pub ack_reactions: bool,
@@ -358,6 +363,8 @@ pub struct FeishuAccountConfig {
     #[serde(default)]
     pub allowed_chat_ids: Option<Vec<String>>,
     #[serde(default)]
+    pub allowed_sender_ids: Option<Vec<String>>,
+    #[serde(default)]
     pub ack_reactions: Option<bool>,
     #[serde(default)]
     pub ignore_bot_messages: Option<bool>,
@@ -403,6 +410,7 @@ pub struct ResolvedFeishuChannelConfig {
     pub encrypt_key: Option<SecretRef>,
     pub encrypt_key_env: Option<String>,
     pub allowed_chat_ids: Vec<String>,
+    pub allowed_sender_ids: Vec<String>,
     pub ack_reactions: bool,
     pub ignore_bot_messages: bool,
     pub acp: ChannelAcpConfig,
@@ -457,6 +465,8 @@ pub struct MatrixAccountConfig {
     #[serde(default)]
     pub allowed_room_ids: Option<Vec<String>>,
     #[serde(default)]
+    pub allowed_sender_ids: Option<Vec<String>>,
+    #[serde(default)]
     pub ignore_self_messages: Option<bool>,
     #[serde(default)]
     pub acp: Option<ChannelAcpConfig>,
@@ -474,6 +484,7 @@ pub struct ResolvedMatrixChannelConfig {
     pub base_url: Option<String>,
     pub sync_timeout_s: u64,
     pub allowed_room_ids: Vec<String>,
+    pub allowed_sender_ids: Vec<String>,
     pub ignore_self_messages: bool,
     pub acp: ChannelAcpConfig,
 }
@@ -515,6 +526,8 @@ pub struct WecomAccountConfig {
     #[serde(default)]
     pub allowed_conversation_ids: Option<Vec<String>>,
     #[serde(default)]
+    pub allowed_sender_ids: Option<Vec<String>>,
+    #[serde(default)]
     pub acp: Option<ChannelAcpConfig>,
 }
 
@@ -532,6 +545,7 @@ pub struct ResolvedWecomChannelConfig {
     pub ping_interval_s: u64,
     pub reconnect_interval_s: u64,
     pub allowed_conversation_ids: Vec<String>,
+    pub allowed_sender_ids: Vec<String>,
     pub acp: ChannelAcpConfig,
 }
 
@@ -592,6 +606,8 @@ pub struct FeishuChannelConfig {
     pub encrypt_key_env: Option<String>,
     #[serde(default)]
     pub allowed_chat_ids: Vec<String>,
+    #[serde(default)]
+    pub allowed_sender_ids: Vec<String>,
     #[serde(default = "default_true")]
     pub ack_reactions: bool,
     #[serde(default = "default_true")]
@@ -622,6 +638,8 @@ pub struct MatrixChannelConfig {
     pub sync_timeout_s: u64,
     #[serde(default)]
     pub allowed_room_ids: Vec<String>,
+    #[serde(default)]
+    pub allowed_sender_ids: Vec<String>,
     #[serde(default = "default_true")]
     pub ignore_self_messages: bool,
     #[serde(default)]
@@ -654,6 +672,8 @@ pub struct WecomChannelConfig {
     pub reconnect_interval_s: u64,
     #[serde(default)]
     pub allowed_conversation_ids: Vec<String>,
+    #[serde(default)]
+    pub allowed_sender_ids: Vec<String>,
     #[serde(default)]
     pub acp: ChannelAcpConfig,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1953,6 +1973,7 @@ impl Default for TelegramChannelConfig {
             base_url: default_telegram_base_url(),
             polling_timeout_s: default_telegram_timeout_seconds(),
             allowed_chat_ids: Vec::new(),
+            allowed_sender_ids: Vec::new(),
             acp: ChannelAcpConfig::default(),
             streaming_mode: TelegramStreamingMode::default(),
             ack_reactions: true,
@@ -2072,6 +2093,9 @@ impl TelegramChannelConfig {
             allowed_chat_ids: account_override
                 .and_then(|account| account.allowed_chat_ids.clone())
                 .unwrap_or_else(|| self.allowed_chat_ids.clone()),
+            allowed_sender_ids: account_override
+                .and_then(|account| account.allowed_sender_ids.clone())
+                .unwrap_or_else(|| self.allowed_sender_ids.clone()),
             acp: resolve_channel_acp_config(
                 &self.acp,
                 account_override.and_then(|account| account.acp.as_ref()),
@@ -2096,6 +2120,7 @@ impl TelegramChannelConfig {
             base_url: merged.base_url,
             polling_timeout_s: merged.polling_timeout_s,
             allowed_chat_ids: merged.allowed_chat_ids,
+            allowed_sender_ids: merged.allowed_sender_ids,
             acp: merged.acp,
             streaming_mode: merged.streaming_mode,
             ack_reactions: merged.ack_reactions,
@@ -2173,6 +2198,7 @@ impl Default for FeishuChannelConfig {
             encrypt_key: None,
             encrypt_key_env: Some(FEISHU_ENCRYPT_KEY_ENV.to_owned()),
             allowed_chat_ids: Vec::new(),
+            allowed_sender_ids: Vec::new(),
             ack_reactions: true,
             ignore_bot_messages: true,
             acp: ChannelAcpConfig::default(),
@@ -2193,6 +2219,7 @@ impl Default for MatrixChannelConfig {
             base_url: None,
             sync_timeout_s: default_matrix_sync_timeout_seconds(),
             allowed_room_ids: Vec::new(),
+            allowed_sender_ids: Vec::new(),
             ignore_self_messages: true,
             acp: ChannelAcpConfig::default(),
             accounts: BTreeMap::new(),
@@ -2214,6 +2241,7 @@ impl Default for WecomChannelConfig {
             ping_interval_s: default_wecom_ping_interval_seconds(),
             reconnect_interval_s: default_wecom_reconnect_interval_seconds(),
             allowed_conversation_ids: Vec::new(),
+            allowed_sender_ids: Vec::new(),
             acp: ChannelAcpConfig::default(),
             accounts: BTreeMap::new(),
         }
@@ -2744,6 +2772,9 @@ impl FeishuChannelConfig {
             allowed_chat_ids: account_override
                 .and_then(|account| account.allowed_chat_ids.clone())
                 .unwrap_or_else(|| self.allowed_chat_ids.clone()),
+            allowed_sender_ids: account_override
+                .and_then(|account| account.allowed_sender_ids.clone())
+                .unwrap_or_else(|| self.allowed_sender_ids.clone()),
             ack_reactions: account_override
                 .and_then(|account| account.ack_reactions)
                 .unwrap_or(self.ack_reactions),
@@ -2778,6 +2809,7 @@ impl FeishuChannelConfig {
             encrypt_key: merged.encrypt_key,
             encrypt_key_env: merged.encrypt_key_env,
             allowed_chat_ids: merged.allowed_chat_ids,
+            allowed_sender_ids: merged.allowed_sender_ids,
             ack_reactions: merged.ack_reactions,
             ignore_bot_messages: merged.ignore_bot_messages,
             acp: merged.acp,
@@ -2961,6 +2993,9 @@ impl MatrixChannelConfig {
             allowed_room_ids: account_override
                 .and_then(|account| account.allowed_room_ids.clone())
                 .unwrap_or_else(|| self.allowed_room_ids.clone()),
+            allowed_sender_ids: account_override
+                .and_then(|account| account.allowed_sender_ids.clone())
+                .unwrap_or_else(|| self.allowed_sender_ids.clone()),
             ignore_self_messages: account_override
                 .and_then(|account| account.ignore_self_messages)
                 .unwrap_or(self.ignore_self_messages),
@@ -2983,6 +3018,7 @@ impl MatrixChannelConfig {
             base_url: merged.base_url,
             sync_timeout_s: merged.sync_timeout_s,
             allowed_room_ids: merged.allowed_room_ids,
+            allowed_sender_ids: merged.allowed_sender_ids,
             ignore_self_messages: merged.ignore_self_messages,
             acp: merged.acp,
         })
@@ -3172,6 +3208,9 @@ impl WecomChannelConfig {
             allowed_conversation_ids: account_override
                 .and_then(|account| account.allowed_conversation_ids.clone())
                 .unwrap_or_else(|| self.allowed_conversation_ids.clone()),
+            allowed_sender_ids: account_override
+                .and_then(|account| account.allowed_sender_ids.clone())
+                .unwrap_or_else(|| self.allowed_sender_ids.clone()),
             acp: resolve_channel_acp_config(
                 &self.acp,
                 account_override.and_then(|account| account.acp.as_ref()),
@@ -3193,6 +3232,7 @@ impl WecomChannelConfig {
             ping_interval_s: merged.ping_interval_s.clamp(1, 300),
             reconnect_interval_s: merged.reconnect_interval_s.clamp(1, 300),
             allowed_conversation_ids: merged.allowed_conversation_ids,
+            allowed_sender_ids: merged.allowed_sender_ids,
             acp: merged.acp,
         })
     }
@@ -7968,6 +8008,7 @@ mod tests {
             "bot_token_env": "BASE_TELEGRAM_TOKEN",
             "polling_timeout_s": 25,
             "allowed_chat_ids": [1001],
+            "allowed_sender_ids": [7],
             "acp": {
                 "bootstrap_mcp_servers": ["filesystem"],
                 "working_directory": " /workspace/base "
@@ -7978,6 +8019,7 @@ mod tests {
                     "account_id": "Ops-Bot",
                     "bot_token_env": "WORK_TELEGRAM_TOKEN",
                     "allowed_chat_ids": [2002],
+                    "allowed_sender_ids": [8],
                     "acp": {
                         "bootstrap_mcp_servers": ["search"],
                         "working_directory": "/workspace/work-bot"
@@ -8008,6 +8050,7 @@ mod tests {
             Some("WORK_TELEGRAM_TOKEN")
         );
         assert_eq!(resolved.allowed_chat_ids, vec![2002]);
+        assert_eq!(resolved.allowed_sender_ids, vec![8]);
         assert_eq!(
             resolved.acp.bootstrap_mcp_servers,
             vec!["search".to_owned()]
@@ -8024,6 +8067,7 @@ mod tests {
         assert_eq!(disabled.configured_account_id, "personal");
         assert!(!disabled.enabled);
         assert_eq!(disabled.allowed_chat_ids, vec![1001]);
+        assert_eq!(disabled.allowed_sender_ids, vec![7]);
         assert_eq!(
             disabled.acp.bootstrap_mcp_servers,
             vec!["filesystem".to_owned()]
@@ -8304,6 +8348,52 @@ mod tests {
     }
 
     #[test]
+    fn matrix_multi_account_resolution_merges_sender_allowlist_overrides() {
+        let config: MatrixChannelConfig = serde_json::from_value(json!({
+            "enabled": true,
+            "access_token_env": "BASE_MATRIX_ACCESS_TOKEN",
+            "base_url": "https://matrix.example.org",
+            "allowed_room_ids": ["!ops:example.org"],
+            "allowed_sender_ids": ["@alice:example.org"],
+            "accounts": {
+                "Ops": {
+                    "account_id": "Ops-Bot",
+                    "access_token": "ops-token",
+                    "allowed_room_ids": ["!ops-room:example.org"],
+                    "allowed_sender_ids": ["@ops-user:example.org"]
+                },
+                "Backup": {
+                    "enabled": false,
+                    "access_token": "backup-token"
+                }
+            },
+            "default_account": "Ops"
+        }))
+        .expect("deserialize matrix multi-account config");
+
+        let resolved = config
+            .resolve_account(None)
+            .expect("resolve default matrix account");
+        assert_eq!(
+            resolved.allowed_room_ids,
+            vec!["!ops-room:example.org".to_owned()]
+        );
+        assert_eq!(
+            resolved.allowed_sender_ids,
+            vec!["@ops-user:example.org".to_owned()]
+        );
+
+        let backup = config
+            .resolve_account(Some("Backup"))
+            .expect("resolve backup matrix account");
+        assert_eq!(backup.allowed_room_ids, vec!["!ops:example.org".to_owned()]);
+        assert_eq!(
+            backup.allowed_sender_ids,
+            vec!["@alice:example.org".to_owned()]
+        );
+    }
+
+    #[test]
     fn wecom_account_identity_prefers_explicit_account_id() {
         let config: WecomChannelConfig = serde_json::from_value(json!({
             "account_id": "Ops-Bot",
@@ -8338,6 +8428,7 @@ mod tests {
             "ping_interval_s": 45,
             "reconnect_interval_s": 12,
             "allowed_conversation_ids": ["group_base"],
+            "allowed_sender_ids": ["user_base"],
             "acp": {
                 "bootstrap_mcp_servers": ["filesystem"],
                 "working_directory": " /workspace/base "
@@ -8349,6 +8440,7 @@ mod tests {
                     "bot_id": "bot_work",
                     "secret": "secret-work",
                     "allowed_conversation_ids": ["group_work"],
+                    "allowed_sender_ids": ["user_work"],
                     "acp": {
                         "bootstrap_mcp_servers": ["search"],
                         "working_directory": "/workspace/work-bot"
@@ -8376,6 +8468,7 @@ mod tests {
             resolved.allowed_conversation_ids,
             vec!["group_work".to_owned()]
         );
+        assert_eq!(resolved.allowed_sender_ids, vec!["user_work".to_owned()]);
         assert_eq!(resolved.ping_interval_s, 45);
         assert_eq!(resolved.reconnect_interval_s, 12);
         assert_eq!(
@@ -8400,6 +8493,7 @@ mod tests {
             disabled.allowed_conversation_ids,
             vec!["group_base".to_owned()]
         );
+        assert_eq!(disabled.allowed_sender_ids, vec!["user_base".to_owned()]);
         assert_eq!(
             disabled.acp.bootstrap_mcp_servers,
             vec!["filesystem".to_owned()]

@@ -37,6 +37,7 @@ pub use self::tlon::TLON_CATALOG_COMMAND_FAMILY_DESCRIPTOR;
 pub use self::twitch::TWITCH_CATALOG_COMMAND_FAMILY_DESCRIPTOR;
 use super::{
     ChannelCatalogTargetKind, ChannelOperationRuntime, ChannelPlatform,
+    access_policy::ChannelInboundAccessPolicy,
     core::webhook_auth::build_webhook_auth_header_from_parts, runtime::state,
 };
 
@@ -297,12 +298,24 @@ const TELEGRAM_ALLOWED_CHAT_IDS_REQUIREMENT: ChannelCatalogOperationRequirement 
         env_pointer_paths: &[],
         default_env_var: None,
     };
+const TELEGRAM_ALLOWED_SENDER_IDS_REQUIREMENT: ChannelCatalogOperationRequirement =
+    ChannelCatalogOperationRequirement {
+        id: "allowed_sender_ids",
+        label: "allowed sender ids",
+        config_paths: &[
+            "telegram.allowed_sender_ids",
+            "telegram.accounts.<account>.allowed_sender_ids",
+        ],
+        env_pointer_paths: &[],
+        default_env_var: None,
+    };
 const TELEGRAM_SEND_REQUIREMENTS: &[ChannelCatalogOperationRequirement] =
     &[TELEGRAM_ENABLED_REQUIREMENT, TELEGRAM_BOT_TOKEN_REQUIREMENT];
 const TELEGRAM_SERVE_REQUIREMENTS: &[ChannelCatalogOperationRequirement] = &[
     TELEGRAM_ENABLED_REQUIREMENT,
     TELEGRAM_BOT_TOKEN_REQUIREMENT,
     TELEGRAM_ALLOWED_CHAT_IDS_REQUIREMENT,
+    TELEGRAM_ALLOWED_SENDER_IDS_REQUIREMENT,
 ];
 
 const TELEGRAM_SERVE_DOCTOR_CHECKS: &[ChannelDoctorCheckSpec] = &[
@@ -416,6 +429,17 @@ const FEISHU_ALLOWED_CHAT_IDS_REQUIREMENT: ChannelCatalogOperationRequirement =
         env_pointer_paths: &[],
         default_env_var: None,
     };
+const FEISHU_ALLOWED_SENDER_IDS_REQUIREMENT: ChannelCatalogOperationRequirement =
+    ChannelCatalogOperationRequirement {
+        id: "allowed_sender_ids",
+        label: "allowed sender ids",
+        config_paths: &[
+            "feishu.allowed_sender_ids",
+            "feishu.accounts.<account>.allowed_sender_ids",
+        ],
+        env_pointer_paths: &[],
+        default_env_var: None,
+    };
 const FEISHU_MODE_REQUIREMENT: ChannelCatalogOperationRequirement =
     ChannelCatalogOperationRequirement {
         id: "mode",
@@ -463,6 +487,7 @@ const FEISHU_SERVE_REQUIREMENTS: &[ChannelCatalogOperationRequirement] = &[
     FEISHU_APP_SECRET_REQUIREMENT,
     FEISHU_MODE_REQUIREMENT,
     FEISHU_ALLOWED_CHAT_IDS_REQUIREMENT,
+    FEISHU_ALLOWED_SENDER_IDS_REQUIREMENT,
     FEISHU_VERIFICATION_TOKEN_REQUIREMENT,
     FEISHU_ENCRYPT_KEY_REQUIREMENT,
 ];
@@ -618,6 +643,17 @@ const MATRIX_ALLOWED_ROOM_IDS_REQUIREMENT: ChannelCatalogOperationRequirement =
         env_pointer_paths: &[],
         default_env_var: None,
     };
+const MATRIX_ALLOWED_SENDER_IDS_REQUIREMENT: ChannelCatalogOperationRequirement =
+    ChannelCatalogOperationRequirement {
+        id: "allowed_sender_ids",
+        label: "allowed sender ids",
+        config_paths: &[
+            "matrix.allowed_sender_ids",
+            "matrix.accounts.<account>.allowed_sender_ids",
+        ],
+        env_pointer_paths: &[],
+        default_env_var: None,
+    };
 const MATRIX_USER_ID_REQUIREMENT: ChannelCatalogOperationRequirement =
     ChannelCatalogOperationRequirement {
         id: "user_id",
@@ -636,6 +672,7 @@ const MATRIX_SERVE_REQUIREMENTS: &[ChannelCatalogOperationRequirement] = &[
     MATRIX_ACCESS_TOKEN_REQUIREMENT,
     MATRIX_BASE_URL_REQUIREMENT,
     MATRIX_ALLOWED_ROOM_IDS_REQUIREMENT,
+    MATRIX_ALLOWED_SENDER_IDS_REQUIREMENT,
     MATRIX_USER_ID_REQUIREMENT,
 ];
 
@@ -1033,6 +1070,17 @@ const WECOM_ALLOWED_CONVERSATION_IDS_REQUIREMENT: ChannelCatalogOperationRequire
         env_pointer_paths: &[],
         default_env_var: None,
     };
+const WECOM_ALLOWED_SENDER_IDS_REQUIREMENT: ChannelCatalogOperationRequirement =
+    ChannelCatalogOperationRequirement {
+        id: "allowed_sender_ids",
+        label: "allowed sender ids",
+        config_paths: &[
+            "wecom.allowed_sender_ids",
+            "wecom.accounts.<account>.allowed_sender_ids",
+        ],
+        env_pointer_paths: &[],
+        default_env_var: None,
+    };
 const WECOM_WEBSOCKET_URL_REQUIREMENT: ChannelCatalogOperationRequirement =
     ChannelCatalogOperationRequirement {
         id: "websocket_url",
@@ -1066,6 +1114,7 @@ const WECOM_SERVE_REQUIREMENTS: &[ChannelCatalogOperationRequirement] = &[
     WECOM_BOT_ID_REQUIREMENT,
     WECOM_SECRET_REQUIREMENT,
     WECOM_ALLOWED_CONVERSATION_IDS_REQUIREMENT,
+    WECOM_ALLOWED_SENDER_IDS_REQUIREMENT,
     WECOM_WEBSOCKET_URL_REQUIREMENT,
     WECOM_PING_INTERVAL_REQUIREMENT,
 ];
@@ -2584,8 +2633,13 @@ fn build_telegram_snapshot_for_account(
         send_issues.push("bot token is missing (telegram.bot_token or env)".to_owned());
     }
 
+    let access_policy = ChannelInboundAccessPolicy::from_i64_lists(
+        resolved.allowed_chat_ids.as_slice(),
+        resolved.allowed_sender_ids.as_slice(),
+    );
     let mut serve_issues = send_issues.clone();
-    if resolved.allowed_chat_ids.is_empty() {
+    let has_allowlist = access_policy.has_conversation_restrictions();
+    if !has_allowlist {
         serve_issues.push("allowed_chat_ids is empty".to_owned());
     }
 
@@ -2646,6 +2700,24 @@ fn build_telegram_snapshot_for_account(
         format!("account={}", resolved.account.label),
         format!("polling_timeout_s={}", resolved.polling_timeout_s),
     ];
+    if !resolved.allowed_chat_ids.is_empty() {
+        let allowed_chat_ids = resolved
+            .allowed_chat_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        notes.push(format!("allowed_chat_ids={allowed_chat_ids}"));
+    }
+    if !resolved.allowed_sender_ids.is_empty() {
+        let allowed_sender_ids = resolved
+            .allowed_sender_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        notes.push(format!("allowed_sender_ids={allowed_sender_ids}"));
+    }
     if !resolved.acp.bootstrap_mcp_servers.is_empty() {
         notes.push(format!(
             "acp_bootstrap_mcp_servers={}",
@@ -4878,12 +4950,14 @@ fn build_feishu_snapshot_for_account(
         send_issues.push("app_secret is missing".to_owned());
     }
 
+    let access_policy = ChannelInboundAccessPolicy::from_string_lists(
+        resolved.allowed_chat_ids.as_slice(),
+        resolved.allowed_sender_ids.as_slice(),
+        true,
+    );
     let mut serve_issues = send_issues.clone();
-    if !resolved
-        .allowed_chat_ids
-        .iter()
-        .any(|value| !value.trim().is_empty())
-    {
+    let has_allowlist = access_policy.has_conversation_restrictions();
+    if !has_allowlist {
         serve_issues.push("allowed_chat_ids is empty".to_owned());
     }
     if resolved.mode == FeishuChannelServeMode::Webhook {
@@ -4953,6 +5027,15 @@ fn build_feishu_snapshot_for_account(
         format!("mode={}", resolved.mode.as_str()),
         format!("receive_id_type={}", resolved.receive_id_type),
     ];
+    if let Some(allowed_chat_ids) = access_policy.string_conversations() {
+        notes.push(format!("allowed_chat_ids={}", allowed_chat_ids.join(",")));
+    }
+    if let Some(allowed_sender_ids) = access_policy.string_senders() {
+        notes.push(format!(
+            "allowed_sender_ids={}",
+            allowed_sender_ids.join(",")
+        ));
+    }
     if resolved.mode == FeishuChannelServeMode::Webhook {
         notes.push(format!("webhook_bind={}", resolved.webhook_bind));
         notes.push(format!("webhook_path={}", resolved.webhook_path));
@@ -5011,12 +5094,14 @@ fn build_matrix_snapshot_for_account(
         send_issues.push("base_url is missing".to_owned());
     }
 
+    let access_policy = ChannelInboundAccessPolicy::from_string_lists(
+        resolved.allowed_room_ids.as_slice(),
+        resolved.allowed_sender_ids.as_slice(),
+        false,
+    );
     let mut serve_issues = send_issues.clone();
-    if !resolved
-        .allowed_room_ids
-        .iter()
-        .any(|value| !value.trim().is_empty())
-    {
+    let has_allowlist = access_policy.has_conversation_restrictions();
+    if !has_allowlist {
         serve_issues.push("allowed_room_ids is empty".to_owned());
     }
     let has_user_id = resolved
@@ -5086,6 +5171,15 @@ fn build_matrix_snapshot_for_account(
         format!("sync_timeout_s={}", resolved.sync_timeout_s),
         format!("ignore_self_messages={}", resolved.ignore_self_messages),
     ];
+    if let Some(allowed_room_ids) = access_policy.string_conversations() {
+        notes.push(format!("allowed_room_ids={}", allowed_room_ids.join(",")));
+    }
+    if let Some(allowed_sender_ids) = access_policy.string_senders() {
+        notes.push(format!(
+            "allowed_sender_ids={}",
+            allowed_sender_ids.join(",")
+        ));
+    }
     if let Some(user_id) = resolved.user_id.as_deref() {
         notes.push(format!("user_id={user_id}"));
     }
@@ -5150,11 +5244,13 @@ fn build_wecom_snapshot_for_account(
         &mut send_issues,
     );
 
+    let access_policy = ChannelInboundAccessPolicy::from_string_lists(
+        resolved.allowed_conversation_ids.as_slice(),
+        resolved.allowed_sender_ids.as_slice(),
+        false,
+    );
     let mut serve_issues = send_issues.clone();
-    let has_allowlist = resolved
-        .allowed_conversation_ids
-        .iter()
-        .any(|value| !value.trim().is_empty());
+    let has_allowlist = access_policy.has_conversation_restrictions();
     if !has_allowlist {
         serve_issues.push("allowed_conversation_ids is empty".to_owned());
     }
@@ -5218,6 +5314,18 @@ fn build_wecom_snapshot_for_account(
         format!("ping_interval_s={}", resolved.ping_interval_s),
         format!("reconnect_interval_s={}", resolved.reconnect_interval_s),
     ];
+    if let Some(allowed_conversation_ids) = access_policy.string_conversations() {
+        notes.push(format!(
+            "allowed_conversation_ids={}",
+            allowed_conversation_ids.join(",")
+        ));
+    }
+    if let Some(allowed_sender_ids) = access_policy.string_senders() {
+        notes.push(format!(
+            "allowed_sender_ids={}",
+            allowed_sender_ids.join(",")
+        ));
+    }
     if !resolved.acp.bootstrap_mcp_servers.is_empty() {
         notes.push(format!(
             "acp_bootstrap_mcp_servers={}",
@@ -7062,7 +7170,12 @@ mod tests {
                 .iter()
                 .map(|requirement| requirement.id)
                 .collect::<Vec<_>>(),
-            vec!["enabled", "bot_token", "allowed_chat_ids"]
+            vec![
+                "enabled",
+                "bot_token",
+                "allowed_chat_ids",
+                "allowed_sender_ids"
+            ]
         );
         assert_eq!(
             telegram.operations[0].requirements[1].default_env_var,
@@ -7096,16 +7209,17 @@ mod tests {
                 "app_secret",
                 "mode",
                 "allowed_chat_ids",
+                "allowed_sender_ids",
                 "verification_token",
                 "encrypt_key",
             ]
         );
         assert_eq!(
-            feishu.operations[1].requirements[5].default_env_var,
+            feishu.operations[1].requirements[6].default_env_var,
             Some("FEISHU_VERIFICATION_TOKEN")
         );
         assert_eq!(
-            feishu.operations[1].requirements[6].default_env_var,
+            feishu.operations[1].requirements[7].default_env_var,
             Some("FEISHU_ENCRYPT_KEY")
         );
 
