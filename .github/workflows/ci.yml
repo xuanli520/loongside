@@ -314,6 +314,7 @@ jobs:
       - rust-test-all-features
       - android-termux-build
       - docs-build
+      - docs-site
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -327,6 +328,7 @@ jobs:
           RUST_TEST_ALL_FEATURES_RESULT: ${{ needs.rust-test-all-features.result }}
           ANDROID_TERMUX_BUILD_RESULT: ${{ needs.android-termux-build.result }}
           DOCS_BUILD_RESULT: ${{ needs.docs-build.result }}
+          DOCS_SITE_RESULT: ${{ needs.docs-site.result }}
         run: |
           set -euo pipefail
 
@@ -346,3 +348,4 @@ jobs:
           check_result rust-test-all-features "$RUST_TEST_ALL_FEATURES_RESULT"
           check_result android-termux-build "$ANDROID_TERMUX_BUILD_RESULT"
           check_result docs-build "$DOCS_BUILD_RESULT"
+          check_result docs-site "$DOCS_SITE_RESULT"
