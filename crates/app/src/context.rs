@@ -233,9 +233,11 @@ mod tests {
 
     #[test]
     fn bootstrap_kernel_context_with_config_grants_network_egress() {
-        let context =
-            bootstrap_kernel_context_with_config("test-agent", 60, &LoongClawConfig::default())
-                .expect("bootstrap with default config should succeed");
+        let mut config = LoongClawConfig::default();
+        config.audit.mode = AuditMode::InMemory;
+
+        let context = bootstrap_kernel_context_with_config("test-agent", 60, &config)
+            .expect("bootstrap with default config should succeed");
 
         let allowed_capabilities = &context.token.allowed_capabilities;
 

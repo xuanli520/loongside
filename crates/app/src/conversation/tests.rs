@@ -1754,6 +1754,13 @@ fn test_config() -> LoongClawConfig {
     config
 }
 
+fn test_config_with_file_root(root: &std::path::Path) -> LoongClawConfig {
+    let mut config = test_config();
+    let file_root = root.display().to_string();
+    config.tools.file_root = Some(file_root);
+    config
+}
+
 fn enable_guided_autonomy(config: &mut LoongClawConfig) {
     config.tools.autonomy_profile = AutonomyProfile::GuidedAcquisition;
 }
@@ -7820,7 +7827,7 @@ async fn handle_turn_with_runtime_continues_multi_step_tool_chain_after_first_to
     );
 
     let coordinator = ConversationTurnCoordinator::new();
-    let mut config = test_config();
+    let mut config = test_config_with_file_root(&harness.temp_dir);
     config.conversation.turn_loop.max_discovery_followup_rounds = 4;
     let reply = coordinator
         .handle_turn_with_runtime(
@@ -7914,7 +7921,7 @@ async fn handle_turn_with_runtime_continues_direct_tool_chain_after_initial_tool
     );
 
     let coordinator = ConversationTurnCoordinator::new();
-    let mut config = test_config();
+    let mut config = test_config_with_file_root(&harness.temp_dir);
     config.conversation.turn_loop.max_discovery_followup_rounds = 4;
     let reply = coordinator
         .handle_turn_with_runtime(
@@ -8432,7 +8439,7 @@ async fn handle_turn_with_runtime_multi_step_chain_continues_after_first_tool_su
     );
 
     let coordinator = ConversationTurnCoordinator::new();
-    let mut config = test_config();
+    let mut config = test_config_with_file_root(&harness.temp_dir);
     config.conversation.turn_loop.max_discovery_followup_rounds = 4;
     let reply = coordinator
         .handle_turn_with_runtime(
@@ -8648,7 +8655,7 @@ async fn handle_turn_with_runtime_provider_shape_function_calls_multi_step_chain
     );
 
     let coordinator = ConversationTurnCoordinator::new();
-    let mut config = test_config();
+    let mut config = test_config_with_file_root(&harness.temp_dir);
     config.conversation.turn_loop.max_discovery_followup_rounds = 5;
     let reply = coordinator
         .handle_turn_with_runtime(
