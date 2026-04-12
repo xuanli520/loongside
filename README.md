@@ -4,7 +4,7 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./assets/logo/loongclaw-logo-dark.png" />
     <source media="(prefers-color-scheme: light)" srcset="./assets/logo/loongclaw-logo-light.png" />
-    <img src="./assets/logo/loongclaw-logo-light.png" alt="Loong" width="800" />
+    <img src="./assets/logo/loongclaw-logo-light.png" alt="Loong" width="280" />
   </picture>
 </p>
 <p align="center"><strong><em>"Originated from the East, here to benefit the world"</em></strong></p>
