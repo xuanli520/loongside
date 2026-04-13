@@ -120,6 +120,7 @@ impl ScopedLoongClawHome {
             .expect("create scoped loongclaw home");
         let mut env = ScopedEnv::new();
         env.set("LOONG_HOME", temp_home.path());
+        crate::tools::reset_runtime_home_state_for_tests();
         Self { env, temp_home }
     }
 
@@ -133,6 +134,13 @@ impl ScopedLoongClawHome {
 
     pub fn env(&self) -> &ScopedEnv {
         &self.env
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScopedLoongClawHome {
+    fn drop(&mut self) {
+        crate::tools::reset_runtime_home_state_for_tests();
     }
 }
 

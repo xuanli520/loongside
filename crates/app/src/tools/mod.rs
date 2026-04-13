@@ -202,6 +202,11 @@ pub(crate) async fn with_trusted_internal_tool_payload_async<T>(
     TRUSTED_INTERNAL_TOOL_PAYLOAD_TASK.scope(true, future).await
 }
 
+#[cfg(test)]
+pub(crate) fn reset_runtime_home_state_for_tests() {
+    tool_lease_authority::clear_tool_lease_secret_cache_for_tests();
+}
+
 fn trusted_internal_tool_payload_enabled() -> bool {
     #[cfg(test)]
     let test_enabled = TRUSTED_INTERNAL_TOOL_PAYLOAD_DEPTH.with(|depth| depth.get() > 0);
@@ -4574,7 +4579,6 @@ mod tests {
         let memory_dir = root.join("memory");
 
         std::fs::create_dir_all(&memory_dir).expect("create memory dir");
-        tool_lease_authority::clear_tool_lease_secret_cache_for_tests();
 
         let config = test_tool_runtime_config(root);
         let expected_home = config._runtime_home.path().to_path_buf();
@@ -4592,8 +4596,6 @@ mod tests {
 
         assert_eq!(outcome.status, "ok");
         assert!(expected_secret.exists());
-
-        tool_lease_authority::clear_tool_lease_secret_cache_for_tests();
     }
 
     #[cfg(feature = "feishu-integration")]

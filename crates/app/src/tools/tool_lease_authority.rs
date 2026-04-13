@@ -363,7 +363,7 @@ fn now_unix_seconds() -> u64 {
 }
 
 #[cfg(test)]
-pub(super) fn clear_tool_lease_secret_cache_for_tests() {
+pub(crate) fn clear_tool_lease_secret_cache_for_tests() {
     let cache = tool_lease_secret_cache();
     let guard = cache.lock();
     let mut guard = match guard {
@@ -385,9 +385,7 @@ mod tests {
     use crate::test_support::ScopedLoongClawHome;
 
     fn scoped_tool_lease_home(prefix: &str) -> ScopedLoongClawHome {
-        let home = ScopedLoongClawHome::new(prefix);
-        clear_tool_lease_secret_cache_for_tests();
-        home
+        ScopedLoongClawHome::new(prefix)
     }
 
     #[test]
@@ -425,8 +423,6 @@ mod tests {
         use std::sync::Barrier;
 
         let _home = scoped_tool_lease_home("loongclaw-tool-lease-parallel-home");
-        clear_tool_lease_secret_cache_for_tests();
-
         let thread_count = 8;
         let barrier = Arc::new(Barrier::new(thread_count));
         let mut handles = Vec::new();
@@ -456,8 +452,6 @@ mod tests {
     #[test]
     fn read_tool_lease_secret_after_competitor_publish_waits_for_visible_secret() {
         let _home = scoped_tool_lease_home("loongclaw-tool-lease-visibility-home");
-        clear_tool_lease_secret_cache_for_tests();
-
         let secret_path = default_tool_lease_secret_path();
         let parent_dir = secret_path.parent().expect("secret parent").to_path_buf();
         std::fs::create_dir_all(&parent_dir).expect("create secret parent");
@@ -485,15 +479,12 @@ mod tests {
     #[test]
     fn issued_tool_lease_is_home_scoped() {
         let home_a = scoped_tool_lease_home("loongclaw-tool-lease-home-a");
-        clear_tool_lease_secret_cache_for_tests();
         let payload = serde_json::Map::new();
         let lease = issue_tool_lease("file.read", &payload).expect("lease");
 
         drop(home_a);
 
         let _home_b = scoped_tool_lease_home("loongclaw-tool-lease-home-b");
-        clear_tool_lease_secret_cache_for_tests();
-
         let validation_result = validate_tool_lease("file.read", &lease, &payload);
         let error = validation_result.expect_err("different home should reject lease");
 
