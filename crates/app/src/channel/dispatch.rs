@@ -3108,6 +3108,7 @@ pub(crate) async fn process_inbound_with_provider(
                 channel_id: address.channel_id.clone(),
                 account_id: address.account_id.clone(),
                 conversation_id: address.conversation_id.clone(),
+                participant_id: address.participant_id.clone(),
                 thread_id: address.thread_id.clone(),
                 acp_bootstrap_mcp_servers: acp_turn_hints.bootstrap_mcp_servers.clone(),
                 acp_cwd: acp_turn_hints

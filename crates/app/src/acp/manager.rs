@@ -1291,6 +1291,7 @@ mod tests {
             channel_id: Some("telegram".to_owned()),
             account_id: Some("acct".to_owned()),
             conversation_id: Some("42".to_owned()),
+            participant_id: None,
             thread_id: Some("thread-1".to_owned()),
         };
 
@@ -2211,6 +2212,7 @@ mod tests {
             channel_id: Some("feishu".to_owned()),
             account_id: Some("lark-prod".to_owned()),
             conversation_id: Some("oc_123".to_owned()),
+            participant_id: None,
             thread_id: Some("om_thread_1".to_owned()),
         });
         let first_bootstrap = AcpSessionBootstrap {
@@ -3371,6 +3373,7 @@ mod tests {
                 channel_id: Some("telegram".to_owned()),
                 account_id: Some("bot_123456".to_owned()),
                 conversation_id: Some("42".to_owned()),
+                participant_id: None,
                 thread_id: None,
             }),
             activation_origin: Some(super::super::AcpRoutingOrigin::AutomaticDispatch),
@@ -3443,6 +3446,7 @@ mod tests {
                 channel_id: Some("feishu".to_owned()),
                 account_id: Some("workspace_a".to_owned()),
                 conversation_id: Some("chat-1".to_owned()),
+                participant_id: None,
                 thread_id: None,
             }),
             activation_origin: Some(super::super::AcpRoutingOrigin::AutomaticDispatch),

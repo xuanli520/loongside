@@ -481,6 +481,7 @@ async fn main() {
             channel,
             conversation_id,
             account_id,
+            participant_id,
             thread_id,
             json,
         } => run_acp_dispatch_cli(
@@ -489,6 +490,7 @@ async fn main() {
             channel.as_deref(),
             conversation_id.as_deref(),
             account_id.as_deref(),
+            participant_id.as_deref(),
             thread_id.as_deref(),
             json,
         ),

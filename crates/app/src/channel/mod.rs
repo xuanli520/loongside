@@ -877,6 +877,27 @@ mod tests {
         feature = "channel-matrix"
     ))]
     #[test]
+    fn channel_session_conversation_address_preserves_participant_scope() {
+        let session =
+            ChannelSession::with_account(ChannelPlatform::Feishu, "lark_cli_a1b2c3", "oc_123")
+                .with_participant_id("ou_sender_1")
+                .with_thread_id("om_root_1");
+
+        let address = session.conversation_address();
+
+        assert_eq!(address.channel_id.as_deref(), Some("feishu"));
+        assert_eq!(address.account_id.as_deref(), Some("lark_cli_a1b2c3"));
+        assert_eq!(address.conversation_id.as_deref(), Some("oc_123"));
+        assert_eq!(address.participant_id.as_deref(), Some("ou_sender_1"));
+        assert_eq!(address.thread_id.as_deref(), Some("om_root_1"));
+    }
+
+    #[cfg(any(
+        feature = "channel-telegram",
+        feature = "channel-feishu",
+        feature = "channel-matrix"
+    ))]
+    #[test]
     fn channel_message_ingress_context_preserves_sender_and_thread_metadata() {
         let message = ChannelInboundMessage {
             session: ChannelSession::with_account(

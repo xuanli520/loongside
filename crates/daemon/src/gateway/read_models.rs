@@ -50,6 +50,7 @@ pub struct GatewayAcpBindingScopeReadModel {
     pub channel_id: Option<String>,
     pub account_id: Option<String>,
     pub conversation_id: Option<String>,
+    pub participant_id: Option<String>,
     pub thread_id: Option<String>,
 }
 
@@ -172,6 +173,7 @@ pub struct GatewayConversationAddressReadModel {
     pub channel_id: Option<String>,
     pub account_id: Option<String>,
     pub conversation_id: Option<String>,
+    pub participant_id: Option<String>,
     pub thread_id: Option<String>,
 }
 
@@ -189,6 +191,7 @@ pub struct GatewayAcpDispatchTargetReadModel {
     pub channel_id: Option<String>,
     pub account_id: Option<String>,
     pub conversation_id: Option<String>,
+    pub participant_id: Option<String>,
     pub thread_id: Option<String>,
     pub channel_path: Vec<String>,
 }
@@ -511,6 +514,7 @@ fn build_acp_binding_scope_read_model(
     let channel_id = binding.channel_id.clone();
     let account_id = binding.account_id.clone();
     let conversation_id = binding.conversation_id.clone();
+    let participant_id = binding.participant_id.clone();
     let thread_id = binding.thread_id.clone();
 
     GatewayAcpBindingScopeReadModel {
@@ -518,6 +522,7 @@ fn build_acp_binding_scope_read_model(
         channel_id,
         account_id,
         conversation_id,
+        participant_id,
         thread_id,
     }
 }
@@ -688,6 +693,7 @@ fn build_conversation_address_read_model(
     let channel_id = address.channel_id.clone();
     let account_id = address.account_id.clone();
     let conversation_id = address.conversation_id.clone();
+    let participant_id = address.participant_id.clone();
     let thread_id = address.thread_id.clone();
 
     GatewayConversationAddressReadModel {
@@ -695,6 +701,7 @@ fn build_conversation_address_read_model(
         channel_id,
         account_id,
         conversation_id,
+        participant_id,
         thread_id,
     }
 }
@@ -722,6 +729,7 @@ fn build_acp_dispatch_target_read_model(
     let channel_id = target.channel_id.clone();
     let account_id = target.account_id.clone();
     let conversation_id = target.conversation_id.clone();
+    let participant_id = target.participant_id.clone();
     let thread_id = target.thread_id.clone();
     let channel_path = target.channel_path.clone();
 
@@ -732,6 +740,7 @@ fn build_acp_dispatch_target_read_model(
         channel_id,
         account_id,
         conversation_id,
+        participant_id,
         thread_id,
         channel_path,
     }
