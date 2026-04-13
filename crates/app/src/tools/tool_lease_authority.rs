@@ -5,6 +5,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::thread;
+use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -19,6 +21,8 @@ use sha2::Sha256;
 const TOOL_LEASE_TTL_SECONDS: u64 = 300;
 const TOOL_LEASE_SECRET_BYTES: usize = 32;
 const TOOL_LEASE_SECRET_FILE_NAME: &str = "tool-lease-secret.hex";
+const TOOL_LEASE_SECRET_PUBLICATION_RETRY_ATTEMPTS: usize = 12;
+const TOOL_LEASE_SECRET_PUBLICATION_RETRY_DELAY_MILLIS: u64 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ToolLeaseClaims {
@@ -227,15 +231,7 @@ fn load_or_create_tool_lease_secret(secret_path: &Path) -> Result<String, String
     match create_result {
         Ok(()) => Ok(generated_secret),
         Err(CreateToolLeaseSecretError::AlreadyExists) => {
-            let existing_secret = read_tool_lease_secret_file(secret_path)?;
-            let Some(existing_secret) = existing_secret else {
-                let message = format!(
-                    "tool_lease_authority_unavailable: secret file appeared without readable contents at {}",
-                    secret_path.display()
-                );
-                return Err(message);
-            };
-            Ok(existing_secret)
+            read_tool_lease_secret_after_competitor_publish(secret_path)
         }
         Err(CreateToolLeaseSecretError::Io(error)) => {
             let message = format!(
@@ -245,6 +241,34 @@ fn load_or_create_tool_lease_secret(secret_path: &Path) -> Result<String, String
             Err(message)
         }
     }
+}
+
+fn read_tool_lease_secret_after_competitor_publish(secret_path: &Path) -> Result<String, String> {
+    let retry_attempts = TOOL_LEASE_SECRET_PUBLICATION_RETRY_ATTEMPTS;
+    let retry_delay = Duration::from_millis(TOOL_LEASE_SECRET_PUBLICATION_RETRY_DELAY_MILLIS);
+    let mut attempt_index = 0usize;
+
+    while attempt_index < retry_attempts {
+        let existing_secret = read_tool_lease_secret_file(secret_path)?;
+        if let Some(existing_secret) = existing_secret {
+            return Ok(existing_secret);
+        }
+
+        attempt_index += 1;
+
+        let has_more_attempts = attempt_index < retry_attempts;
+        if !has_more_attempts {
+            break;
+        }
+
+        thread::park_timeout(retry_delay);
+    }
+
+    let message = format!(
+        "tool_lease_authority_unavailable: secret file appeared without readable contents at {}",
+        secret_path.display()
+    );
+    Err(message)
 }
 
 fn ensure_tool_lease_secret_parent_dir(secret_path: &Path) -> Result<(), String> {
@@ -396,7 +420,9 @@ mod tests {
 
     use super::clear_tool_lease_secret_cache_for_tests;
     use super::default_tool_lease_secret_path;
+    use super::generate_tool_lease_secret;
     use super::issue_tool_lease;
+    use super::read_tool_lease_secret_after_competitor_publish;
     use super::read_tool_lease_secret_file;
     use super::validate_tool_lease;
     use crate::test_support::ScopedEnv;
@@ -470,6 +496,35 @@ mod tests {
             read_tool_lease_secret_file(secret_path.as_path()).expect("persisted secret");
 
         assert!(persisted_secret.is_some());
+    }
+
+    #[test]
+    fn read_tool_lease_secret_after_competitor_publish_waits_for_visible_secret() {
+        let (_temp_home, _env) = scoped_tool_lease_home();
+        clear_tool_lease_secret_cache_for_tests();
+
+        let secret_path = default_tool_lease_secret_path();
+        let parent_dir = secret_path.parent().expect("secret parent").to_path_buf();
+        std::fs::create_dir_all(&parent_dir).expect("create secret parent");
+
+        let expected_secret = generate_tool_lease_secret();
+        let publisher_path = secret_path.clone();
+        let publisher_secret = expected_secret.clone();
+
+        let publisher = std::thread::spawn(move || {
+            let publish_delay = std::time::Duration::from_millis(10);
+            std::thread::park_timeout(publish_delay);
+            let secret_body = format!("{publisher_secret}\n");
+            std::fs::write(&publisher_path, secret_body).expect("publish secret file");
+        });
+
+        let observed_secret =
+            read_tool_lease_secret_after_competitor_publish(secret_path.as_path())
+                .expect("wait for visible secret");
+
+        publisher.join().expect("join publisher thread");
+
+        assert_eq!(observed_secret, expected_secret);
     }
 
     #[test]
