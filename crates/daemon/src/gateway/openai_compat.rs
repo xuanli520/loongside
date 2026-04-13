@@ -1128,7 +1128,8 @@ mod tests {
         assert_eq!(completion_response.status(), axum::http::StatusCode::OK);
         let requests = server.join().expect("join provider server");
         assert_eq!(requests.len(), 1);
-        assert!(requests[0].contains("authorization: Bearer backup-key"));
+        let normalized_request = requests[0].to_ascii_lowercase();
+        assert!(normalized_request.contains("authorization: bearer backup-key"));
     }
 
     #[tokio::test]

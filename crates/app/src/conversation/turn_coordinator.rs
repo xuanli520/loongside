@@ -14,12 +14,6 @@ use tokio::sync::Mutex;
 #[cfg(feature = "memory-sqlite")]
 use tokio::time::{Duration, Instant, timeout};
 
-#[path = "turn_coordinator/provider_turn_apply.rs"]
-mod provider_turn_apply;
-#[path = "turn_coordinator/provider_turn_lane.rs"]
-mod provider_turn_lane;
-#[path = "turn_coordinator/provider_turn_runtime.rs"]
-mod provider_turn_runtime;
 #[path = "turn_coordinator/safe_lane_events.rs"]
 mod safe_lane_events;
 #[path = "turn_coordinator/safe_lane_execution.rs"]
@@ -44,9 +38,6 @@ use crate::operator::delegate_runtime::{
 };
 use crate::runtime_self_continuity;
 
-use self::provider_turn_apply::*;
-use self::provider_turn_lane::*;
-use self::provider_turn_runtime::*;
 use self::safe_lane_events::*;
 use self::safe_lane_execution::*;
 pub(crate) use self::safe_lane_routing::SafeLaneFailureRoute;

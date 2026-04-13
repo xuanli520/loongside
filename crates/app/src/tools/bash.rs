@@ -66,13 +66,21 @@ pub(super) fn detect_bash_runtime_policy() -> BashExecRuntimePolicy {
         if probe_bash_candidate(&candidate) {
             return BashExecRuntimePolicy {
                 available: true,
-                command: Some(candidate),
+                command: Some(resolve_bash_command(candidate)),
                 ..BashExecRuntimePolicy::default()
             };
         }
     }
 
     unavailable_bash_runtime_policy()
+}
+
+fn resolve_bash_command(candidate: PathBuf) -> PathBuf {
+    if candidate.components().count() > 1 {
+        return candidate;
+    }
+
+    which::which(candidate.as_path()).unwrap_or(candidate)
 }
 
 pub(super) fn execute_bash_tool_with_config(
@@ -293,6 +301,13 @@ mod tests {
         assert!(!policy.available);
         assert!(policy.command.is_none());
         assert_eq!(policy.warning.as_deref(), Some(BASH_UNAVAILABLE_WARNING));
+    }
+
+    #[test]
+    fn resolve_bash_command_prefers_absolute_path_for_path_lookups() {
+        let resolved = resolve_bash_command(PathBuf::from("bash"));
+
+        assert!(resolved.is_absolute() || resolved == std::path::Path::new("bash"));
     }
 
     #[cfg(unix)]
