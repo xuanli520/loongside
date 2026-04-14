@@ -163,7 +163,10 @@ fn doctor_reports_feishu_grant_freshness_when_valid_grant_exists() {
 fn doctor_warns_when_feishu_grant_lacks_doc_write_scope() {
     let temp_dir = temp_doctor_feishu_dir("doc-write-scope-missing");
     fs::create_dir_all(&temp_dir).expect("create temp dir");
-    let config = sample_feishu_config(&temp_dir);
+    let config = sample_feishu_config_with_capabilities(
+        &temp_dir,
+        mvp::config::FeishuCapabilityConfig::default(),
+    );
     let now_s = loongclaw_daemon::feishu_support::unix_ts_now();
     let store = mvp::channel::feishu::api::FeishuTokenStore::new(temp_dir.join("feishu.sqlite3"));
     let grant = sample_grant("feishu_main", now_s);
@@ -193,7 +196,10 @@ fn doctor_warns_when_feishu_grant_lacks_doc_write_scope() {
 fn doctor_passes_when_feishu_grant_has_doc_write_scope_without_rerun_hint() {
     let temp_dir = temp_doctor_feishu_dir("doc-write-scope-ready");
     fs::create_dir_all(&temp_dir).expect("create temp dir");
-    let config = sample_feishu_config(&temp_dir);
+    let config = sample_feishu_config_with_capabilities(
+        &temp_dir,
+        mvp::config::FeishuCapabilityConfig::default(),
+    );
     let now_s = loongclaw_daemon::feishu_support::unix_ts_now();
     let store = mvp::channel::feishu::api::FeishuTokenStore::new(temp_dir.join("feishu.sqlite3"));
     let mut grant = sample_grant("feishu_main", now_s);
@@ -224,7 +230,10 @@ fn doctor_passes_when_feishu_grant_has_doc_write_scope_without_rerun_hint() {
 fn doctor_warns_when_feishu_grant_lacks_message_write_scope() {
     let temp_dir = temp_doctor_feishu_dir("write-scope-missing");
     fs::create_dir_all(&temp_dir).expect("create temp dir");
-    let config = sample_feishu_config(&temp_dir);
+    let config = sample_feishu_config_with_capabilities(
+        &temp_dir,
+        mvp::config::FeishuCapabilityConfig::default(),
+    );
     let now_s = loongclaw_daemon::feishu_support::unix_ts_now();
     let store = mvp::channel::feishu::api::FeishuTokenStore::new(temp_dir.join("feishu.sqlite3"));
     let mut grant = sample_grant("feishu_main", now_s);
@@ -253,6 +262,62 @@ fn doctor_warns_when_feishu_grant_lacks_message_write_scope() {
             .detail
             .contains("loong feishu auth start --account feishu_main --capability message-write")
     );
+}
+
+#[test]
+fn doctor_skips_write_warnings_when_capabilities_disable_docs_and_messages() {
+    let temp_dir = temp_doctor_feishu_dir("calendar-only-write-status");
+    fs::create_dir_all(&temp_dir).expect("create temp dir");
+    let config = sample_feishu_config_with_capabilities(
+        &temp_dir,
+        mvp::config::FeishuCapabilityConfig {
+            docs: false,
+            messages: false,
+            calendar: true,
+            bitable: false,
+        },
+    );
+    let now_s = loongclaw_daemon::feishu_support::unix_ts_now();
+    let store = mvp::channel::feishu::api::FeishuTokenStore::new(temp_dir.join("feishu.sqlite3"));
+    let mut grant = sample_grant("feishu_main", now_s);
+    grant.scopes = mvp::channel::feishu::api::FeishuGrantScopeSet::from_scopes([
+        "offline_access",
+        "calendar:calendar:readonly",
+    ]);
+    store.save_grant(&grant).expect("seed feishu grant");
+    let mut fixes = Vec::new();
+
+    let checks = loongclaw_daemon::doctor_cli::check_feishu_integration(&config, false, &mut fixes);
+
+    let doc_write_check = checks
+        .iter()
+        .find(|check| check.name.contains("feishu doc write readiness"))
+        .expect("doc write readiness check should exist");
+    assert_eq!(
+        doc_write_check.level,
+        loongclaw_daemon::doctor_cli::DoctorCheckLevel::Pass
+    );
+    assert!(
+        doc_write_check
+            .detail
+            .contains("not required by current config")
+    );
+    assert!(!doc_write_check.detail.contains("rerun `"));
+
+    let write_check = checks
+        .iter()
+        .find(|check| check.name.contains("feishu message write readiness"))
+        .expect("message write readiness check should exist");
+    assert_eq!(
+        write_check.level,
+        loongclaw_daemon::doctor_cli::DoctorCheckLevel::Pass
+    );
+    assert!(
+        write_check
+            .detail
+            .contains("not required by current config")
+    );
+    assert!(!write_check.detail.contains("rerun `"));
 }
 
 #[test]

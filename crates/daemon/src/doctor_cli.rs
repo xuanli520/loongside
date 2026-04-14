@@ -1019,8 +1019,10 @@ pub fn check_feishu_integration(
                 )
             },
         });
-        let doc_write_status =
-            mvp::channel::feishu::api::summarize_doc_write_scope_status(effective_grant);
+        let doc_write_status = crate::feishu_support::summarize_required_doc_write_scope_status(
+            effective_grant,
+            &required_scopes,
+        );
         checks.push(DoctorCheck {
             name: scoped_feishu_check_name(
                 "feishu doc write readiness",
@@ -1035,7 +1037,15 @@ pub fn check_feishu_integration(
                 DoctorCheckLevel::Warn
             },
             detail: if let Some(grant) = effective_grant {
-                if doc_write_status.ready {
+                if doc_write_status.accepted_scopes.is_empty() {
+                    format!(
+                        "configured_account={} account={} open_id={} doc_write_ready={} not required by current config",
+                        resolved.configured_account_id,
+                        resolved.account.id,
+                        grant.principal.open_id,
+                        doc_write_status.ready,
+                    )
+                } else if doc_write_status.ready {
                     format!(
                         "configured_account={} account={} open_id={} doc_write_ready={} matched_scopes={} accepted_scopes={}",
                         resolved.configured_account_id,
@@ -1072,8 +1082,10 @@ pub fn check_feishu_integration(
                 )
             },
         });
-        let write_status =
-            mvp::channel::feishu::api::summarize_message_write_scope_status(effective_grant);
+        let write_status = crate::feishu_support::summarize_required_message_write_scope_status(
+            effective_grant,
+            &required_scopes,
+        );
         checks.push(DoctorCheck {
             name: scoped_feishu_check_name(
                 "feishu message write readiness",
@@ -1088,7 +1100,15 @@ pub fn check_feishu_integration(
                 DoctorCheckLevel::Warn
             },
             detail: if let Some(grant) = effective_grant {
-                if write_status.ready {
+                if write_status.accepted_scopes.is_empty() {
+                    format!(
+                        "configured_account={} account={} open_id={} write_ready={} not required by current config",
+                        resolved.configured_account_id,
+                        resolved.account.id,
+                        grant.principal.open_id,
+                        write_status.ready,
+                    )
+                } else if write_status.ready {
                     format!(
                         "configured_account={} account={} open_id={} write_ready={} matched_scopes={} accepted_scopes={}",
                         resolved.configured_account_id,

@@ -347,8 +347,8 @@ pub fn recommended_auth_start_command_for_grant(
 ) -> Option<String> {
     let status =
         mvp::channel::feishu::api::auth::summarize_grant_status(grant, now_s, required_scopes);
-    let doc_write_status = mvp::channel::feishu::api::summarize_doc_write_scope_status(grant);
-    let write_status = mvp::channel::feishu::api::summarize_message_write_scope_status(grant);
+    let doc_write_status = summarize_required_doc_write_scope_status(grant, required_scopes);
+    let write_status = summarize_required_message_write_scope_status(grant, required_scopes);
     let needs_auth_start = !status.has_grant
         || status.refresh_token_expired
         || !status.missing_scopes.is_empty()
@@ -373,8 +373,8 @@ pub fn build_grant_recommendations(
 ) -> FeishuGrantRecommendations {
     let status =
         mvp::channel::feishu::api::auth::summarize_grant_status(grant, now_s, required_scopes);
-    let doc_write_status = mvp::channel::feishu::api::summarize_doc_write_scope_status(grant);
-    let write_status = mvp::channel::feishu::api::summarize_message_write_scope_status(grant);
+    let doc_write_status = summarize_required_doc_write_scope_status(grant, required_scopes);
+    let write_status = summarize_required_message_write_scope_status(grant, required_scopes);
 
     FeishuGrantRecommendations {
         auth_start_command: recommended_auth_start_command_for_grant(
@@ -390,6 +390,69 @@ pub fn build_grant_recommendations(
         requested_open_id_missing: false,
         refresh_token_expired: status.refresh_token_expired,
     }
+}
+
+pub fn summarize_required_doc_write_scope_status(
+    grant: Option<&mvp::channel::feishu::api::FeishuGrant>,
+    required_scopes: &[String],
+) -> mvp::channel::feishu::api::FeishuGrantAnyScopeStatus {
+    summarize_required_any_scope_status(
+        grant,
+        required_scopes,
+        mvp::channel::feishu::api::FEISHU_DOC_WRITE_ACCEPTED_SCOPES,
+    )
+}
+
+pub fn summarize_required_message_write_scope_status(
+    grant: Option<&mvp::channel::feishu::api::FeishuGrant>,
+    required_scopes: &[String],
+) -> mvp::channel::feishu::api::FeishuGrantAnyScopeStatus {
+    summarize_required_any_scope_status(
+        grant,
+        required_scopes,
+        mvp::channel::feishu::api::FEISHU_MESSAGE_WRITE_ACCEPTED_SCOPES,
+    )
+}
+
+fn summarize_required_any_scope_status(
+    grant: Option<&mvp::channel::feishu::api::FeishuGrant>,
+    required_scopes: &[String],
+    accepted: &[&str],
+) -> mvp::channel::feishu::api::FeishuGrantAnyScopeStatus {
+    if !required_scopes_request_any(required_scopes, accepted) {
+        return mvp::channel::feishu::api::FeishuGrantAnyScopeStatus {
+            ready: true,
+            accepted_scopes: Vec::new(),
+            matched_scopes: Vec::new(),
+        };
+    }
+
+    let accepted_scopes = accepted
+        .iter()
+        .copied()
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let matched_scopes = grant
+        .map(|grant| {
+            accepted_scopes
+                .iter()
+                .filter(|scope| grant.scopes.contains(scope))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    mvp::channel::feishu::api::FeishuGrantAnyScopeStatus {
+        ready: !matched_scopes.is_empty(),
+        accepted_scopes,
+        matched_scopes,
+    }
+}
+
+fn required_scopes_request_any(required_scopes: &[String], accepted: &[&str]) -> bool {
+    accepted
+        .iter()
+        .any(|candidate| required_scopes.iter().any(|scope| scope == candidate))
 }
 
 pub fn build_account_recommendations(
@@ -889,7 +952,12 @@ mod tests {
         let now_s = unix_ts_now();
         let grant = sample_grant("feishu_main", "ou_123", now_s);
 
-        let recommendations = build_grant_recommendations("feishu_main", Some(&grant), now_s, &[]);
+        let recommendations = build_grant_recommendations(
+            "feishu_main",
+            Some(&grant),
+            now_s,
+            &["docx:document".to_owned(), "im:message".to_owned()],
+        );
 
         assert!(recommendations.missing_doc_write_scope);
         assert!(recommendations.missing_message_write_scope);
@@ -913,7 +981,12 @@ mod tests {
             "im:message",
         ]);
 
-        let recommendations = build_grant_recommendations("feishu_main", Some(&grant), now_s, &[]);
+        let recommendations = build_grant_recommendations(
+            "feishu_main",
+            Some(&grant),
+            now_s,
+            &["docx:document".to_owned(), "im:message".to_owned()],
+        );
 
         assert!(recommendations.missing_doc_write_scope);
         assert!(!recommendations.missing_message_write_scope);
@@ -935,7 +1008,12 @@ mod tests {
             "im:message:readonly",
         ]);
 
-        let recommendations = build_grant_recommendations("feishu_main", Some(&grant), now_s, &[]);
+        let recommendations = build_grant_recommendations(
+            "feishu_main",
+            Some(&grant),
+            now_s,
+            &["docx:document".to_owned(), "im:message".to_owned()],
+        );
 
         assert!(!recommendations.missing_doc_write_scope);
         assert!(recommendations.missing_message_write_scope);
@@ -943,6 +1021,45 @@ mod tests {
             recommendations.auth_start_command.as_deref(),
             Some("loong feishu auth start --account feishu_main --capability message-write")
         );
+    }
+
+    #[test]
+    fn build_grant_recommendations_ignores_write_gaps_when_not_required() {
+        let now_s = unix_ts_now();
+        let mut grant = sample_grant("feishu_main", "ou_123", now_s);
+        grant.scopes = mvp::channel::feishu::api::FeishuGrantScopeSet::from_scopes([
+            "offline_access",
+            "calendar:calendar:readonly",
+        ]);
+
+        let recommendations = build_grant_recommendations(
+            "feishu_main",
+            Some(&grant),
+            now_s,
+            &[
+                "offline_access".to_owned(),
+                "calendar:calendar:readonly".to_owned(),
+            ],
+        );
+
+        assert!(!recommendations.missing_doc_write_scope);
+        assert!(!recommendations.missing_message_write_scope);
+        assert_eq!(recommendations.auth_start_command, None);
+    }
+
+    #[test]
+    fn summarize_required_doc_write_scope_status_treats_disabled_scope_as_already_satisfied() {
+        let status = summarize_required_doc_write_scope_status(
+            None,
+            &[
+                "offline_access".to_owned(),
+                "calendar:calendar:readonly".to_owned(),
+            ],
+        );
+
+        assert!(status.ready);
+        assert!(status.accepted_scopes.is_empty());
+        assert!(status.matched_scopes.is_empty());
     }
 
     #[test]
