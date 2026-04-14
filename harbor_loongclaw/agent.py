@@ -10,6 +10,7 @@ from harbor.models.trial.paths import EnvironmentPaths
 from .commands import build_agent_dependency_install_command
 from .commands import build_agent_install_command
 from .commands import build_agent_run_command
+from .commands import sanitize_profile_id
 
 
 class LoongClawInstalledAgent(BaseInstalledAgent):
@@ -74,7 +75,7 @@ class LoongClawInstalledAgent(BaseInstalledAgent):
 
     def _profile_id(self) -> str:
         resolved_provider_kind = self._resolved_provider_kind()
-        profile_id = resolved_provider_kind.replace("-", "_")
+        profile_id = sanitize_profile_id(resolved_provider_kind)
         return profile_id
 
     def _env_output_path(self) -> PurePosixPath:

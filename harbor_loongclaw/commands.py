@@ -13,6 +13,7 @@ PRIMARY_BIN_NAME = "loong"
 LEGACY_BIN_NAME = "loongclaw"
 TASK_CWD_ENV_NAME = "TASK_CWD"
 TASK_CWD_ENV_EXPR = f"${TASK_CWD_ENV_NAME}"
+RUNTIME_CONFIG_HEREDOC_DELIMITER = "LOONGCLAW_HARBOR_CONFIG_EOF"
 
 
 def join_shell_lines(lines: Sequence[str]) -> str:
@@ -23,6 +24,34 @@ def join_shell_lines(lines: Sequence[str]) -> str:
 def build_local_bin_path(bin_name: str) -> str:
     local_bin_path = f"{LOCAL_BIN_DIR}/{bin_name}"
     return local_bin_path
+
+
+def sanitize_profile_id(value: str) -> str:
+    sanitized_characters: list[str] = []
+    last_character_was_underscore = False
+
+    for character in value:
+        if character.isalnum():
+            sanitized_characters.append(character.lower())
+            last_character_was_underscore = False
+            continue
+
+        if character in {"-", "_"} and not last_character_was_underscore:
+            sanitized_characters.append("_")
+            last_character_was_underscore = True
+            continue
+
+        if not last_character_was_underscore:
+            sanitized_characters.append("_")
+            last_character_was_underscore = True
+
+    sanitized_text = "".join(sanitized_characters)
+    stripped_text = sanitized_text.strip("_")
+
+    if stripped_text:
+        return stripped_text
+
+    return "provider"
 
 
 def build_cargo_install_line(quoted_daemon_crate_path: str, bin_name: str) -> str:
@@ -87,8 +116,8 @@ def build_agent_install_command(
         bin_name=LEGACY_BIN_NAME,
     )
     legacy_to_primary_symlink_line = build_symlink_line(
-        source_bin_name=LEGACY_BIN_NAME,
-        target_bin_name=PRIMARY_BIN_NAME,
+        source_bin_name=PRIMARY_BIN_NAME,
+        target_bin_name=LEGACY_BIN_NAME,
     )
 
     lines: list[str] = []
@@ -96,12 +125,18 @@ def build_agent_install_command(
     lines.append("set -euo pipefail")
     lines.append(f'export PATH="{LOCAL_BIN_DIR}:{LOCAL_CARGO_BIN_DIR}:$PATH"')
     lines.append("if ! command -v cargo >/dev/null 2>&1; then")
+    lines.append("  cargo_install_succeeded=false")
     lines.append("  for attempt in 1 2 3; do")
     lines.append("    if curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal; then")
+    lines.append("      cargo_install_succeeded=true")
     lines.append("      break")
     lines.append("    fi")
     lines.append("    sleep $((attempt * 2))")
     lines.append("  done")
+    lines.append("  if [ \"$cargo_install_succeeded\" != \"true\" ]; then")
+    lines.append('    echo "failed to install cargo with rustup" >&2')
+    lines.append("    exit 1")
+    lines.append("  fi")
     lines.append("fi")
     lines.append(f'if [ -f "{LOCAL_CARGO_ENV_PATH}" ]; then')
     lines.append(f'  . "{LOCAL_CARGO_ENV_PATH}"')
@@ -153,10 +188,11 @@ def build_runtime_config_text(
     serialized_api_key_env = json.dumps(api_key_env)
     serialized_shell_default_mode = json.dumps(shell_default_mode)
     serialized_file_root = json.dumps(TASK_CWD_ENV_EXPR)
+    serialized_profile_section_key = json.dumps(profile_id)
 
     lines.append(f"active_provider = {serialized_profile_id}")
     lines.append("")
-    lines.append(f"[providers.{profile_id}]")
+    lines.append(f"[providers.{serialized_profile_section_key}]")
     lines.append(f"kind = {serialized_provider_kind}")
     lines.append(f"model = {serialized_model_id}")
     lines.append(f"reasoning_effort = {serialized_reasoning_effort}")
@@ -216,10 +252,12 @@ def build_agent_run_command(
 
     lines.append("set -euo pipefail")
     lines.append(f'export PATH="{LOCAL_BIN_DIR}:{LOCAL_CARGO_BIN_DIR}:$PATH"')
-    lines.append(f'{TASK_CWD_ENV_NAME}="$(pwd)"')
-    lines.append(f"cat > {quoted_config_path} <<EOF")
+    lines.append(f'export {TASK_CWD_ENV_NAME}="$(pwd)"')
+    lines.append(
+        f"cat > {quoted_config_path} <<'{RUNTIME_CONFIG_HEREDOC_DELIMITER}'"
+    )
     lines.append(runtime_config_text)
-    lines.append("EOF")
+    lines.append(RUNTIME_CONFIG_HEREDOC_DELIMITER)
     lines.append(validate_config_command)
     lines.append(ask_command)
     lines.append(export_trajectory_command)
