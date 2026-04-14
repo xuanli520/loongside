@@ -188,6 +188,8 @@ Telegram setup remains the simplest shipped bot surface:
 - provide one bot token
 - allowlist trusted chat ids
 - optionally allowlist trusted sender ids through `telegram.allowed_sender_ids`
+- optionally require explicit bot mention outside private chats through
+  `telegram.require_mention`
 - run `loong telegram-serve` for reply-loop automation
 - use `loong telegram-send` for direct operator sends
 
@@ -211,6 +213,8 @@ Matrix uses a sync-loop transport with explicit homeserver configuration:
 - configure `access_token` and `base_url`
 - allowlist trusted room ids
 - optionally allowlist trusted sender ids through `matrix.allowed_sender_ids`
+- optionally require explicit mention matching `matrix.user_id` through
+  `matrix.require_mention`
 - set `user_id` when self-message filtering is enabled
 - use `matrix-send` for direct room delivery and `matrix-serve` for the sync
   reply loop

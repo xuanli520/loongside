@@ -30,12 +30,20 @@ pub(super) struct TelegramAdapter {
     timeout_s: u64,
     offset_tracker: TelegramOffsetTracker,
     access_policy: ChannelInboundAccessPolicy<i64>,
+    require_mention: bool,
+    bot_identity: Option<TelegramBotIdentity>,
     http_client: reqwest::Client,
     ack_reactions: bool,
     streaming_mode: TelegramStreamingMode,
     draft_update_interval_ms: u64,
     last_draft_edit: HashMap<String, Instant>,
     pending_reactions: Vec<(i64, i64)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TelegramBotIdentity {
+    user_id: i64,
+    username: Option<String>,
 }
 
 struct TelegramOffsetTracker {
@@ -111,6 +119,8 @@ impl TelegramAdapter {
             timeout_s: config.polling_timeout_s.clamp(1, 50),
             offset_tracker: TelegramOffsetTracker::new(offset_path, next_offset),
             access_policy,
+            require_mention: config.require_mention,
+            bot_identity: None,
             http_client: reqwest::Client::new(),
             ack_reactions: config.ack_reactions,
             streaming_mode: config.streaming_mode,
@@ -127,6 +137,53 @@ impl TelegramAdapter {
             self.token,
             method
         )
+    }
+
+    async fn ensure_bot_identity(&mut self) -> CliResult<()> {
+        if !self.require_mention {
+            return Ok(());
+        }
+        if self.bot_identity.is_some() {
+            return Ok(());
+        }
+
+        let identity = self.fetch_bot_identity().await?;
+        self.bot_identity = Some(identity);
+        Ok(())
+    }
+
+    async fn fetch_bot_identity(&self) -> CliResult<TelegramBotIdentity> {
+        let url = self.api_url("getMe");
+        let payload = self
+            .http_client
+            .get(url)
+            .send()
+            .await
+            .map_err(|error| format!("telegram getMe failed: {error}"))?
+            .json::<Value>()
+            .await
+            .map_err(|error| format!("telegram getMe decode failed: {error}"))?;
+
+        if !payload.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+            return Err(format!("telegram getMe not ok: {payload}"));
+        }
+
+        let result = payload
+            .get("result")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "telegram getMe response missing result object".to_owned())?;
+        let user_id = result
+            .get("id")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| "telegram getMe response missing result.id".to_owned())?;
+        let username = result
+            .get("username")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+
+        Ok(TelegramBotIdentity { user_id, username })
     }
 }
 
@@ -547,6 +604,8 @@ impl ChannelAdapter for TelegramAdapter {
     }
 
     async fn receive_batch(&mut self) -> CliResult<Vec<ChannelInboundMessage>> {
+        self.ensure_bot_identity().await?;
+
         let url = self.api_url("getUpdates");
         let body = json!({
             "offset": self.offset_tracker.current_offset(),
@@ -567,6 +626,8 @@ impl ChannelAdapter for TelegramAdapter {
         let (inbox, next_offset) = parse_telegram_updates(
             &payload,
             &self.access_policy,
+            self.require_mention,
+            self.bot_identity.as_ref(),
             self.offset_tracker.current_offset(),
             self.account_id.as_str(),
         )?;
@@ -777,6 +838,8 @@ fn build_telegram_send_target(
 pub(super) fn parse_telegram_updates(
     payload: &Value,
     access_policy: &ChannelInboundAccessPolicy<i64>,
+    require_mention: bool,
+    bot_identity: Option<&TelegramBotIdentity>,
     current_offset: i64,
     account_id: &str,
 ) -> CliResult<(Vec<ChannelInboundMessage>, Option<i64>)> {
@@ -822,6 +885,11 @@ pub(super) fn parse_telegram_updates(
         let sender_ref = sender_id.as_ref();
         let allowed = access_policy.allows(&chat_id, sender_ref);
         if !allowed {
+            continue;
+        }
+        if require_mention
+            && !telegram_message_satisfies_mention_requirement(message.clone(), bot_identity)
+        {
             continue;
         }
 
@@ -874,6 +942,132 @@ pub(super) fn parse_telegram_updates(
         None
     };
     Ok((inbox, next_offset))
+}
+
+fn telegram_message_satisfies_mention_requirement(
+    message: Value,
+    bot_identity: Option<&TelegramBotIdentity>,
+) -> bool {
+    let Some(bot_identity) = bot_identity else {
+        return false;
+    };
+    if telegram_chat_is_private(&message) {
+        return true;
+    }
+    if telegram_message_replies_to_bot(&message, bot_identity.user_id) {
+        return true;
+    }
+    telegram_message_mentions_bot(&message, bot_identity)
+}
+
+fn telegram_chat_is_private(message: &Value) -> bool {
+    message
+        .get("chat")
+        .and_then(|chat| chat.get("type"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(|chat_type| chat_type == "private")
+}
+
+fn telegram_message_replies_to_bot(message: &Value, bot_user_id: i64) -> bool {
+    message
+        .get("reply_to_message")
+        .and_then(|reply| reply.get("from"))
+        .and_then(|from| from.get("id"))
+        .and_then(Value::as_i64)
+        .is_some_and(|reply_user_id| reply_user_id == bot_user_id)
+}
+
+fn telegram_message_mentions_bot(message: &Value, bot_identity: &TelegramBotIdentity) -> bool {
+    let text = message
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let entities = message
+        .get("entities")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    for entity in entities {
+        let entity_type = entity
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        if entity_type == "text_mention" {
+            let mentioned_user_id = entity
+                .get("user")
+                .and_then(|user| user.get("id"))
+                .and_then(Value::as_i64);
+            if mentioned_user_id
+                .is_some_and(|mentioned_user_id| mentioned_user_id == bot_identity.user_id)
+            {
+                return true;
+            }
+            continue;
+        }
+        if entity_type != "mention" {
+            continue;
+        }
+        let Some(username) = bot_identity.username.as_deref() else {
+            continue;
+        };
+        let Some(offset) = entity.get("offset").and_then(Value::as_u64) else {
+            continue;
+        };
+        let Some(length) = entity.get("length").and_then(Value::as_u64) else {
+            continue;
+        };
+        let mention = telegram_text_slice_by_utf16(text, offset, length);
+        let Some(mention) = mention else {
+            continue;
+        };
+        let normalized_mention = mention.trim().to_ascii_lowercase();
+        let expected_mention = format!("@{}", username.trim()).to_ascii_lowercase();
+        if normalized_mention == expected_mention {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn telegram_text_slice_by_utf16(text: &str, offset: u64, length: u64) -> Option<&str> {
+    let mut utf16_index = 0_u64;
+    let mut start_byte = None;
+    let mut end_byte = None;
+    let target_end = offset.saturating_add(length);
+
+    for (byte_index, ch) in text.char_indices() {
+        if utf16_index == offset {
+            start_byte = Some(byte_index);
+        }
+        if utf16_index == target_end {
+            end_byte = Some(byte_index);
+            break;
+        }
+        let code_unit_len = ch.len_utf16() as u64;
+        utf16_index = utf16_index.saturating_add(code_unit_len);
+        if utf16_index == offset && start_byte.is_none() {
+            start_byte = Some(byte_index + ch.len_utf8());
+        }
+        if utf16_index == target_end {
+            end_byte = Some(byte_index + ch.len_utf8());
+            break;
+        }
+    }
+
+    if start_byte.is_none() && offset == utf16_index {
+        start_byte = Some(text.len());
+    }
+    if end_byte.is_none() && target_end == utf16_index {
+        end_byte = Some(text.len());
+    }
+
+    let start_byte = start_byte?;
+    let end_byte = end_byte?;
+    text.get(start_byte..end_byte)
 }
 
 fn telegram_offset_path_for_account(loongclaw_home: &Path, account_id: &str) -> PathBuf {
@@ -946,7 +1140,7 @@ mod tests {
 
         let access_policy = ChannelInboundAccessPolicy::from_i64_lists(&[123_i64], &[]);
         let (inbox, next_offset) =
-            parse_telegram_updates(&payload, &access_policy, 50, "bot_123456")
+            parse_telegram_updates(&payload, &access_policy, false, None, 50, "bot_123456")
                 .expect("parse telegram updates");
 
         assert_eq!(inbox.len(), 1);
@@ -977,7 +1171,7 @@ mod tests {
 
         let access_policy = ChannelInboundAccessPolicy::from_i64_lists(&[], &[]);
         let (inbox, next_offset) =
-            parse_telegram_updates(&payload, &access_policy, 0, "bot_123456")
+            parse_telegram_updates(&payload, &access_policy, false, None, 0, "bot_123456")
                 .expect("parse telegram updates");
 
         assert!(inbox.is_empty());
@@ -1012,7 +1206,7 @@ mod tests {
 
         let access_policy = ChannelInboundAccessPolicy::from_i64_lists(&[123_i64], &[7_i64]);
         let (inbox, next_offset) =
-            parse_telegram_updates(&payload, &access_policy, 0, "bot_123456")
+            parse_telegram_updates(&payload, &access_policy, false, None, 0, "bot_123456")
                 .expect("parse telegram updates");
 
         assert_eq!(inbox.len(), 1);
@@ -1023,6 +1217,174 @@ mod tests {
             Some("telegram:user:7")
         );
         assert_eq!(next_offset, Some(202));
+    }
+
+    #[test]
+    fn telegram_parser_requires_group_mentions_when_enabled() {
+        let payload = json!({
+            "ok": true,
+            "result": [
+                {
+                    "update_id": 10,
+                    "message": {
+                        "message_id": 77,
+                        "text": "hello team",
+                        "chat": {"id": -1001, "type": "supergroup"},
+                        "from": {"id": 7}
+                    }
+                },
+                {
+                    "update_id": 11,
+                    "message": {
+                        "message_id": 78,
+                        "text": "hello @ops_bot",
+                        "chat": {"id": -1001, "type": "supergroup"},
+                        "from": {"id": 7},
+                        "entities": [
+                            {"type": "mention", "offset": 6, "length": 8}
+                        ]
+                    }
+                }
+            ]
+        });
+        let access_policy = ChannelInboundAccessPolicy::from_i64_lists(&[-1001_i64], &[]);
+        let bot_identity = TelegramBotIdentity {
+            user_id: 42,
+            username: Some("ops_bot".to_owned()),
+        };
+
+        let (inbox, next_offset) = parse_telegram_updates(
+            &payload,
+            &access_policy,
+            true,
+            Some(&bot_identity),
+            0,
+            "bot_123456",
+        )
+        .expect("parse telegram updates");
+
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].text, "hello @ops_bot");
+        assert_eq!(next_offset, Some(12));
+    }
+
+    #[test]
+    fn telegram_parser_allows_private_chats_without_mentions_when_enabled() {
+        let payload = json!({
+            "ok": true,
+            "result": [
+                {
+                    "update_id": 10,
+                    "message": {
+                        "message_id": 77,
+                        "text": "hello directly",
+                        "chat": {"id": 123, "type": "private"},
+                        "from": {"id": 7}
+                    }
+                }
+            ]
+        });
+        let access_policy = ChannelInboundAccessPolicy::from_i64_lists(&[123_i64], &[]);
+        let bot_identity = TelegramBotIdentity {
+            user_id: 42,
+            username: Some("ops_bot".to_owned()),
+        };
+
+        let (inbox, next_offset) = parse_telegram_updates(
+            &payload,
+            &access_policy,
+            true,
+            Some(&bot_identity),
+            0,
+            "bot_123456",
+        )
+        .expect("parse telegram updates");
+
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].text, "hello directly");
+        assert_eq!(next_offset, Some(11));
+    }
+
+    #[test]
+    fn telegram_parser_accepts_reply_to_bot_when_mentions_are_required() {
+        let payload = json!({
+            "ok": true,
+            "result": [
+                {
+                    "update_id": 10,
+                    "message": {
+                        "message_id": 77,
+                        "text": "following up",
+                        "chat": {"id": -1001, "type": "supergroup"},
+                        "from": {"id": 7},
+                        "reply_to_message": {
+                            "from": {"id": 42}
+                        }
+                    }
+                }
+            ]
+        });
+        let access_policy = ChannelInboundAccessPolicy::from_i64_lists(&[-1001_i64], &[]);
+        let bot_identity = TelegramBotIdentity {
+            user_id: 42,
+            username: Some("ops_bot".to_owned()),
+        };
+
+        let (inbox, _next_offset) = parse_telegram_updates(
+            &payload,
+            &access_policy,
+            true,
+            Some(&bot_identity),
+            0,
+            "bot_123456",
+        )
+        .expect("parse telegram updates");
+
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].text, "following up");
+    }
+
+    #[test]
+    fn telegram_parser_accepts_text_mention_for_bot_identity() {
+        let payload = json!({
+            "ok": true,
+            "result": [
+                {
+                    "update_id": 10,
+                    "message": {
+                        "message_id": 77,
+                        "text": "hi bot",
+                        "chat": {"id": -1001, "type": "group"},
+                        "from": {"id": 7},
+                        "entities": [
+                            {
+                                "type": "text_mention",
+                                "offset": 3,
+                                "length": 3,
+                                "user": {"id": 42}
+                            }
+                        ]
+                    }
+                }
+            ]
+        });
+        let access_policy = ChannelInboundAccessPolicy::from_i64_lists(&[-1001_i64], &[]);
+        let bot_identity = TelegramBotIdentity {
+            user_id: 42,
+            username: Some("ops_bot".to_owned()),
+        };
+
+        let (inbox, _next_offset) = parse_telegram_updates(
+            &payload,
+            &access_policy,
+            true,
+            Some(&bot_identity),
+            0,
+            "bot_123456",
+        )
+        .expect("parse telegram updates");
+
+        assert_eq!(inbox.len(), 1);
     }
 
     #[test]
@@ -1250,7 +1612,7 @@ mod tests {
 
         let access_policy = ChannelInboundAccessPolicy::from_i64_lists(&[123_i64], &[]);
         let (inbox, _next_offset) =
-            parse_telegram_updates(&payload, &access_policy, 0, "bot_123456")
+            parse_telegram_updates(&payload, &access_policy, false, None, 0, "bot_123456")
                 .expect("parse telegram updates");
 
         assert_eq!(inbox.len(), 1);

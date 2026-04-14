@@ -191,6 +191,8 @@ pub struct TelegramChannelConfig {
     #[serde(default)]
     pub allowed_sender_ids: Vec<i64>,
     #[serde(default)]
+    pub require_mention: bool,
+    #[serde(default)]
     pub acp: ChannelAcpConfig,
     #[serde(default)]
     pub streaming_mode: TelegramStreamingMode,
@@ -304,6 +306,8 @@ pub struct TelegramAccountConfig {
     #[serde(default)]
     pub allowed_sender_ids: Option<Vec<i64>>,
     #[serde(default)]
+    pub require_mention: Option<bool>,
+    #[serde(default)]
     pub acp: Option<ChannelAcpConfig>,
     #[serde(default)]
     pub streaming_mode: Option<TelegramStreamingMode>,
@@ -323,6 +327,7 @@ pub struct ResolvedTelegramChannelConfig {
     pub polling_timeout_s: u64,
     pub allowed_chat_ids: Vec<i64>,
     pub allowed_sender_ids: Vec<i64>,
+    pub require_mention: bool,
     pub acp: ChannelAcpConfig,
     pub streaming_mode: TelegramStreamingMode,
     pub ack_reactions: bool,
@@ -475,6 +480,8 @@ pub struct MatrixAccountConfig {
     #[serde(default)]
     pub allowed_sender_ids: Option<Vec<String>>,
     #[serde(default)]
+    pub require_mention: Option<bool>,
+    #[serde(default)]
     pub ignore_self_messages: Option<bool>,
     #[serde(default)]
     pub acp: Option<ChannelAcpConfig>,
@@ -493,6 +500,7 @@ pub struct ResolvedMatrixChannelConfig {
     pub sync_timeout_s: u64,
     pub allowed_room_ids: Vec<String>,
     pub allowed_sender_ids: Vec<String>,
+    pub require_mention: bool,
     pub ignore_self_messages: bool,
     pub acp: ChannelAcpConfig,
 }
@@ -648,6 +656,8 @@ pub struct MatrixChannelConfig {
     pub allowed_room_ids: Vec<String>,
     #[serde(default)]
     pub allowed_sender_ids: Vec<String>,
+    #[serde(default)]
+    pub require_mention: bool,
     #[serde(default = "default_true")]
     pub ignore_self_messages: bool,
     #[serde(default)]
@@ -1982,6 +1992,7 @@ impl Default for TelegramChannelConfig {
             polling_timeout_s: default_telegram_timeout_seconds(),
             allowed_chat_ids: Vec::new(),
             allowed_sender_ids: Vec::new(),
+            require_mention: false,
             acp: ChannelAcpConfig::default(),
             streaming_mode: TelegramStreamingMode::default(),
             ack_reactions: true,
@@ -2104,6 +2115,9 @@ impl TelegramChannelConfig {
             allowed_sender_ids: account_override
                 .and_then(|account| account.allowed_sender_ids.clone())
                 .unwrap_or_else(|| self.allowed_sender_ids.clone()),
+            require_mention: account_override
+                .and_then(|account| account.require_mention)
+                .unwrap_or(self.require_mention),
             acp: resolve_channel_acp_config(
                 &self.acp,
                 account_override.and_then(|account| account.acp.as_ref()),
@@ -2129,6 +2143,7 @@ impl TelegramChannelConfig {
             polling_timeout_s: merged.polling_timeout_s,
             allowed_chat_ids: merged.allowed_chat_ids,
             allowed_sender_ids: merged.allowed_sender_ids,
+            require_mention: merged.require_mention,
             acp: merged.acp,
             streaming_mode: merged.streaming_mode,
             ack_reactions: merged.ack_reactions,
@@ -2228,6 +2243,7 @@ impl Default for MatrixChannelConfig {
             sync_timeout_s: default_matrix_sync_timeout_seconds(),
             allowed_room_ids: Vec::new(),
             allowed_sender_ids: Vec::new(),
+            require_mention: false,
             ignore_self_messages: true,
             acp: ChannelAcpConfig::default(),
             accounts: BTreeMap::new(),
@@ -3004,6 +3020,9 @@ impl MatrixChannelConfig {
             allowed_sender_ids: account_override
                 .and_then(|account| account.allowed_sender_ids.clone())
                 .unwrap_or_else(|| self.allowed_sender_ids.clone()),
+            require_mention: account_override
+                .and_then(|account| account.require_mention)
+                .unwrap_or(self.require_mention),
             ignore_self_messages: account_override
                 .and_then(|account| account.ignore_self_messages)
                 .unwrap_or(self.ignore_self_messages),
@@ -3027,6 +3046,7 @@ impl MatrixChannelConfig {
             sync_timeout_s: merged.sync_timeout_s,
             allowed_room_ids: merged.allowed_room_ids,
             allowed_sender_ids: merged.allowed_sender_ids,
+            require_mention: merged.require_mention,
             ignore_self_messages: merged.ignore_self_messages,
             acp: merged.acp,
         })
@@ -7022,6 +7042,7 @@ mod tests {
             "polling_timeout_s": 25,
             "allowed_chat_ids": [1001],
             "allowed_sender_ids": [7],
+            "require_mention": true,
             "acp": {
                 "bootstrap_mcp_servers": ["filesystem"],
                 "working_directory": " /workspace/base "
@@ -7033,6 +7054,7 @@ mod tests {
                     "bot_token_env": "WORK_TELEGRAM_TOKEN",
                     "allowed_chat_ids": [2002],
                     "allowed_sender_ids": [8],
+                    "require_mention": false,
                     "acp": {
                         "bootstrap_mcp_servers": ["search"],
                         "working_directory": "/workspace/work-bot"
@@ -7064,6 +7086,7 @@ mod tests {
         );
         assert_eq!(resolved.allowed_chat_ids, vec![2002]);
         assert_eq!(resolved.allowed_sender_ids, vec![8]);
+        assert!(!resolved.require_mention);
         assert_eq!(
             resolved.acp.bootstrap_mcp_servers,
             vec!["search".to_owned()]
@@ -7081,6 +7104,7 @@ mod tests {
         assert!(!disabled.enabled);
         assert_eq!(disabled.allowed_chat_ids, vec![1001]);
         assert_eq!(disabled.allowed_sender_ids, vec![7]);
+        assert!(disabled.require_mention);
         assert_eq!(
             disabled.acp.bootstrap_mcp_servers,
             vec!["filesystem".to_owned()]
@@ -7368,12 +7392,14 @@ mod tests {
             "base_url": "https://matrix.example.org",
             "allowed_room_ids": ["!ops:example.org"],
             "allowed_sender_ids": ["@alice:example.org"],
+            "require_mention": true,
             "accounts": {
                 "Ops": {
                     "account_id": "Ops-Bot",
                     "access_token": "ops-token",
                     "allowed_room_ids": ["!ops-room:example.org"],
-                    "allowed_sender_ids": ["@ops-user:example.org"]
+                    "allowed_sender_ids": ["@ops-user:example.org"],
+                    "require_mention": false
                 },
                 "Backup": {
                     "enabled": false,
@@ -7395,6 +7421,7 @@ mod tests {
             resolved.allowed_sender_ids,
             vec!["@ops-user:example.org".to_owned()]
         );
+        assert!(!resolved.require_mention);
 
         let backup = config
             .resolve_account(Some("Backup"))
@@ -7404,6 +7431,7 @@ mod tests {
             backup.allowed_sender_ids,
             vec!["@alice:example.org".to_owned()]
         );
+        assert!(backup.require_mention);
     }
 
     #[test]

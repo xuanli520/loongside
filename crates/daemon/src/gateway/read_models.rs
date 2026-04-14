@@ -274,6 +274,7 @@ pub struct GatewayOperatorChannelSurfaceReadModel {
     pub ready_serve_account_count: usize,
     pub conversation_gated_account_count: usize,
     pub sender_gated_account_count: usize,
+    pub mention_gated_account_count: usize,
     pub default_configured_account_id: Option<String>,
     pub plugin_bridge_account_summary: Option<String>,
     pub service_enabled: bool,
@@ -902,6 +903,11 @@ fn build_operator_channel_surface_read_model(
             policy.summary.sender_mode != mvp::channel::ChannelAccessRestrictionMode::Open
         })
         .count();
+    let mention_gated_account_count = channel_access_policies
+        .iter()
+        .filter(|policy| policy.channel_id == surface.catalog.id)
+        .filter(|policy| policy.summary.mention_required)
+        .count();
     let default_configured_account_id = surface.default_configured_account_id.clone();
     let plugin_bridge_account_summary = channel_surface.plugin_bridge_account_summary.clone();
     let service_enabled = enabled_service_channel_ids.contains(&channel_id);
@@ -918,6 +924,7 @@ fn build_operator_channel_surface_read_model(
         ready_serve_account_count,
         conversation_gated_account_count,
         sender_gated_account_count,
+        mention_gated_account_count,
         default_configured_account_id,
         plugin_bridge_account_summary,
         service_enabled,

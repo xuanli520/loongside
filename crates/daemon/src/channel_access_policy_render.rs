@@ -28,11 +28,12 @@ pub(crate) fn render_channel_access_policy_line(
     let sender_mode = render_channel_access_restriction_mode(access_policy.summary.sender_mode);
 
     format!(
-        "    policy conversation_key={} conversation_mode={} sender_key={} sender_mode={} conversations={} senders={}",
+        "    policy conversation_key={} conversation_mode={} sender_key={} sender_mode={} mention_required={} conversations={} senders={}",
         access_policy.conversation_config_key,
         conversation_mode,
         access_policy.sender_config_key,
         sender_mode,
+        access_policy.summary.mention_required,
         conversations,
         senders,
     )

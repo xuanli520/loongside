@@ -321,6 +321,17 @@ const TELEGRAM_ALLOWED_SENDER_IDS_REQUIREMENT: ChannelCatalogOperationRequiremen
         env_pointer_paths: &[],
         default_env_var: None,
     };
+const TELEGRAM_REQUIRE_MENTION_REQUIREMENT: ChannelCatalogOperationRequirement =
+    ChannelCatalogOperationRequirement {
+        id: "require_mention",
+        label: "require explicit bot mention outside private chats",
+        config_paths: &[
+            "telegram.require_mention",
+            "telegram.accounts.<account>.require_mention",
+        ],
+        env_pointer_paths: &[],
+        default_env_var: None,
+    };
 const TELEGRAM_SEND_REQUIREMENTS: &[ChannelCatalogOperationRequirement] =
     &[TELEGRAM_ENABLED_REQUIREMENT, TELEGRAM_BOT_TOKEN_REQUIREMENT];
 const TELEGRAM_SERVE_REQUIREMENTS: &[ChannelCatalogOperationRequirement] = &[
@@ -328,6 +339,7 @@ const TELEGRAM_SERVE_REQUIREMENTS: &[ChannelCatalogOperationRequirement] = &[
     TELEGRAM_BOT_TOKEN_REQUIREMENT,
     TELEGRAM_ALLOWED_CHAT_IDS_REQUIREMENT,
     TELEGRAM_ALLOWED_SENDER_IDS_REQUIREMENT,
+    TELEGRAM_REQUIRE_MENTION_REQUIREMENT,
 ];
 
 const TELEGRAM_SERVE_DOCTOR_CHECKS: &[ChannelDoctorCheckSpec] = &[
@@ -359,7 +371,7 @@ const TELEGRAM_CAPABILITIES: &[ChannelCapability] = &[
 ];
 const TELEGRAM_ONBOARDING_DESCRIPTOR: ChannelOnboardingDescriptor = ChannelOnboardingDescriptor {
     strategy: ChannelOnboardingStrategy::ManualConfig,
-    setup_hint: "configure telegram bot credentials and allowed chat ids in loongclaw.toml under telegram or telegram.accounts.<account>",
+    setup_hint: "configure telegram bot credentials, allowed chat ids, and optional mention gating in loongclaw.toml under telegram or telegram.accounts.<account>",
     status_command: "loong doctor",
     repair_command: Some("loong doctor --fix"),
 };
@@ -666,6 +678,17 @@ const MATRIX_ALLOWED_SENDER_IDS_REQUIREMENT: ChannelCatalogOperationRequirement 
         env_pointer_paths: &[],
         default_env_var: None,
     };
+const MATRIX_REQUIRE_MENTION_REQUIREMENT: ChannelCatalogOperationRequirement =
+    ChannelCatalogOperationRequirement {
+        id: "require_mention",
+        label: "require explicit mention in synced rooms",
+        config_paths: &[
+            "matrix.require_mention",
+            "matrix.accounts.<account>.require_mention",
+        ],
+        env_pointer_paths: &[],
+        default_env_var: None,
+    };
 const MATRIX_USER_ID_REQUIREMENT: ChannelCatalogOperationRequirement =
     ChannelCatalogOperationRequirement {
         id: "user_id",
@@ -685,6 +708,7 @@ const MATRIX_SERVE_REQUIREMENTS: &[ChannelCatalogOperationRequirement] = &[
     MATRIX_BASE_URL_REQUIREMENT,
     MATRIX_ALLOWED_ROOM_IDS_REQUIREMENT,
     MATRIX_ALLOWED_SENDER_IDS_REQUIREMENT,
+    MATRIX_REQUIRE_MENTION_REQUIREMENT,
     MATRIX_USER_ID_REQUIREMENT,
 ];
 
@@ -721,7 +745,7 @@ const MATRIX_CAPABILITIES: &[ChannelCapability] = &[
 ];
 const MATRIX_ONBOARDING_DESCRIPTOR: ChannelOnboardingDescriptor = ChannelOnboardingDescriptor {
     strategy: ChannelOnboardingStrategy::ManualConfig,
-    setup_hint: "configure matrix access tokens, homeserver base url, and allowed room ids in loongclaw.toml under matrix or matrix.accounts.<account>",
+    setup_hint: "configure matrix access tokens, homeserver base url, allowed room ids, and optional mention gating in loongclaw.toml under matrix or matrix.accounts.<account>",
     status_command: "loong doctor",
     repair_command: Some("loong doctor --fix"),
 };
@@ -2571,7 +2595,8 @@ fn extend_telegram_channel_access_policies(
             resolved.allowed_chat_ids.as_slice(),
             resolved.allowed_sender_ids.as_slice(),
         );
-        let summary = access_policy.summary();
+        let mut summary = access_policy.summary();
+        summary.mention_required = resolved.require_mention;
         policies.push(ChannelConfiguredAccountAccessPolicy {
             channel_id: "telegram",
             configured_account_id: resolved.configured_account_id,
@@ -2625,7 +2650,8 @@ fn extend_matrix_channel_access_policies(
             resolved.allowed_sender_ids.as_slice(),
             false,
         );
-        let summary = access_policy.summary();
+        let mut summary = access_policy.summary();
+        summary.mention_required = resolved.require_mention;
         policies.push(ChannelConfiguredAccountAccessPolicy {
             channel_id: "matrix",
             configured_account_id: resolved.configured_account_id,
@@ -2850,6 +2876,7 @@ fn build_telegram_snapshot_for_account(
             .join(",");
         notes.push(format!("allowed_sender_ids={allowed_sender_ids}"));
     }
+    notes.push(format!("require_mention={}", resolved.require_mention));
     if !resolved.acp.bootstrap_mcp_servers.is_empty() {
         notes.push(format!(
             "acp_bootstrap_mcp_servers={}",
@@ -5244,6 +5271,9 @@ fn build_matrix_snapshot_for_account(
     if resolved.ignore_self_messages && !has_user_id {
         serve_issues.push("user_id is missing while ignore_self_messages is enabled".to_owned());
     }
+    if resolved.require_mention && !has_user_id {
+        serve_issues.push("user_id is missing while require_mention is enabled".to_owned());
+    }
 
     let send_operation = if !compiled {
         unsupported_operation(
@@ -5312,6 +5342,7 @@ fn build_matrix_snapshot_for_account(
             allowed_sender_ids.join(",")
         ));
     }
+    notes.push(format!("require_mention={}", resolved.require_mention));
     if let Some(user_id) = resolved.user_id.as_deref() {
         notes.push(format!("user_id={user_id}"));
     }
@@ -7287,6 +7318,10 @@ mod tests {
             .iter()
             .find(|entry| entry.id == "imessage")
             .expect("imessage catalog entry");
+        let matrix = catalog
+            .iter()
+            .find(|entry| entry.id == "matrix")
+            .expect("matrix catalog entry");
 
         assert_eq!(
             telegram.operations[0]
@@ -7306,7 +7341,8 @@ mod tests {
                 "enabled",
                 "bot_token",
                 "allowed_chat_ids",
-                "allowed_sender_ids"
+                "allowed_sender_ids",
+                "require_mention"
             ]
         );
         assert_eq!(
@@ -7353,6 +7389,22 @@ mod tests {
         assert_eq!(
             feishu.operations[1].requirements[7].default_env_var,
             Some("FEISHU_ENCRYPT_KEY")
+        );
+        assert_eq!(
+            matrix.operations[1]
+                .requirements
+                .iter()
+                .map(|requirement| requirement.id)
+                .collect::<Vec<_>>(),
+            vec![
+                "enabled",
+                "access_token",
+                "base_url",
+                "allowed_room_ids",
+                "allowed_sender_ids",
+                "require_mention",
+                "user_id",
+            ]
         );
 
         assert_eq!(

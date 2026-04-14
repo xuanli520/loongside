@@ -18,6 +18,7 @@ pub struct ChannelInboundAccessPolicySummary {
     pub sender_mode: ChannelAccessRestrictionMode,
     pub allowed_conversations: Vec<String>,
     pub allowed_senders: Vec<String>,
+    pub mention_required: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +155,7 @@ impl ChannelInboundAccessPolicy<i64> {
             sender_mode: numeric_matcher_mode(&self.allowed_senders),
             allowed_conversations,
             allowed_senders,
+            mention_required: false,
         }
     }
 }
@@ -237,6 +239,7 @@ impl ChannelInboundAccessPolicy<String> {
             sender_mode: string_matcher_mode(&self.allowed_senders),
             allowed_conversations,
             allowed_senders,
+            mention_required: false,
         }
     }
 
@@ -393,6 +396,7 @@ mod tests {
                 sender_mode: ChannelAccessRestrictionMode::Open,
                 allowed_conversations: vec!["1001".to_owned()],
                 allowed_senders: Vec::new(),
+                mention_required: false,
             }
         );
     }
@@ -412,6 +416,7 @@ mod tests {
                 sender_mode: ChannelAccessRestrictionMode::ExactAllowlist,
                 allowed_conversations: vec!["*".to_owned()],
                 allowed_senders: vec!["ou_admin".to_owned()],
+                mention_required: false,
             }
         );
     }

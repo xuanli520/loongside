@@ -3541,6 +3541,12 @@ pub(super) fn validate_matrix_security_config(
                 .to_owned(),
         );
     }
+    if config.require_mention && !has_user_id {
+        return Err(
+            "matrix.user_id is missing; configure user_id when require_mention is enabled"
+                .to_owned(),
+        );
+    }
 
     Ok(())
 }

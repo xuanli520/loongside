@@ -993,6 +993,7 @@ fn render_channel_surfaces_text_reports_aliases_and_operation_health() {
         .expect("feishu section should render");
     assert!(feishu_section.contains("policy conversation_key=allowed_chat_ids"));
     assert!(feishu_section.contains("sender_key=allowed_sender_ids"));
+    assert!(feishu_section.contains("mention_required=false"));
     assert!(feishu_section.contains("senders=-"));
     assert!(rendered.contains(&format!(
         "op send ({}) ready: ready target_kinds=receive_id,message_reply requirements=enabled,app_id,app_secret",
@@ -1005,7 +1006,7 @@ fn render_channel_surfaces_text_reports_aliases_and_operation_health() {
     assert!(rendered.contains("WeCom [wecom]"));
     assert!(rendered.contains("account=wecom:bot_test"));
     assert!(rendered.contains(
-        "policy conversation_key=allowed_conversation_ids conversation_mode=exact_allowlist sender_key=allowed_sender_ids sender_mode=open conversations=group_demo senders=-"
+        "policy conversation_key=allowed_conversation_ids conversation_mode=exact_allowlist sender_key=allowed_sender_ids sender_mode=open mention_required=false conversations=group_demo senders=-"
     ));
     assert!(rendered.contains(&format!(
         "op send ({}) ready: ready target_kinds=conversation requirements=enabled,bot_id,secret,websocket_url",
