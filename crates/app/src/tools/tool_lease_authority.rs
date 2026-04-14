@@ -404,7 +404,7 @@ fn now_unix_seconds() -> u64 {
 }
 
 #[cfg(test)]
-pub(super) fn clear_tool_lease_secret_cache_for_tests() {
+pub(crate) fn clear_tool_lease_secret_cache_for_tests() {
     let cache = tool_lease_secret_cache();
     let guard = cache.lock();
     let mut guard = match guard {
@@ -416,8 +416,6 @@ pub(super) fn clear_tool_lease_secret_cache_for_tests() {
 
 #[cfg(test)]
 mod tests {
-    use tempfile::TempDir;
-
     use super::clear_tool_lease_secret_cache_for_tests;
     use super::default_tool_lease_secret_path;
     use super::generate_tool_lease_secret;
@@ -425,19 +423,15 @@ mod tests {
     use super::read_tool_lease_secret_after_competitor_publish;
     use super::read_tool_lease_secret_file;
     use super::validate_tool_lease;
-    use crate::test_support::ScopedEnv;
+    use crate::test_support::ScopedLoongClawHome;
 
-    fn scoped_tool_lease_home() -> (TempDir, ScopedEnv) {
-        let temp_home = TempDir::new().expect("temp home");
-        let mut env = ScopedEnv::new();
-        env.set("LOONG_HOME", temp_home.path());
-        clear_tool_lease_secret_cache_for_tests();
-        (temp_home, env)
+    fn scoped_tool_lease_home(prefix: &str) -> ScopedLoongClawHome {
+        ScopedLoongClawHome::new(prefix)
     }
 
     #[test]
     fn issue_tool_lease_persists_secret_under_loong_home() {
-        let (_temp_home, _env) = scoped_tool_lease_home();
+        let _home = scoped_tool_lease_home("loongclaw-tool-lease-home");
         let payload = serde_json::Map::new();
 
         let lease = issue_tool_lease("file.read", &payload).expect("lease");
@@ -452,7 +446,7 @@ mod tests {
 
     #[test]
     fn issued_tool_lease_survives_authority_cache_reset() {
-        let (_temp_home, _env) = scoped_tool_lease_home();
+        let _home = scoped_tool_lease_home("loongclaw-tool-lease-cache-home");
         let payload = serde_json::Map::new();
 
         let lease = issue_tool_lease("file.read", &payload).expect("lease");
@@ -469,16 +463,18 @@ mod tests {
         use std::sync::Arc;
         use std::sync::Barrier;
 
-        let (_temp_home, _env) = scoped_tool_lease_home();
-        clear_tool_lease_secret_cache_for_tests();
-
+        let home = scoped_tool_lease_home("loongclaw-tool-lease-parallel-home");
+        let home_path = home.path().to_path_buf();
         let thread_count = 8;
         let barrier = Arc::new(Barrier::new(thread_count));
         let mut handles = Vec::new();
 
         for _ in 0..thread_count {
             let barrier = Arc::clone(&barrier);
+            let home_path = home_path.clone();
             let handle = std::thread::spawn(move || {
+                let _thread_home =
+                    crate::test_support::ScopedLoongClawHome::from_existing(home_path);
                 let payload = serde_json::Map::new();
                 barrier.wait();
                 issue_tool_lease("file.read", &payload)
@@ -496,13 +492,13 @@ mod tests {
             read_tool_lease_secret_file(secret_path.as_path()).expect("persisted secret");
 
         assert!(persisted_secret.is_some());
+
+        drop(home);
     }
 
     #[test]
     fn read_tool_lease_secret_after_competitor_publish_waits_for_visible_secret() {
-        let (_temp_home, _env) = scoped_tool_lease_home();
-        clear_tool_lease_secret_cache_for_tests();
-
+        let _home = scoped_tool_lease_home("loongclaw-tool-lease-visibility-home");
         let secret_path = default_tool_lease_secret_path();
         let parent_dir = secret_path.parent().expect("secret parent").to_path_buf();
         std::fs::create_dir_all(&parent_dir).expect("create secret parent");
@@ -529,17 +525,13 @@ mod tests {
 
     #[test]
     fn issued_tool_lease_is_home_scoped() {
-        let home_a = TempDir::new().expect("temp home");
-        let mut env = ScopedEnv::new();
-        env.set("LOONG_HOME", home_a.path());
-        clear_tool_lease_secret_cache_for_tests();
+        let home_a = scoped_tool_lease_home("loongclaw-tool-lease-home-a");
         let payload = serde_json::Map::new();
         let lease = issue_tool_lease("file.read", &payload).expect("lease");
 
-        let temp_home_b = TempDir::new().expect("temp home");
-        env.set("LOONG_HOME", temp_home_b.path());
-        clear_tool_lease_secret_cache_for_tests();
+        drop(home_a);
 
+        let _home_b = scoped_tool_lease_home("loongclaw-tool-lease-home-b");
         let validation_result = validate_tool_lease("file.read", &lease, &payload);
         let error = validation_result.expect_err("different home should reject lease");
 
