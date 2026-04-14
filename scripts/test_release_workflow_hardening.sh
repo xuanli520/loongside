@@ -84,7 +84,7 @@ assert_single_cli_bin_surface() {
 
 assert_release_docs_gates() {
   assert_contains ".github/workflows/release.yml" "scripts/bootstrap_release_local_artifacts.sh"
-  assert_contains ".github/workflows/release.yml" "LOONGCLAW_RELEASE_DOCS_STRICT=1 scripts/check-docs.sh"
+  assert_contains ".github/workflows/release.yml" "LOONG_RELEASE_DOCS_STRICT=1 scripts/check-docs.sh"
   assert_contains ".github/workflows/release.yml" 'release_doc="docs/releases/${RELEASE_TAG}.md"'
   assert_contains ".github/workflows/release.yml" 'grep -Fx "# Release ${RELEASE_TAG}" "$release_doc"'
   assert_contains ".github/workflows/release.yml" 'grep -F "## [${RELEASE_TAG#v}]" CHANGELOG.md > /dev/null'
