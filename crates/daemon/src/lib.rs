@@ -213,6 +213,48 @@ pub fn active_cli_command_name() -> &'static str {
     mvp::config::active_cli_command_name()
 }
 
+pub(crate) fn render_operator_shell_surface(
+    title: &str,
+    subtitle: &str,
+    intro_lines: Vec<String>,
+    body_lines: Vec<String>,
+    footer_lines: Vec<String>,
+) -> String {
+    let width = mvp::presentation::detect_render_width();
+    let mut sections = Vec::new();
+    if !body_lines.is_empty() {
+        sections.push(mvp::tui_surface::TuiSectionSpec::Narrative {
+            title: None,
+            lines: body_lines,
+        });
+    }
+    let screen = mvp::tui_surface::TuiScreenSpec {
+        header_style: mvp::tui_surface::TuiHeaderStyle::Compact,
+        subtitle: Some(subtitle.to_owned()),
+        title: Some(title.to_owned()),
+        progress_line: None,
+        intro_lines,
+        sections,
+        choices: Vec::new(),
+        footer_lines,
+    };
+    mvp::tui_surface::render_tui_screen_spec_ratatui(&screen, width, false).join("\n")
+}
+
+pub(crate) fn render_operator_shell_surface_from_body(
+    title: &str,
+    subtitle: &str,
+    body: String,
+) -> String {
+    render_operator_shell_surface(
+        title,
+        subtitle,
+        Vec::new(),
+        body.lines().map(str::to_owned).collect(),
+        Vec::new(),
+    )
+}
+
 fn render_welcome_long_about(command_name: &str) -> String {
     format!(
         "Show the configured welcome banner and quick commands.\n\nquick commands:\n- {command_name} ask --config <path> --message \"...\"\n- {command_name} chat --config <path>\n- {command_name} personalize --config <path>\n- {command_name} doctor --config <path>\n- {command_name} --help\n\nReplace <path> with your current config path, or set LOONGCLAW_CONFIG_PATH first."
@@ -1634,24 +1676,81 @@ fn resolve_welcome_config_path() -> CliResult<PathBuf> {
 fn render_welcome_banner(config_path: &Path, config: &mvp::config::LoongClawConfig) -> String {
     let config_path_display = config_path.display().to_string();
     let next_actions = next_actions::collect_setup_next_actions(config, &config_path_display);
-    let mut quick_command_lines = Vec::new();
+    let primary_action = next_actions.first().cloned();
+    let secondary_actions = next_actions.iter().skip(1).cloned().collect::<Vec<_>>();
+    let render_width = mvp::presentation::detect_render_width();
+    let mut sections = Vec::new();
 
-    for action in next_actions {
-        let action_label = action.label;
-        let action_command = action.command;
-        let quick_command_line = format!("- {action_label}: {action_command}");
-        quick_command_lines.push(quick_command_line);
+    if let Some(primary_action) = primary_action {
+        sections.push(mvp::tui_surface::TuiSectionSpec::ActionGroup {
+            title: Some("start here".to_owned()),
+            inline_title_when_wide: false,
+            items: vec![mvp::tui_surface::TuiActionSpec {
+                label: primary_action.label,
+                command: primary_action.command,
+            }],
+        });
     }
 
-    quick_command_lines.push(format!("- Help: {} --help", CLI_COMMAND_NAME));
-    let quick_commands = quick_command_lines.join("\n");
+    if !secondary_actions.is_empty() {
+        sections.push(mvp::tui_surface::TuiSectionSpec::ActionGroup {
+            title: Some("also available".to_owned()),
+            inline_title_when_wide: false,
+            items: secondary_actions
+                .into_iter()
+                .map(|action| mvp::tui_surface::TuiActionSpec {
+                    label: action.label,
+                    command: action.command,
+                })
+                .collect(),
+        });
+    }
 
-    format!(
-        "LoongClaw is configured and ready.\nVersion: {}\nConfig: {}\n\nQuick commands:\n{}",
-        env!("CARGO_PKG_VERSION"),
-        config_path_display,
-        quick_commands,
-    )
+    sections.push(mvp::tui_surface::TuiSectionSpec::KeyValues {
+        title: Some("saved setup".to_owned()),
+        items: vec![
+            mvp::tui_surface::TuiKeyValueSpec::Plain {
+                key: "config".to_owned(),
+                value: config_path_display,
+            },
+            mvp::tui_surface::TuiKeyValueSpec::Plain {
+                key: "provider".to_owned(),
+                value: crate::provider_presentation::active_provider_detail_label(config),
+            },
+            mvp::tui_surface::TuiKeyValueSpec::Plain {
+                key: "model".to_owned(),
+                value: config.provider.model.clone(),
+            },
+            mvp::tui_surface::TuiKeyValueSpec::Plain {
+                key: "memory profile".to_owned(),
+                value: config.memory.profile.as_str().to_owned(),
+            },
+        ],
+    });
+    sections.push(mvp::tui_surface::TuiSectionSpec::Callout {
+        tone: mvp::tui_surface::TuiCalloutTone::Info,
+        title: Some("operator flow".to_owned()),
+        lines: vec![
+            "Start with a first answer, then continue in chat for follow-up work.".to_owned(),
+            "Use doctor when setup or runtime health feels off instead of debugging the config by hand.".to_owned(),
+        ],
+    });
+
+    let screen = mvp::tui_surface::TuiScreenSpec {
+        header_style: mvp::tui_surface::TuiHeaderStyle::Compact,
+        subtitle: Some("configured install".to_owned()),
+        title: Some("welcome back".to_owned()),
+        progress_line: None,
+        intro_lines: vec!["LoongClaw is configured and ready.".to_owned()],
+        sections,
+        choices: Vec::new(),
+        footer_lines: vec![format!(
+            "Use {} --help to browse the full operator surface.",
+            CLI_COMMAND_NAME
+        )],
+    };
+
+    mvp::tui_surface::render_tui_screen_spec_ratatui(&screen, render_width, false).join("\n")
 }
 
 pub fn run_welcome_cli() -> CliResult<()> {
@@ -1820,6 +1919,14 @@ mod first_run_entry_tests {
             "welcome banner should include the current version: {rendered}"
         );
         assert!(
+            rendered.contains("welcome back"),
+            "welcome banner should promote a dedicated welcome title: {rendered}"
+        );
+        assert!(
+            rendered.contains("start here"),
+            "welcome banner should lead with a start-here handoff: {rendered}"
+        );
+        assert!(
             rendered.contains("loong ask --config '/tmp/loongclaw'\"'\"'s config.toml'"),
             "welcome banner should include a quoted ask command: {rendered}"
         );
@@ -1828,7 +1935,7 @@ mod first_run_entry_tests {
             "welcome banner should include a quoted chat command: {rendered}"
         );
         assert!(
-            rendered.contains("loong personalize --config '/tmp/loongclaw'\"'\"'s config.toml'"),
+            rendered.contains("loong personalize"),
             "welcome banner should include a quoted personalize command: {rendered}"
         );
         assert!(
@@ -1842,6 +1949,10 @@ mod first_run_entry_tests {
         assert!(
             rendered.contains("- working preferences:"),
             "welcome banner should preserve the shared next-action label for personalize: {rendered}"
+        );
+        assert!(
+            rendered.contains("saved setup"),
+            "welcome banner should summarize the saved runtime state after the handoff block: {rendered}"
         );
     }
 }
@@ -3982,7 +4093,7 @@ pub fn run_channels_cli(config_path: Option<&str>, as_json: bool) -> CliResult<(
 
     println!(
         "{}",
-        render_channel_surfaces_text(&resolved_path_display, &inventory)
+        render_channel_surfaces_shell_text(&resolved_path_display, &inventory)
     );
     Ok(())
 }
@@ -4001,6 +4112,41 @@ pub fn render_channel_surfaces_text(
     config_path: &str,
     inventory: &mvp::channel::ChannelInventory,
 ) -> String {
+    let lines = build_channel_surfaces_body_lines(config_path, inventory);
+    let mut rendered = mvp::presentation::render_compact_brand_header(
+        mvp::presentation::detect_render_width()
+            .max(96)
+            .saturating_sub(2),
+        &mvp::presentation::BuildVersionInfo::current(),
+        Some("operator channels"),
+    )
+    .into_iter()
+    .map(|line| line.text)
+    .collect::<Vec<_>>();
+    rendered.push(String::new());
+    rendered.push("channels".to_owned());
+    rendered.push(String::new());
+    rendered.extend(lines);
+    rendered.join("\n")
+}
+
+pub fn render_channel_surfaces_shell_text(
+    config_path: &str,
+    inventory: &mvp::channel::ChannelInventory,
+) -> String {
+    render_operator_shell_surface(
+        "channels",
+        "operator channels",
+        Vec::new(),
+        build_channel_surfaces_body_lines(config_path, inventory),
+        Vec::new(),
+    )
+}
+
+fn build_channel_surfaces_body_lines(
+    config_path: &str,
+    inventory: &mvp::channel::ChannelInventory,
+) -> Vec<String> {
     let mut lines = vec![format!("config={config_path}")];
     let mut catalog_only_surfaces = Vec::new();
 
@@ -4110,7 +4256,7 @@ pub fn render_channel_surfaces_text(
             }
         }
     }
-    lines.join("\n")
+    lines
 }
 
 pub fn render_channel_onboarding_line(

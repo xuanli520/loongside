@@ -1223,7 +1223,7 @@ fn persist_runtime_experiment_artifact(
 }
 
 pub fn render_runtime_experiment_text(artifact: &RuntimeExperimentArtifactDocument) -> String {
-    [
+    let body = [
         format!("run_id={}", artifact.run_id),
         format!("experiment_id={}", artifact.experiment_id),
         format!(
@@ -1264,7 +1264,8 @@ pub fn render_runtime_experiment_text(artifact: &RuntimeExperimentArtifactDocume
             render_string_values(&artifact.mutation.tags)
         ),
     ]
-    .join("\n")
+    .join("\n");
+    wrap_runtime_experiment_surface("experiment run", body)
 }
 
 pub fn render_runtime_experiment_compare_text(report: &RuntimeExperimentCompareReport) -> String {
@@ -1378,17 +1379,22 @@ pub fn render_runtime_experiment_compare_text(report: &RuntimeExperimentCompareR
         }
     }
 
-    lines.join("\n")
+    wrap_runtime_experiment_surface("experiment compare", lines.join("\n"))
 }
 
 fn render_runtime_experiment_restore_text(execution: &RuntimeExperimentRestoreExecution) -> String {
-    [
+    let body = [
         format!("run_id={}", execution.run_id),
         format!("experiment_id={}", execution.experiment_id),
         format!("stage={}", execution.stage.as_str()),
         crate::runtime_restore_cli::render_runtime_restore_text(&execution.restore),
     ]
-    .join("\n")
+    .join("\n");
+    wrap_runtime_experiment_surface("experiment restore", body)
+}
+
+fn wrap_runtime_experiment_surface(title: &str, body: String) -> String {
+    crate::render_operator_shell_surface_from_body(title, "runtime experiment", body)
 }
 
 fn render_evaluation_summary(evaluation: Option<&RuntimeExperimentEvaluation>) -> String {

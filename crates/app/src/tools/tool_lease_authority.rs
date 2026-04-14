@@ -204,6 +204,18 @@ fn tool_lease_secret() -> Result<String, String> {
         return Ok(cached_secret);
     }
 
+    let init_lock = tool_lease_secret_init_lock();
+    let guard = init_lock.lock();
+    let _guard = match guard {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    let cached_secret = cached_tool_lease_secret(secret_path.as_path());
+    if let Some(cached_secret) = cached_secret {
+        return Ok(cached_secret);
+    }
+
     let loaded_secret = load_or_create_tool_lease_secret(secret_path.as_path())?;
     cache_tool_lease_secret(secret_path, loaded_secret.clone());
     Ok(loaded_secret)
@@ -374,6 +386,11 @@ fn tool_lease_secret_cache() -> &'static Mutex<HashMap<PathBuf, String>> {
     TOOL_LEASE_SECRET_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn tool_lease_secret_init_lock() -> &'static Mutex<()> {
+    static TOOL_LEASE_SECRET_INIT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    TOOL_LEASE_SECRET_INIT_LOCK.get_or_init(|| Mutex::new(()))
+}
+
 fn now_unix_seconds() -> u64 {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -394,6 +411,10 @@ pub(super) fn clear_tool_lease_secret_cache_for_tests() {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::Barrier;
+    use std::thread;
+
     use tempfile::TempDir;
 
     use super::clear_tool_lease_secret_cache_for_tests;
@@ -457,5 +478,37 @@ mod tests {
         let error = validation_result.expect_err("different home should reject lease");
 
         assert!(error.contains("signature mismatch"), "error={error}");
+    }
+
+    #[test]
+    fn concurrent_issue_tool_lease_initializes_secret_without_empty_file_race() {
+        let (_temp_home, _env) = scoped_tool_lease_home();
+        let payload = serde_json::Map::new();
+        let thread_count = 6usize;
+        let barrier = Arc::new(Barrier::new(thread_count));
+        let mut handles = Vec::new();
+
+        for _ in 0..thread_count {
+            let barrier = Arc::clone(&barrier);
+            let payload = payload.clone();
+            let handle = thread::spawn(move || {
+                barrier.wait();
+                issue_tool_lease("file.read", &payload)
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            let join_result = handle.join();
+            let issue_result = join_result.expect("thread join");
+            issue_result.expect("lease issuance should succeed");
+        }
+
+        let secret_path = default_tool_lease_secret_path();
+        let persisted_secret =
+            read_tool_lease_secret_file(secret_path.as_path()).expect("persisted secret");
+
+        assert!(secret_path.exists());
+        assert!(persisted_secret.is_some());
     }
 }

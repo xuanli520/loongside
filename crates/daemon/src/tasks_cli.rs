@@ -1214,22 +1214,34 @@ fn render_tasks_create_text(payload: &Value) -> CliResult<String> {
     append_task_lookup_error_line(payload, &mut lines);
 
     if !recipes.is_empty() {
-        lines.push("recipes:".to_owned());
         for recipe in recipes {
             let text = recipe.as_str().unwrap_or("");
             lines.push(format!("- {text}"));
         }
     }
 
+    let mut next_lines = Vec::new();
     if !next_steps.is_empty() {
-        lines.push("next steps:".to_owned());
         for step in next_steps {
             let text = step.as_str().unwrap_or("");
-            lines.push(format!("- {text}"));
+            next_lines.push(format!("- {text}"));
         }
     }
 
-    Ok(lines.join("\n"))
+    let mut sections = Vec::new();
+    if !next_lines.is_empty() {
+        sections.push(("next steps", next_lines));
+    }
+    sections.push(("queued task", lines));
+    Ok(render_tasks_surface(
+        "task queued",
+        "background tasks",
+        Vec::new(),
+        sections,
+        vec![
+            "Use the next-step commands to inspect, wait on, or cancel the queued task.".to_owned(),
+        ],
+    ))
 }
 
 fn render_tasks_list_text(payload: &Value) -> CliResult<String> {
@@ -1256,7 +1268,16 @@ fn render_tasks_list_text(payload: &Value) -> CliResult<String> {
     ));
     if tasks.is_empty() {
         lines.push("No async background tasks are currently visible.".to_owned());
-        return Ok(lines.join("\n"));
+        return Ok(render_tasks_surface(
+            "visible tasks",
+            "background tasks",
+            Vec::new(),
+            vec![("tasks", lines)],
+            vec![
+                "Use `tasks create` to queue a new background delegate from the current session."
+                    .to_owned(),
+            ],
+        ));
     }
 
     for task in tasks {
@@ -1264,7 +1285,16 @@ fn render_tasks_list_text(payload: &Value) -> CliResult<String> {
         lines.push(format!("- {line}"));
     }
 
-    Ok(lines.join("\n"))
+    Ok(render_tasks_surface(
+        "visible tasks",
+        "background tasks",
+        Vec::new(),
+        vec![("tasks", lines)],
+        vec![
+            "Use `tasks status <id>` for one task or `tasks wait <id>` to follow it incrementally."
+                .to_owned(),
+        ],
+    ))
 }
 
 fn render_tasks_status_text(payload: &Value) -> CliResult<String> {
@@ -1272,7 +1302,16 @@ fn render_tasks_status_text(payload: &Value) -> CliResult<String> {
         .get("task")
         .ok_or_else(|| "tasks status payload missing task".to_owned())?;
     let lines = render_task_detail_lines(task)?;
-    Ok(lines.join("\n"))
+    Ok(render_tasks_surface(
+        "task detail",
+        "background tasks",
+        Vec::new(),
+        vec![("task", lines)],
+        vec![
+            "Use `tasks events <id>` or `tasks wait <id>` to keep inspecting the task lifecycle."
+                .to_owned(),
+        ],
+    ))
 }
 
 fn render_tasks_events_text(payload: &Value) -> CliResult<String> {
@@ -1295,7 +1334,13 @@ fn render_tasks_events_text(payload: &Value) -> CliResult<String> {
     ));
     if events.is_empty() {
         lines.push("No newer events.".to_owned());
-        return Ok(lines.join("\n"));
+        return Ok(render_tasks_surface(
+            "task events",
+            "background tasks",
+            Vec::new(),
+            vec![("events", lines)],
+            vec!["Use `tasks wait <id>` to continue following this task.".to_owned()],
+        ));
     }
 
     for event in events {
@@ -1308,7 +1353,13 @@ fn render_tasks_events_text(payload: &Value) -> CliResult<String> {
         lines.push(format!("- #{event_id} {event_kind} ts={ts}"));
     }
 
-    Ok(lines.join("\n"))
+    Ok(render_tasks_surface(
+        "task events",
+        "background tasks",
+        Vec::new(),
+        vec![("events", lines)],
+        vec!["Use `tasks wait <id>` to continue following this task.".to_owned()],
+    ))
 }
 
 fn render_tasks_wait_text(payload: &Value) -> CliResult<String> {
@@ -1345,7 +1396,13 @@ fn render_tasks_wait_text(payload: &Value) -> CliResult<String> {
         }
     }
 
-    Ok(lines.join("\n"))
+    Ok(render_tasks_surface(
+        "task wait",
+        "background tasks",
+        Vec::new(),
+        vec![("result", lines)],
+        vec!["Re-run `tasks wait` with the returned cursor when you need more updates.".to_owned()],
+    ))
 }
 
 fn render_tasks_mutation_text(payload: &Value) -> CliResult<String> {
@@ -1380,7 +1437,47 @@ fn render_tasks_mutation_text(payload: &Value) -> CliResult<String> {
     }
     lines.extend(render_task_detail_lines(task)?);
     append_task_lookup_error_line(payload, &mut lines);
-    Ok(lines.join("\n"))
+    Ok(render_tasks_surface(
+        "task action",
+        "background tasks",
+        Vec::new(),
+        vec![("action result", lines)],
+        vec!["Use `tasks status <id>` to verify the task state after the action.".to_owned()],
+    ))
+}
+
+fn render_tasks_surface(
+    title: &str,
+    subtitle: &str,
+    intro_lines: Vec<String>,
+    sections: Vec<(&str, Vec<String>)>,
+    footer_lines: Vec<String>,
+) -> String {
+    let sections = sections
+        .into_iter()
+        .map(
+            |(section_title, lines)| mvp::tui_surface::TuiSectionSpec::Narrative {
+                title: Some(section_title.to_owned()),
+                lines,
+            },
+        )
+        .collect();
+    let screen = mvp::tui_surface::TuiScreenSpec {
+        header_style: mvp::tui_surface::TuiHeaderStyle::Compact,
+        subtitle: Some(subtitle.to_owned()),
+        title: Some(title.to_owned()),
+        progress_line: None,
+        intro_lines,
+        sections,
+        choices: Vec::new(),
+        footer_lines,
+    };
+    mvp::tui_surface::render_tui_screen_spec_ratatui(
+        &screen,
+        mvp::presentation::detect_render_width(),
+        false,
+    )
+    .join("\n")
 }
 
 fn render_task_brief_line(task: &Value) -> CliResult<String> {

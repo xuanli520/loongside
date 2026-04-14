@@ -54,6 +54,7 @@ loongclaw-kernel = { version = "0.1.0-alpha.3", path = "../kernel" }
 bytes = "1"
 async-trait.workspace = true
 console.workspace = true
+ratatui = "0.30.0"
 dunce = "1"
 rand.workspace = true
 chrono.workspace = true

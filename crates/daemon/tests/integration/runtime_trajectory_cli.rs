@@ -201,6 +201,15 @@ fn runtime_trajectory_show_round_trips_persisted_artifact_in_text_mode() {
     assert!(output.status.success(), "show should succeed: {stderr}");
 
     let stdout = String::from_utf8(output.stdout).expect("stdout should be utf8");
+    assert!(
+        stdout.lines().any(|line| {
+            line.starts_with("artifact_path=")
+                || line.starts_with("LOONGCLAW")
+                || line.contains(" loongclaw ")
+        }),
+        "runtime trajectory show should print the wrapped operator surface (optionally after artifact_path): {stdout}"
+    );
+    assert!(stdout.contains("runtime trajectory"));
     assert!(stdout.contains("runtime_trajectory session=root-session"));
     assert!(stdout.contains("lineage_root=root-session"));
     assert!(stdout.contains("canonical_records=3"));

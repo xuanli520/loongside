@@ -828,7 +828,13 @@ pub(crate) fn render_runtime_restore_text(execution: &RuntimeRestoreExecution) -
         }
     }
 
-    lines.join("\n")
+    crate::render_operator_shell_surface(
+        "runtime restore",
+        "runtime restore",
+        Vec::new(),
+        lines,
+        Vec::new(),
+    )
 }
 
 fn render_string_list<'a>(values: impl IntoIterator<Item = &'a str>) -> String {
@@ -840,5 +846,43 @@ fn render_string_list<'a>(values: impl IntoIterator<Item = &'a str>) -> String {
         "-".to_owned()
     } else {
         rendered.join(",")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_runtime_restore_text_uses_operator_surface_header() {
+        let rendered = render_runtime_restore_text(&RuntimeRestoreExecution {
+            resolved_config_path: "/tmp/loongclaw.toml".to_owned(),
+            snapshot_path: "/tmp/snapshot.json".to_owned(),
+            lineage: RuntimeRestoreLineageSummary {
+                snapshot_id: "snap-1".to_owned(),
+                created_at: "2026-04-13T00:00:00Z".to_owned(),
+                label: None,
+                experiment_id: None,
+                parent_snapshot_id: None,
+            },
+            plan: RuntimeRestorePlan {
+                can_apply: true,
+                changed_surfaces: vec!["provider".to_owned(), "tools".to_owned()],
+                warnings: vec!["manual verification recommended".to_owned()],
+                managed_skill_actions: Vec::new(),
+            },
+            applied: false,
+            verification: None,
+        });
+
+        assert!(
+            rendered
+                .lines()
+                .any(|line| line.starts_with("LOONGCLAW") || line.contains(" loongclaw ")),
+            "runtime restore text should use the shared ratatui operator shell header: {rendered}"
+        );
+        assert!(rendered.contains("runtime restore"));
+        assert!(rendered.contains("snapshot_id=snap-1"));
+        assert!(rendered.contains("changed_surfaces=provider,tools"));
     }
 }

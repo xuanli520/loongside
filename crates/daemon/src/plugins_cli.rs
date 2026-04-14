@@ -1345,19 +1345,38 @@ fn render_plugin_scaffold_readme(package_root: &str, plugin_id: &str, bridge_kin
 }
 
 fn render_plugins_cli_text(execution: &PluginsCommandExecution) -> String {
-    match execution {
-        PluginsCommandExecution::Init(execution) => render_plugins_init_text(execution),
-        PluginsCommandExecution::Inventory(execution) => render_plugins_inventory_text(execution),
-        PluginsCommandExecution::Doctor(execution) => render_plugins_doctor_text(execution),
-        PluginsCommandExecution::BridgeProfiles(execution) => {
-            render_plugins_bridge_profiles_text(execution)
+    let (title, body) = match execution {
+        PluginsCommandExecution::Init(execution) => {
+            ("plugins init", render_plugins_init_text(execution))
         }
-        PluginsCommandExecution::BridgeTemplate(execution) => {
-            render_plugins_bridge_template_text(execution)
+        PluginsCommandExecution::Inventory(execution) => (
+            "plugins inventory",
+            render_plugins_inventory_text(execution),
+        ),
+        PluginsCommandExecution::Doctor(execution) => {
+            ("plugins doctor", render_plugins_doctor_text(execution))
         }
-        PluginsCommandExecution::Preflight(execution) => render_plugins_preflight_text(execution),
-        PluginsCommandExecution::Actions(execution) => render_plugins_actions_text(execution),
-    }
+        PluginsCommandExecution::BridgeProfiles(execution) => (
+            "bridge profiles",
+            render_plugins_bridge_profiles_text(execution),
+        ),
+        PluginsCommandExecution::BridgeTemplate(execution) => (
+            "bridge template",
+            render_plugins_bridge_template_text(execution),
+        ),
+        PluginsCommandExecution::Preflight(execution) => (
+            "plugins preflight",
+            render_plugins_preflight_text(execution),
+        ),
+        PluginsCommandExecution::Actions(execution) => {
+            ("operator actions", render_plugins_actions_text(execution))
+        }
+    };
+    wrap_plugins_surface_text(title, body)
+}
+
+fn wrap_plugins_surface_text(title: &str, body: String) -> String {
+    crate::render_operator_shell_surface_from_body(title, "operator plugins", body)
 }
 
 fn render_plugins_init_text(execution: &PluginsInitExecution) -> String {
@@ -2957,6 +2976,20 @@ mod tests {
             .join(format!("{prefix}-{nanos}"))
             .display()
             .to_string()
+    }
+
+    #[test]
+    fn wrap_plugins_surface_text_uses_operator_header() {
+        let rendered = wrap_plugins_surface_text("plugins inventory", "plugin=demo".to_owned());
+
+        assert!(
+            rendered
+                .lines()
+                .any(|line| line.starts_with("LOONGCLAW") || line.contains(" loongclaw ")),
+            "plugins text should use the shared ratatui operator shell header: {rendered}"
+        );
+        assert!(rendered.contains("plugins inventory"));
+        assert!(rendered.contains("plugin=demo"));
     }
 
     fn write_openclaw_weather_sdk_package(plugin_root: &str) {

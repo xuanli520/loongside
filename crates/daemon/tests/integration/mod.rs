@@ -965,6 +965,14 @@ fn render_channel_surfaces_text_reports_aliases_and_operation_health() {
     let inventory = mvp::channel::channel_inventory(&config);
     let rendered = render_channel_surfaces_text("/tmp/loongclaw.toml", &inventory);
 
+    assert!(
+        rendered
+            .lines()
+            .next()
+            .is_some_and(|line| line.starts_with("LOONGCLAW")),
+        "channel surface text should now use the shared compact header: {rendered}"
+    );
+    assert!(rendered.contains("channels"));
     assert!(rendered.contains("config=/tmp/loongclaw.toml"));
     assert!(rendered.contains("Telegram [telegram]"));
     assert!(

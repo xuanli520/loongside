@@ -17,6 +17,7 @@ use crate::acp::{
 use crate::context::{DEFAULT_TOKEN_TTL_S, bootstrap_kernel_context_with_config};
 
 mod cli_input;
+mod control_plane;
 #[cfg(all(test, feature = "memory-sqlite"))]
 #[allow(clippy::expect_used)]
 mod latest_session_selector_tests;
@@ -117,6 +118,10 @@ const CLI_CHAT_HELP_COMMAND: &str = "/help";
 const CLI_CHAT_COMPACT_COMMAND: &str = "/compact";
 const CLI_CHAT_STATUS_COMMAND: &str = "/status";
 const CLI_CHAT_HISTORY_COMMAND: &str = "/history";
+const CLI_CHAT_MISSION_COMMAND: &str = "/mission";
+const CLI_CHAT_REVIEW_COMMAND: &str = "/review";
+const CLI_CHAT_WORKERS_COMMAND: &str = "/workers";
+const CLI_CHAT_SESSIONS_COMMAND: &str = "/sessions";
 const CLI_CHAT_TURN_CHECKPOINT_REPAIR_COMMAND: &str = "/turn_checkpoint_repair";
 const CLI_CHAT_TURN_CHECKPOINT_REPAIR_COMMAND_ALIAS: &str = "/turn-checkpoint-repair";
 const CLI_CHAT_COMPOSER_PROMPT: &str = "╰─ you · compose › ";
@@ -4433,29 +4438,32 @@ mod tests {
             "chat startup should now use the shared compact brand header: {lines:#?}"
         );
         assert!(
-            lines.iter().any(|line| {
-                line == "start here: Summarize this repository and suggest the best next step."
-            }),
-            "chat startup should render the first prompt through the structured action group: {lines:#?}"
+            lines.iter().any(|line| line
+                == "start here: Summarize this repository and suggest the best next step."),
+            "chat startup should render the first answer handoff through the structured action group: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("command deck")),
+            "chat startup should surface a command deck section beside the first answer handoff: {lines:#?}"
         );
         assert!(
             lines
                 .iter()
-                .any(|line| line == "- type your request, or use /help for commands"),
-            "chat startup should keep the usage hint, but under the assistant-first opening block: {lines:#?}"
+                .any(|line| line.contains("note: how this surface works")),
+            "chat startup should keep the usage guidance as a structured callout: {lines:#?}"
         );
         assert!(
-            lines.iter().any(|line| line.contains("session details")),
+            lines.iter().any(|line| line.contains("session anchor")),
             "chat startup should keep session/config facts in a structured key-value section: {lines:#?}"
         );
         assert!(
-            lines.iter().any(|line| line.contains("runtime details")),
+            lines.iter().any(|line| line.contains("runtime posture")),
             "chat startup should still preserve runtime context in a compact secondary section: {lines:#?}"
         );
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("continuity maintenance")),
+                .any(|line| line.contains("continuity guardrails")),
             "chat startup should show compaction maintenance settings in a dedicated section: {lines:#?}"
         );
         assert!(
@@ -4544,25 +4552,23 @@ mod tests {
             80,
         );
 
-        assert_eq!(lines[0], "╭─ status · session=default");
+        assert_eq!(lines[0], "╭─ control deck · session=default");
         assert!(
-            lines.iter().any(|line| line.contains("session details")),
+            lines.iter().any(|line| line.contains("session anchor")),
             "status output should keep session facts grouped under a section: {lines:#?}"
         );
         assert!(
-            lines.iter().any(|line| line.contains("runtime details")),
+            lines.iter().any(|line| line.contains("runtime posture")),
             "status output should keep runtime facts grouped under a section: {lines:#?}"
         );
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("continuity maintenance")),
+                .any(|line| line.contains("continuity guardrails")),
             "status output should surface compaction maintenance settings: {lines:#?}"
         );
         assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("note: operator controls")),
+            lines.iter().any(|line| line.contains("note: next moves")),
             "status output should include the operator control callout: {lines:#?}"
         );
         assert!(
@@ -4955,7 +4961,7 @@ mod tests {
     fn render_cli_chat_help_lines_promotes_commands_to_surface() {
         let lines = render_cli_chat_help_lines_with_width(72);
 
-        assert_eq!(lines[0], "╭─ chat · commands");
+        assert_eq!(lines[0], "╭─ help · operator deck");
         assert!(
             lines.iter().any(|line| line.contains("slash commands")),
             "help output should keep a dedicated slash-command section: {lines:#?}"
@@ -4967,6 +4973,34 @@ mod tests {
             "help output should render slash commands as readable key-value rows: {lines:#?}"
         );
         assert!(
+            lines.iter().any(|line| {
+                line.contains("/review: reopen the latest approval/review summary")
+            }),
+            "help output should surface the review command: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("/mission:") && line.contains("mission control"))
+                || lines.iter().any(|line| line.contains("/mission:"))
+                    && lines
+                        .iter()
+                        .any(|line| line.contains("current session scope")),
+            "help output should surface the mission-control command: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("/sessions: inspect visible sessions")),
+            "help output should surface the session queue command: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| {
+                line.contains("/workers: inspect visible worker/delegate sessions")
+            }),
+            "help output should surface the workers command: {lines:#?}"
+        );
+        assert!(
             lines.iter().any(|line| line
                 .contains("/status: show session, runtime, compaction, and durability status")),
             "help output should surface the status command: {lines:#?}"
@@ -4975,6 +5009,16 @@ mod tests {
             lines.iter().any(|line| line
                 .contains("/compact: write a continuity-safe checkpoint into the active window")),
             "help output should surface the manual compaction command: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("note: surface controls")),
+            "help output should surface the command-menu control deck: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("keyboard")),
+            "help output should surface keyboard shortcuts as a first-class section: {lines:#?}"
         );
         assert!(
             lines.iter().any(|line| line.contains("note: usage notes")),
@@ -5024,11 +5068,11 @@ mod tests {
 
         let lines = render_cli_chat_status_lines_with_width(&summary, 80);
 
-        assert_eq!(lines[0], "╭─ status · session=session-status");
+        assert_eq!(lines[0], "╭─ control deck · session=session-status");
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("continuity maintenance")),
+                .any(|line| line.contains("continuity guardrails")),
             "status output should expose compaction settings as a dedicated section: {lines:#?}"
         );
         assert!(
@@ -5042,9 +5086,7 @@ mod tests {
             "status output should surface the compaction token trigger: {lines:#?}"
         );
         assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("note: operator controls")),
+            lines.iter().any(|line| line.contains("note: next moves")),
             "status output should append the operator controls callout: {lines:#?}"
         );
         assert!(
@@ -5925,6 +5967,35 @@ allowed_decisions: yes / auto / full / esc";
         )
         .expect_err("history should reject extra args");
         assert_eq!(history_error, "usage: /history");
+
+        let sessions_error = parse_exact_chat_command(
+            "/sessions now",
+            &[CLI_CHAT_SESSIONS_COMMAND],
+            "usage: /sessions",
+        )
+        .expect_err("sessions should reject extra args");
+        assert_eq!(sessions_error, "usage: /sessions");
+
+        let mission_error = parse_exact_chat_command(
+            "/mission now",
+            &[CLI_CHAT_MISSION_COMMAND],
+            "usage: /mission",
+        )
+        .expect_err("mission should reject extra args");
+        assert_eq!(mission_error, "usage: /mission");
+
+        let review_error =
+            parse_exact_chat_command("/review now", &[CLI_CHAT_REVIEW_COMMAND], "usage: /review")
+                .expect_err("review should reject extra args");
+        assert_eq!(review_error, "usage: /review");
+
+        let workers_error = parse_exact_chat_command(
+            "/workers now",
+            &[CLI_CHAT_WORKERS_COMMAND],
+            "usage: /workers",
+        )
+        .expect_err("workers should reject extra args");
+        assert_eq!(workers_error, "usage: /workers");
     }
 
     #[test]

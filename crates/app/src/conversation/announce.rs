@@ -456,9 +456,10 @@ mod tests {
     use tokio::time::{Duration, sleep};
 
     use super::{
-        DELEGATE_RESULTS_ANNOUNCED_EVENT_KIND, DelegateAnnounceSettings,
-        delegate_announce_queue_key, drain_delegate_announce_queue,
-        enqueue_delegate_result_announce, reset_delegate_announce_queues_for_tests,
+        DELEGATE_RESULTS_ANNOUNCED_EVENT_KIND, DelegateAnnounceBatch, DelegateAnnounceSettings,
+        delegate_announce_queue_key, delegate_announce_queues, enqueue_delegate_result_announce,
+        finish_delegate_announce_batch, flush_delegate_announce_batch,
+        reset_delegate_announce_queues_for_tests, restore_delegate_announce_batch,
     };
     use crate::memory::runtime_config::MemoryRuntimeConfig;
     use crate::session::frozen_result::{FrozenContent, FrozenResult};
@@ -569,14 +570,51 @@ mod tests {
         }
     }
 
+    fn take_delegate_announce_batch_immediately_for_tests(
+        parent_session_id: &str,
+    ) -> Option<DelegateAnnounceBatch> {
+        let queues = delegate_announce_queues();
+        let mut queues = queues
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let queue = queues.get_mut(parent_session_id)?;
+        let child_session_ids = queue.pending_child_session_ids.drain(..).collect();
+        let settings = queue.settings.clone();
+
+        Some(DelegateAnnounceBatch {
+            child_session_ids,
+            settings,
+        })
+    }
+
     async fn flush_delegate_announce_queue_for_tests(
         memory_config: &MemoryRuntimeConfig,
         parent_session_id: &str,
     ) {
         let queue_key = delegate_announce_queue_key(memory_config, parent_session_id);
-        let parent_session_id = parent_session_id.to_owned();
-        let memory_config = memory_config.clone();
-        drain_delegate_announce_queue(memory_config, queue_key, parent_session_id).await;
+
+        loop {
+            let batch = take_delegate_announce_batch_immediately_for_tests(queue_key.as_str());
+            let Some(batch) = batch else {
+                let has_pending = finish_delegate_announce_batch(queue_key.as_str());
+                if !has_pending {
+                    return;
+                }
+                continue;
+            };
+
+            let flush_result =
+                flush_delegate_announce_batch(memory_config, parent_session_id, &batch);
+            if let Err(error) = flush_result {
+                restore_delegate_announce_batch(queue_key.as_str(), &batch);
+                panic!("delegate announce test flush failed: {error}");
+            }
+
+            let has_pending = finish_delegate_announce_batch(queue_key.as_str());
+            if !has_pending {
+                return;
+            }
+        }
     }
 
     #[tokio::test]

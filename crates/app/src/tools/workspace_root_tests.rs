@@ -111,6 +111,7 @@ fn file_read_rejects_relative_workspace_root_from_trusted_internal_payload() {
 #[cfg(feature = "tool-file")]
 #[test]
 fn tool_invoke_preserves_combined_trusted_internal_context_for_inner_execution() {
+    let _env = crate::test_support::ScopedEnv::new();
     let child_root = std::env::temp_dir().join(format!(
         "loongclaw-tool-invoke-workspace-root-child-{}",
         std::process::id()

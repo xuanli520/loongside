@@ -3541,6 +3541,13 @@ fn runtime_capability_show_text_renders_snapshot_delta_summary() {
     let rendered =
         loongclaw_daemon::runtime_capability_cli::render_runtime_capability_text(&candidate);
     assert!(
+        rendered
+            .lines()
+            .any(|line| line.starts_with("LOONGCLAW") || line.contains(" loongclaw ")),
+        "runtime capability text should now use the shared ratatui operator shell header: {rendered}"
+    );
+    assert!(rendered.contains("capability candidate"));
+    assert!(
         rendered.contains("source_snapshot_delta_changed_surface_count="),
         "rendered text should include the compact changed-surface count"
     );

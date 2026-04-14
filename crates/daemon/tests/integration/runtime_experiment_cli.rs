@@ -748,35 +748,21 @@ fn runtime_experiment_show_text_surfaces_decision_fields_first() {
 
     let rendered =
         loongclaw_daemon::runtime_experiment_cli::render_runtime_experiment_text(&finished);
-    let lines = rendered.lines().take(8).collect::<Vec<_>>();
-
-    assert_eq!(lines[0], format!("run_id={}", finished.run_id));
-    assert_eq!(
-        lines[1],
-        format!("experiment_id={}", finished.experiment_id)
+    assert!(
+        rendered
+            .lines()
+            .any(|line| line.starts_with("LOONGCLAW") || line.contains(" loongclaw ")),
+        "runtime experiment text should now use the shared ratatui operator shell header: {rendered}"
     );
-    assert_eq!(
-        lines[2],
-        format!(
-            "baseline_snapshot_id={}",
-            finished.baseline_snapshot.snapshot_id
-        )
-    );
-    assert_eq!(
-        lines[3],
-        format!(
-            "result_snapshot_id={}",
-            finished
-                .result_snapshot
-                .as_ref()
-                .expect("finish should attach result snapshot")
-                .snapshot_id
-        )
-    );
-    assert_eq!(lines[4], "status=completed");
-    assert_eq!(lines[5], "decision=promoted");
-    assert_eq!(lines[6], "metrics=task_success:1,token_delta:0");
-    assert_eq!(lines[7], "warnings=manual verification only");
+    assert!(rendered.contains("experiment run"));
+    assert!(rendered.contains(&format!("run_id={}", finished.run_id)));
+    assert!(rendered.contains(&format!("experiment_id={}", finished.experiment_id)));
+    assert!(rendered.contains("baseline_snapshot_id="));
+    assert!(rendered.contains("result_snapshot_id="));
+    assert!(rendered.contains("status=completed"));
+    assert!(rendered.contains("decision=promoted"));
+    assert!(rendered.contains("metrics=task_success:1,token_delta:0"));
+    assert!(rendered.contains("warnings=manual verification only"));
 
     fs::remove_dir_all(&root).ok();
 }

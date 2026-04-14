@@ -486,6 +486,10 @@ fn import_cli_render_preview_lists_domain_status_and_source() {
     let lines = loongclaw_daemon::import_cli::render_import_preview_lines_for_width(&candidate, 80);
 
     assert!(
+        lines.iter().any(|line| line == "candidate snapshot"),
+        "preview should now label the summary block as a candidate snapshot: {lines:#?}"
+    );
+    assert!(
         lines.iter().any(|line| line.contains("provider")),
         "preview should list provider domain: {lines:#?}"
     );
@@ -498,6 +502,10 @@ fn import_cli_render_preview_lists_domain_status_and_source() {
     assert!(
         lines.iter().any(|line| line.contains("workspace guidance")),
         "preview should list workspace guidance: {lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| line == "domain signals:"),
+        "preview should group domain output under domain signals: {lines:#?}"
     );
 }
 
@@ -520,6 +528,24 @@ fn import_cli_render_preview_includes_brand_header_and_title() {
         lines.iter().any(|line| line == "import preview"),
         "import preview should include a stable title line: {lines:#?}"
     );
+}
+
+#[test]
+fn import_cli_render_preview_shell_wraps_candidate_in_operator_surface() {
+    let rendered = loongclaw_daemon::import_cli::render_import_preview_shell_text_for_candidates(
+        &sample_import_candidate(),
+        &[sample_import_candidate()],
+        80,
+    );
+
+    assert!(
+        rendered
+            .lines()
+            .any(|line| line.starts_with("LOONGCLAW") || line.contains(" loongclaw ")),
+        "preview shell should use the ratatui operator shell header: {rendered}"
+    );
+    assert!(rendered.contains("import preview"));
+    assert!(rendered.contains("candidate snapshot"));
 }
 
 #[test]
@@ -583,6 +609,10 @@ fn import_cli_apply_summary_wraps_long_path_and_domains_for_narrow_width() {
         "apply summary should keep a focused title: {lines:#?}"
     );
     assert!(
+        lines.iter().any(|line| line == "saved setup"),
+        "apply summary should group the persisted configuration facts under a saved-setup heading: {lines:#?}"
+    );
+    assert!(
         lines
             .iter()
             .any(|line| line == "- write mode: supplemented existing config"),
@@ -609,6 +639,10 @@ fn import_cli_apply_summary_wraps_long_path_and_domains_for_narrow_width() {
         "apply summary should continue wrapped domain lists on readable continuation lines: {lines:#?}"
     );
     assert!(
+        lines.iter().any(|line| line == "start here"),
+        "apply summary should now mark the primary follow-up handoff explicitly: {lines:#?}"
+    );
+    assert!(
         lines
             .iter()
             .any(|line| line == "next step: loong ask --config '/tmp/shared"),
@@ -620,6 +654,28 @@ fn import_cli_apply_summary_wraps_long_path_and_domains_for_narrow_width() {
             .any(|line| line == "  workspace/loongclaw config.toml' --message"),
         "apply summary should continue wrapped ask commands on an indented line: {lines:#?}"
     );
+}
+
+#[test]
+fn import_cli_apply_summary_shell_wraps_saved_setup_in_operator_surface() {
+    let candidate = sample_import_candidate();
+    let rendered = loongclaw_daemon::import_cli::render_import_apply_summary_shell_text_for_width(
+        std::path::Path::new("/tmp/loongclaw.toml"),
+        &candidate,
+        &[loongclaw_daemon::migration::types::SetupDomainKind::Provider],
+        &candidate.config,
+        false,
+        80,
+    );
+
+    assert!(
+        rendered
+            .lines()
+            .any(|line| line.starts_with("LOONGCLAW") || line.contains(" loongclaw ")),
+        "apply shell should use the ratatui operator shell header: {rendered}"
+    );
+    assert!(rendered.contains("import applied"));
+    assert!(rendered.contains("saved setup"));
 }
 
 #[test]
