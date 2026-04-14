@@ -7,8 +7,8 @@ use std::{
 use tokio::time::{Duration, Instant, sleep};
 
 use loongclaw_contracts::{
-    GovernedWorkflowPhase, ToolCoreOutcome, ToolCoreRequest, WorkflowOperationKind,
-    WorkflowOperationScope,
+    GovernedSessionMode, GovernedWorkflowPhase, ToolCoreOutcome, ToolCoreRequest,
+    WorkflowOperationKind, WorkflowOperationScope, WorktreeBindingDescriptor,
 };
 use serde_json::{Value, json};
 
@@ -151,6 +151,17 @@ pub(crate) struct SessionWorkflowRecord {
     pub(crate) lineage_root_session_id: Option<String>,
     pub(crate) lineage_depth: Option<usize>,
     pub(crate) runtime_self_continuity: Option<SessionRuntimeSelfContinuityRecord>,
+    pub(crate) binding: Option<SessionWorkflowBindingRecord>,
+}
+
+#[cfg(feature = "memory-sqlite")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionWorkflowBindingRecord {
+    pub(crate) session_id: String,
+    pub(crate) task_id: String,
+    pub(crate) mode: GovernedSessionMode,
+    pub(crate) execution_surface: String,
+    pub(crate) worktree: Option<WorktreeBindingDescriptor>,
 }
 
 #[cfg(feature = "memory-sqlite")]
@@ -1879,6 +1890,7 @@ pub(crate) fn load_session_workflow_record(
     let task_session_id = session_workflow_task_session_id(session);
     let runtime_self_continuity =
         load_session_runtime_self_continuity_record(repo, session, delegate_events)?;
+    let binding = session_workflow_binding_record(session, delegate_events);
 
     Ok(SessionWorkflowRecord {
         workflow_id,
@@ -1890,6 +1902,7 @@ pub(crate) fn load_session_workflow_record(
         lineage_root_session_id,
         lineage_depth,
         runtime_self_continuity,
+        binding,
     })
 }
 
@@ -1973,6 +1986,93 @@ fn session_workflow_task_session_id(session: &SessionSummaryRecord) -> Option<St
     }
 
     Some(session.session_id.clone())
+}
+
+#[cfg(feature = "memory-sqlite")]
+fn session_workflow_binding_record(
+    session: &SessionSummaryRecord,
+    delegate_events: &[SessionEventRecord],
+) -> Option<SessionWorkflowBindingRecord> {
+    if session.kind != SessionKind::DelegateChild {
+        return None;
+    }
+
+    let (execution, execution_surface) =
+        latest_delegate_execution_binding_components(delegate_events)?;
+    let mode = session_workflow_binding_mode(&execution);
+    let worktree = session_workflow_worktree_binding(session, &execution);
+    let task_id = session.session_id.clone();
+    let binding = SessionWorkflowBindingRecord {
+        session_id: session.session_id.clone(),
+        task_id,
+        mode,
+        execution_surface,
+        worktree,
+    };
+
+    Some(binding)
+}
+
+#[cfg(feature = "memory-sqlite")]
+fn latest_delegate_execution_binding_components(
+    delegate_events: &[SessionEventRecord],
+) -> Option<(ConstrainedSubagentExecution, String)> {
+    for event in delegate_events.iter().rev() {
+        let event_kind = event.event_kind.as_str();
+        let is_delegate_execution_event =
+            matches!(event_kind, "delegate_queued" | "delegate_started");
+        if !is_delegate_execution_event {
+            continue;
+        }
+
+        let execution = ConstrainedSubagentExecution::from_event_payload(&event.payload_json)?;
+        let execution_surface = session_workflow_execution_surface(event, &execution);
+        return Some((execution, execution_surface));
+    }
+
+    None
+}
+
+#[cfg(feature = "memory-sqlite")]
+fn session_workflow_execution_surface(
+    event: &SessionEventRecord,
+    execution: &ConstrainedSubagentExecution,
+) -> String {
+    let trust_event = crate::trust::extract_trust_event_payload(&event.payload_json);
+    if let Some(trust_event) = trust_event {
+        return trust_event.source_surface;
+    }
+
+    let fallback_surface = match execution.mode {
+        crate::conversation::ConstrainedSubagentMode::Inline => "delegate.inline",
+        crate::conversation::ConstrainedSubagentMode::Async => "delegate.async",
+    };
+
+    fallback_surface.to_owned()
+}
+
+#[cfg(feature = "memory-sqlite")]
+fn session_workflow_binding_mode(execution: &ConstrainedSubagentExecution) -> GovernedSessionMode {
+    if execution.kernel_bound {
+        return GovernedSessionMode::MutatingCapable;
+    }
+
+    GovernedSessionMode::AdvisoryOnly
+}
+
+#[cfg(feature = "memory-sqlite")]
+fn session_workflow_worktree_binding(
+    session: &SessionSummaryRecord,
+    execution: &ConstrainedSubagentExecution,
+) -> Option<WorktreeBindingDescriptor> {
+    let workspace_root = execution.workspace_root.as_ref()?;
+    let workspace_root_string = workspace_root.display().to_string();
+    let worktree = WorktreeBindingDescriptor {
+        worktree_id: session.session_id.clone(),
+        workspace_root: workspace_root_string,
+    };
+
+    Some(worktree)
 }
 
 #[cfg(feature = "memory-sqlite")]
@@ -3806,6 +3906,7 @@ fn session_workflow_json(workflow: SessionWorkflowRecord) -> Value {
         "runtime_self_continuity": workflow
             .runtime_self_continuity
             .map(session_runtime_self_continuity_json),
+        "binding": workflow.binding.map(session_workflow_binding_json),
     })
 }
 
@@ -3818,6 +3919,17 @@ fn session_runtime_self_continuity_json(
         "resolved_identity_present": runtime_self_continuity.resolved_identity_present,
         "session_profile_projection_present": runtime_self_continuity
             .session_profile_projection_present,
+    })
+}
+
+#[cfg(feature = "memory-sqlite")]
+fn session_workflow_binding_json(binding: SessionWorkflowBindingRecord) -> Value {
+    json!({
+        "session_id": binding.session_id,
+        "task_id": binding.task_id,
+        "mode": binding.mode,
+        "execution_surface": binding.execution_surface,
+        "worktree": binding.worktree,
     })
 }
 
@@ -4512,6 +4624,7 @@ mod tests {
                     "timeout_seconds": 120,
                     "allow_shell_in_child": false,
                     "child_tool_allowlist": ["file.read"],
+                    "workspace_root": "/tmp/loongclaw/sessions-list-workflow/child-session",
                     "kernel_bound": false,
                     "runtime_narrowing": {}
                 }
@@ -4545,6 +4658,17 @@ mod tests {
         assert_eq!(child["workflow"]["task_session_id"], "child-session");
         assert_eq!(child["workflow"]["lineage_root_session_id"], "root-session");
         assert_eq!(child["workflow"]["lineage_depth"], 1);
+        assert_eq!(child["workflow"]["binding"]["session_id"], "child-session");
+        assert_eq!(child["workflow"]["binding"]["task_id"], "child-session");
+        assert_eq!(child["workflow"]["binding"]["mode"], "advisory_only");
+        assert_eq!(
+            child["workflow"]["binding"]["execution_surface"],
+            "delegate.async"
+        );
+        assert_eq!(
+            child["workflow"]["binding"]["worktree"]["worktree_id"],
+            "child-session"
+        );
         assert_eq!(child["subagent"]["session_id"], "child-session");
         assert_eq!(child["subagent_identity"]["nickname"], "Research Child");
         assert_eq!(
@@ -4719,6 +4843,7 @@ mod tests {
                     "timeout_seconds": 90,
                     "allow_shell_in_child": false,
                     "child_tool_allowlist": ["file.read"],
+                    "workspace_root": "/tmp/loongclaw/session-status-workflow/child-session",
                     "kernel_bound": false,
                     "runtime_narrowing": {}
                 },
@@ -4772,6 +4897,30 @@ mod tests {
         assert_eq!(
             outcome.payload["workflow"]["runtime_self_continuity"]["present"],
             true
+        );
+        assert_eq!(
+            outcome.payload["workflow"]["binding"]["session_id"],
+            "child-session"
+        );
+        assert_eq!(
+            outcome.payload["workflow"]["binding"]["task_id"],
+            "child-session"
+        );
+        assert_eq!(
+            outcome.payload["workflow"]["binding"]["mode"],
+            "advisory_only"
+        );
+        assert_eq!(
+            outcome.payload["workflow"]["binding"]["execution_surface"],
+            "delegate.async"
+        );
+        assert_eq!(
+            outcome.payload["workflow"]["binding"]["worktree"]["worktree_id"],
+            "child-session"
+        );
+        assert_eq!(
+            outcome.payload["workflow"]["binding"]["worktree"]["workspace_root"],
+            "/tmp/loongclaw/session-status-workflow/child-session"
         );
         assert_eq!(
             outcome.payload["workflow"]["runtime_self_continuity"]["resolved_identity_present"],

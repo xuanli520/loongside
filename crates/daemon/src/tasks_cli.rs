@@ -1457,6 +1457,32 @@ fn render_task_detail_lines(task: &Value) -> CliResult<Vec<String>> {
         .and_then(|value| value.get("task_session_id"))
         .and_then(Value::as_str)
         .unwrap_or("-");
+    let workflow_binding_mode = task
+        .get("workflow")
+        .and_then(|value| value.get("binding"))
+        .and_then(|value| value.get("mode"))
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let workflow_execution_surface = task
+        .get("workflow")
+        .and_then(|value| value.get("binding"))
+        .and_then(|value| value.get("execution_surface"))
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let workflow_worktree_id = task
+        .get("workflow")
+        .and_then(|value| value.get("binding"))
+        .and_then(|value| value.get("worktree"))
+        .and_then(|value| value.get("worktree_id"))
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let workflow_workspace_root = task
+        .get("workflow")
+        .and_then(|value| value.get("binding"))
+        .and_then(|value| value.get("worktree"))
+        .and_then(|value| value.get("workspace_root"))
+        .and_then(Value::as_str)
+        .unwrap_or("-");
     let timeout_seconds = task
         .get("timeout_seconds")
         .and_then(Value::as_u64)
@@ -1510,6 +1536,14 @@ fn render_task_detail_lines(task: &Value) -> CliResult<Vec<String>> {
     ));
     lines.push(format!(
         "workflow_task_session_id: {workflow_task_session_id}"
+    ));
+    lines.push(format!("workflow_binding_mode: {workflow_binding_mode}"));
+    lines.push(format!(
+        "workflow_execution_surface: {workflow_execution_surface}"
+    ));
+    lines.push(format!("workflow_worktree_id: {workflow_worktree_id}"));
+    lines.push(format!(
+        "workflow_workspace_root: {workflow_workspace_root}"
     ));
     lines.push(format!("phase: {phase}"));
     lines.push(format!("timeout_seconds: {timeout_seconds}"));

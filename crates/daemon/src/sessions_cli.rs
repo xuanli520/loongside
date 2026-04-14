@@ -928,6 +928,28 @@ fn render_session_inspection_lines(detail: &Value) -> CliResult<Vec<String>> {
         .get("task_session_id")
         .and_then(Value::as_str)
         .unwrap_or("-");
+    let workflow_binding_mode = workflow
+        .get("binding")
+        .and_then(|value| value.get("mode"))
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let workflow_execution_surface = workflow
+        .get("binding")
+        .and_then(|value| value.get("execution_surface"))
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let workflow_worktree_id = workflow
+        .get("binding")
+        .and_then(|value| value.get("worktree"))
+        .and_then(|value| value.get("worktree_id"))
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let workflow_workspace_root = workflow
+        .get("binding")
+        .and_then(|value| value.get("worktree"))
+        .and_then(|value| value.get("workspace_root"))
+        .and_then(Value::as_str)
+        .unwrap_or("-");
     let lineage_root_session_id = workflow
         .get("lineage_root_session_id")
         .and_then(Value::as_str)
@@ -980,6 +1002,10 @@ fn render_session_inspection_lines(detail: &Value) -> CliResult<Vec<String>> {
     let sanitized_task = sanitize_terminal_text(task);
     let sanitized_workflow_id = sanitize_terminal_text(workflow_id);
     let sanitized_workflow_task_session_id = sanitize_terminal_text(workflow_task_session_id);
+    let sanitized_workflow_binding_mode = sanitize_terminal_text(workflow_binding_mode);
+    let sanitized_workflow_execution_surface = sanitize_terminal_text(workflow_execution_surface);
+    let sanitized_workflow_worktree_id = sanitize_terminal_text(workflow_worktree_id);
+    let sanitized_workflow_workspace_root = sanitize_terminal_text(workflow_workspace_root);
     let sanitized_lineage_root_session_id = sanitize_terminal_text(lineage_root_session_id);
     let sanitized_last_error = sanitize_terminal_text(last_error);
 
@@ -997,6 +1023,18 @@ fn render_session_inspection_lines(detail: &Value) -> CliResult<Vec<String>> {
     ));
     lines.push(format!(
         "workflow_task_session_id: {sanitized_workflow_task_session_id}"
+    ));
+    lines.push(format!(
+        "workflow_binding_mode: {sanitized_workflow_binding_mode}"
+    ));
+    lines.push(format!(
+        "workflow_execution_surface: {sanitized_workflow_execution_surface}"
+    ));
+    lines.push(format!(
+        "workflow_worktree_id: {sanitized_workflow_worktree_id}"
+    ));
+    lines.push(format!(
+        "workflow_workspace_root: {sanitized_workflow_workspace_root}"
     ));
     lines.push(format!("parent_session_id: {sanitized_parent_session_id}"));
     lines.push(format!("label: {sanitized_label}"));

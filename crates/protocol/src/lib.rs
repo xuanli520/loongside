@@ -33,6 +33,7 @@ pub use control_plane::{
     ControlPlaneSessionEvent, ControlPlaneSessionKind, ControlPlaneSessionListResponse,
     ControlPlaneSessionObservation, ControlPlaneSessionReadResponse, ControlPlaneSessionState,
     ControlPlaneSessionSummary, ControlPlaneSessionTerminalOutcome, ControlPlaneSessionWorkflow,
+    ControlPlaneSessionWorkflowBinding, ControlPlaneSessionWorkflowBindingWorktree,
     ControlPlaneSessionWorkflowContinuity, ControlPlaneSnapshot, ControlPlaneSnapshotResponse,
     ControlPlaneStateVersion, ControlPlaneTaskListResponse, ControlPlaneTaskReadResponse,
     ControlPlaneTaskSummary, ControlPlaneTurnEventEnvelope, ControlPlaneTurnResultResponse,

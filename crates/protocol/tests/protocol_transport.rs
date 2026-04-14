@@ -665,6 +665,16 @@ fn control_plane_session_read_response_roundtrips_through_json() {
                         resolved_identity_present: true,
                         session_profile_projection_present: false,
                     }),
+                    binding: Some(ControlPlaneSessionWorkflowBinding {
+                        session_id: "child-session".to_owned(),
+                        task_id: "child-session".to_owned(),
+                        mode: "advisory_only".to_owned(),
+                        execution_surface: "delegate.async".to_owned(),
+                        worktree: Some(ControlPlaneSessionWorkflowBindingWorktree {
+                            worktree_id: "child-session".to_owned(),
+                            workspace_root: "/tmp/loongclaw/control-plane/child-session".to_owned(),
+                        }),
+                    }),
                 },
             },
             terminal_outcome: Some(ControlPlaneSessionTerminalOutcome {
@@ -720,6 +730,16 @@ fn control_plane_task_read_response_roundtrips_through_json() {
                     present: true,
                     resolved_identity_present: true,
                     session_profile_projection_present: false,
+                }),
+                binding: Some(ControlPlaneSessionWorkflowBinding {
+                    session_id: "child-session".to_owned(),
+                    task_id: "child-session".to_owned(),
+                    mode: "advisory_only".to_owned(),
+                    execution_surface: "delegate.async".to_owned(),
+                    worktree: Some(ControlPlaneSessionWorkflowBindingWorktree {
+                        worktree_id: "child-session".to_owned(),
+                        workspace_root: "/tmp/loongclaw/control-plane/child-session".to_owned(),
+                    }),
                 }),
             },
             approval_request_count: 1,

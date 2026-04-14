@@ -30,7 +30,7 @@ use crate::session::repository::{
 };
 #[cfg(feature = "memory-sqlite")]
 use crate::tools::session::{
-    SessionRuntimeSelfContinuityRecord, SessionWorkflowRecord,
+    SessionRuntimeSelfContinuityRecord, SessionWorkflowBindingRecord, SessionWorkflowRecord,
     build_session_tool_policy_status_payload, load_session_workflow_record,
     session_delegate_lifecycle_at,
 };
@@ -1509,6 +1509,23 @@ pub struct ControlPlaneSessionWorkflowContinuityView {
 
 #[cfg(feature = "memory-sqlite")]
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlPlaneSessionWorkflowBindingWorktreeView {
+    pub worktree_id: String,
+    pub workspace_root: String,
+}
+
+#[cfg(feature = "memory-sqlite")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlPlaneSessionWorkflowBindingView {
+    pub session_id: String,
+    pub task_id: String,
+    pub mode: String,
+    pub execution_surface: String,
+    pub worktree: Option<ControlPlaneSessionWorkflowBindingWorktreeView>,
+}
+
+#[cfg(feature = "memory-sqlite")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlPlaneSessionWorkflowView {
     pub workflow_id: String,
     pub task: Option<String>,
@@ -1519,6 +1536,7 @@ pub struct ControlPlaneSessionWorkflowView {
     pub lineage_root_session_id: Option<String>,
     pub lineage_depth: Option<usize>,
     pub runtime_self_continuity: Option<ControlPlaneSessionWorkflowContinuityView>,
+    pub binding: Option<ControlPlaneSessionWorkflowBindingView>,
 }
 
 #[cfg(feature = "memory-sqlite")]
@@ -1951,6 +1969,9 @@ fn control_plane_session_workflow_view(
     let runtime_self_continuity = workflow
         .runtime_self_continuity
         .map(control_plane_session_workflow_continuity_view);
+    let binding = workflow
+        .binding
+        .map(control_plane_session_workflow_binding_view);
 
     ControlPlaneSessionWorkflowView {
         workflow_id: workflow.workflow_id,
@@ -1962,6 +1983,28 @@ fn control_plane_session_workflow_view(
         lineage_root_session_id: workflow.lineage_root_session_id,
         lineage_depth: workflow.lineage_depth,
         runtime_self_continuity,
+        binding,
+    }
+}
+
+#[cfg(feature = "memory-sqlite")]
+fn control_plane_session_workflow_binding_view(
+    binding: SessionWorkflowBindingRecord,
+) -> ControlPlaneSessionWorkflowBindingView {
+    let worktree =
+        binding
+            .worktree
+            .map(|worktree| ControlPlaneSessionWorkflowBindingWorktreeView {
+                worktree_id: worktree.worktree_id,
+                workspace_root: worktree.workspace_root,
+            });
+
+    ControlPlaneSessionWorkflowBindingView {
+        session_id: binding.session_id,
+        task_id: binding.task_id,
+        mode: binding.mode.as_str().to_owned(),
+        execution_surface: binding.execution_surface,
+        worktree,
     }
 }
 
@@ -2987,6 +3030,7 @@ mod tests {
                     "timeout_seconds": 90,
                     "allow_shell_in_child": false,
                     "child_tool_allowlist": ["file.read"],
+                    "workspace_root": "/tmp/loongclaw/control-plane/child-session",
                     "kernel_bound": false,
                     "runtime_narrowing": {}
                 }
@@ -3167,6 +3211,15 @@ mod tests {
             Some("research control plane parity")
         );
         assert_eq!(child.workflow.phase.as_deref(), Some("execute"));
+        assert_eq!(
+            child
+                .workflow
+                .binding
+                .as_ref()
+                .expect("workflow binding")
+                .mode,
+            "advisory_only"
+        );
         assert!(
             !sessions
                 .sessions
@@ -3192,6 +3245,16 @@ mod tests {
         assert_eq!(
             observation.session.workflow.phase.as_deref(),
             Some("execute")
+        );
+        assert_eq!(
+            observation
+                .session
+                .workflow
+                .binding
+                .as_ref()
+                .expect("workflow binding")
+                .execution_surface,
+            "delegate.async"
         );
         assert_eq!(observation.recent_events.len(), 1);
         assert_eq!(observation.recent_events[0].event_kind, "delegate_started");
@@ -3230,6 +3293,10 @@ mod tests {
             Some("research control plane parity")
         );
         assert_eq!(task.workflow.phase.as_deref(), Some("execute"));
+        let binding = task.workflow.binding.as_ref().expect("workflow binding");
+        assert_eq!(binding.session_id, "child-session");
+        assert_eq!(binding.task_id, "child-session");
+        assert_eq!(binding.mode, "advisory_only");
         assert_eq!(task.delegate_mode.as_deref(), Some("async"));
         assert_eq!(task.delegate_phase.as_deref(), Some("running"));
         assert_eq!(task.approval_request_count, 1);
@@ -3248,6 +3315,17 @@ mod tests {
 
         assert_eq!(task.task_id, "child-session");
         assert_eq!(task.workflow.workflow_id, "root-session");
+        assert_eq!(
+            task.workflow
+                .binding
+                .as_ref()
+                .expect("workflow binding")
+                .worktree
+                .as_ref()
+                .expect("worktree binding")
+                .workspace_root,
+            "/tmp/loongclaw/control-plane/child-session"
+        );
         assert_eq!(task.delegate_mode.as_deref(), Some("async"));
         assert_eq!(task.session_state, "running");
         assert_eq!(task.approval_request_count, 1);

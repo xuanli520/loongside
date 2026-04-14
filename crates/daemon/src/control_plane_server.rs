@@ -34,6 +34,7 @@ use loongclaw_protocol::{
     ControlPlaneSessionKind, ControlPlaneSessionListResponse, ControlPlaneSessionObservation,
     ControlPlaneSessionReadResponse, ControlPlaneSessionState, ControlPlaneSessionSummary,
     ControlPlaneSessionTerminalOutcome, ControlPlaneSessionWorkflow,
+    ControlPlaneSessionWorkflowBinding, ControlPlaneSessionWorkflowBindingWorktree,
     ControlPlaneSessionWorkflowContinuity, ControlPlaneSnapshot, ControlPlaneSnapshotResponse,
     ControlPlaneStateVersion, ControlPlaneTaskListResponse, ControlPlaneTaskReadResponse,
     ControlPlaneTaskSummary, ControlPlaneTurnEventEnvelope, ControlPlaneTurnResultResponse,
@@ -503,6 +504,7 @@ fn map_session_workflow(
     let runtime_self_continuity = workflow
         .runtime_self_continuity
         .map(map_session_workflow_continuity);
+    let binding = workflow.binding.map(map_session_workflow_binding);
 
     ControlPlaneSessionWorkflow {
         workflow_id: workflow.workflow_id,
@@ -514,6 +516,27 @@ fn map_session_workflow(
         lineage_root_session_id: workflow.lineage_root_session_id,
         lineage_depth: workflow.lineage_depth,
         runtime_self_continuity,
+        binding,
+    }
+}
+
+#[cfg(feature = "memory-sqlite")]
+fn map_session_workflow_binding(
+    binding: mvp::control_plane::ControlPlaneSessionWorkflowBindingView,
+) -> ControlPlaneSessionWorkflowBinding {
+    let worktree = binding
+        .worktree
+        .map(|worktree| ControlPlaneSessionWorkflowBindingWorktree {
+            worktree_id: worktree.worktree_id,
+            workspace_root: worktree.workspace_root,
+        });
+
+    ControlPlaneSessionWorkflowBinding {
+        session_id: binding.session_id,
+        task_id: binding.task_id,
+        mode: binding.mode,
+        execution_surface: binding.execution_surface,
+        worktree,
     }
 }
 
@@ -3162,6 +3185,7 @@ mod tests {
                     "timeout_seconds": 90,
                     "allow_shell_in_child": false,
                     "child_tool_allowlist": ["file.read"],
+                    "workspace_root": "/tmp/loongclaw/control-plane/child-session",
                     "kernel_bound": false,
                     "runtime_narrowing": {}
                 }
@@ -4559,6 +4583,15 @@ mod tests {
             Some("research control plane parity")
         );
         assert_eq!(child.workflow.phase.as_deref(), Some("execute"));
+        assert_eq!(
+            child
+                .workflow
+                .binding
+                .as_ref()
+                .expect("workflow binding")
+                .mode,
+            "advisory_only"
+        );
         assert!(
             !sessions
                 .sessions
@@ -4609,6 +4642,17 @@ mod tests {
             session.observation.session.workflow.phase.as_deref(),
             Some("execute")
         );
+        assert_eq!(
+            session
+                .observation
+                .session
+                .workflow
+                .binding
+                .as_ref()
+                .expect("workflow binding")
+                .execution_surface,
+            "delegate.async"
+        );
         assert_eq!(session.observation.recent_events.len(), 1);
         assert_eq!(
             session.observation.recent_events[0].event_kind,
@@ -4651,6 +4695,14 @@ mod tests {
             Some("research control plane parity")
         );
         assert_eq!(task.workflow.phase.as_deref(), Some("execute"));
+        assert_eq!(
+            task.workflow
+                .binding
+                .as_ref()
+                .expect("workflow binding")
+                .task_id,
+            "child-session"
+        );
         assert_eq!(task.delegate_mode.as_deref(), Some("async"));
     }
 
@@ -4685,6 +4737,18 @@ mod tests {
         assert_eq!(task.current_session_id, "root-session");
         assert_eq!(task.task.task_id, "child-session");
         assert_eq!(task.task.workflow.workflow_id, "root-session");
+        assert_eq!(
+            task.task
+                .workflow
+                .binding
+                .as_ref()
+                .expect("workflow binding")
+                .worktree
+                .as_ref()
+                .expect("worktree binding")
+                .worktree_id,
+            "child-session"
+        );
         assert_eq!(task.task.delegate_phase.as_deref(), Some("running"));
         assert_eq!(task.task.approval_request_count, 1);
     }

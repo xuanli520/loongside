@@ -390,6 +390,22 @@ pub struct ControlPlaneSessionWorkflowContinuity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlPlaneSessionWorkflowBindingWorktree {
+    pub worktree_id: String,
+    pub workspace_root: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlPlaneSessionWorkflowBinding {
+    pub session_id: String,
+    pub task_id: String,
+    pub mode: String,
+    pub execution_surface: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<ControlPlaneSessionWorkflowBindingWorktree>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlPlaneSessionWorkflow {
     pub workflow_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -408,6 +424,8 @@ pub struct ControlPlaneSessionWorkflow {
     pub lineage_depth: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_self_continuity: Option<ControlPlaneSessionWorkflowContinuity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<ControlPlaneSessionWorkflowBinding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
