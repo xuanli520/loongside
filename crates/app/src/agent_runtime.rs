@@ -35,6 +35,7 @@ pub struct AgentTurnRequest {
     pub channel_id: Option<String>,
     pub account_id: Option<String>,
     pub conversation_id: Option<String>,
+    pub participant_id: Option<String>,
     pub thread_id: Option<String>,
     pub metadata: BTreeMap<String, String>,
     pub acp: bool,
@@ -531,6 +532,9 @@ fn resolved_session_address(
     }
     if let Some(account_id) = request.account_id.as_deref() {
         address = address.with_account_id(account_id);
+    }
+    if let Some(participant_id) = request.participant_id.as_deref() {
+        address = address.with_participant_id(participant_id);
     }
     if let Some(thread_id) = request.thread_id.as_deref() {
         address = address.with_thread_id(thread_id);

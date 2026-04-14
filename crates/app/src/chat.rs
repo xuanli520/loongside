@@ -908,6 +908,7 @@ async fn process_cli_chat_input(
                 channel_id: runtime.session_address.channel_id.clone(),
                 account_id: runtime.session_address.account_id.clone(),
                 conversation_id: runtime.session_address.conversation_id.clone(),
+                participant_id: runtime.session_address.participant_id.clone(),
                 thread_id: runtime.session_address.thread_id.clone(),
                 metadata: BTreeMap::new(),
                 acp: runtime.explicit_acp_request,

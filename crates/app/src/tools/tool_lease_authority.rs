@@ -207,6 +207,18 @@ fn tool_lease_secret() -> Result<String, String> {
         return Ok(cached_secret);
     }
 
+    let load_lock = tool_lease_secret_load_lock();
+    let lock = load_lock.lock();
+    let _lock = match lock {
+        Ok(lock) => lock,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    let cached_secret = cached_tool_lease_secret(secret_path.as_path());
+    if let Some(cached_secret) = cached_secret {
+        return Ok(cached_secret);
+    }
+
     let loaded_secret = load_or_create_tool_lease_secret(secret_path.as_path())?;
     cache_tool_lease_secret(secret_path, loaded_secret.clone());
     Ok(loaded_secret)
@@ -394,6 +406,11 @@ fn cache_tool_lease_secret(secret_path: PathBuf, secret: String) {
 fn tool_lease_secret_cache() -> &'static Mutex<HashMap<PathBuf, String>> {
     static TOOL_LEASE_SECRET_CACHE: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
     TOOL_LEASE_SECRET_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn tool_lease_secret_load_lock() -> &'static Mutex<()> {
+    static TOOL_LEASE_SECRET_LOAD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    TOOL_LEASE_SECRET_LOAD_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 fn now_unix_seconds() -> u64 {
