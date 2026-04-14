@@ -5,12 +5,28 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 . "$REPO_ROOT/scripts/architecture_budget_lib.sh"
 
-REPORT_MONTH="${LOONG_ARCH_REPORT_MONTH:-$(date +%Y-%m)}"
+REPORT_MONTH="${LOONG_ARCH_REPORT_MONTH:-${LOONGCLAW_ARCH_REPORT_MONTH:-$(date +%Y-%m)}}"
 OUTPUT_PATH="${1:-docs/releases/support/architecture-drift-${REPORT_MONTH}.md}"
-LINK_REFERENCE_PATH="${LOONG_ARCH_REPORT_LINK_PATH:-$OUTPUT_PATH}"
-EXPLICIT_BASELINE="${LOONG_ARCH_DRIFT_BASELINE_REPORT:-}"
-EXPLICIT_BASELINE_DIR="${LOONG_ARCH_DRIFT_BASELINE_DIR:-}"
+EXPLICIT_BASELINE="${LOONG_ARCH_DRIFT_BASELINE_REPORT:-${LOONGCLAW_ARCH_DRIFT_BASELINE_REPORT:-}}"
+EXPLICIT_BASELINE_DIR="${LOONG_ARCH_DRIFT_BASELINE_DIR:-${LOONGCLAW_ARCH_DRIFT_BASELINE_DIR:-}}"
 GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+derive_link_reference_path() {
+  python3 - "$OUTPUT_PATH" <<'PY'
+import sys
+from pathlib import PurePosixPath
+
+output_path = sys.argv[1].replace("\\", "/")
+marker = "docs/releases/"
+index = output_path.find(marker)
+if index >= 0:
+    print(output_path[index:])
+else:
+    print(PurePosixPath(output_path).as_posix())
+PY
+}
+
+LINK_REFERENCE_PATH="${LOONG_ARCH_REPORT_LINK_PATH:-$(derive_link_reference_path)}"
 LINK_REFERENCE_DIR="$(dirname "$LINK_REFERENCE_PATH")"
 
 relative_link_from_output_dir() {
@@ -19,10 +35,10 @@ relative_link_from_output_dir() {
 import os
 import sys
 
-output_dir = sys.argv[1]
-target_path = sys.argv[2]
+output_dir = sys.argv[1].replace("\\", "/")
+target_path = sys.argv[2].replace("\\", "/")
 
-print(os.path.relpath(target_path, start=output_dir))
+print(os.path.relpath(target_path, start=output_dir).replace("\\", "/"))
 PY
 }
 
