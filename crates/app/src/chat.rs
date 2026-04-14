@@ -68,7 +68,7 @@ use self::operator_surfaces::render_cli_chat_status_lines_with_width;
 use self::operator_surfaces::render_manual_compaction_lines_with_width;
 use self::operator_surfaces::should_run_missing_config_onboard;
 
-use super::config::{self, ConversationConfig, LoongClawConfig};
+use super::config::{self, ConversationConfig, LoongConfig};
 #[cfg(test)]
 use super::conversation::ContextCompactionReport;
 #[cfg(test)]
@@ -112,7 +112,8 @@ use crate::tools::runtime_events::{ToolCommandMetrics, ToolFileChangePreview, To
 use crate::tools::runtime_events::{ToolFileChangeKind, ToolRuntimeEvent, ToolRuntimeStream};
 
 pub const DEFAULT_FIRST_PROMPT: &str = "Summarize this repository and suggest the best next step.";
-const TEST_ONBOARD_EXECUTABLE_ENV: &str = "LOONGCLAW_TEST_ONBOARD_EXECUTABLE";
+const TEST_ONBOARD_EXECUTABLE_ENV: &str = "LOONG_TEST_ONBOARD_EXECUTABLE";
+const LEGACY_TEST_ONBOARD_EXECUTABLE_ENV: &str = "LOONGCLAW_TEST_ONBOARD_EXECUTABLE";
 const CLI_CHAT_HELP_COMMAND: &str = "/help";
 const CLI_CHAT_COMPACT_COMMAND: &str = "/compact";
 const CLI_CHAT_STATUS_COMMAND: &str = "/status";
@@ -132,7 +133,7 @@ pub struct CliChatOptions {
 #[derive(Debug, Clone)]
 pub struct ConcurrentCliHostOptions {
     pub resolved_path: PathBuf,
-    pub config: LoongClawConfig,
+    pub config: LoongConfig,
     pub session_id: String,
     pub shutdown: ConcurrentCliShutdown,
     pub initialize_runtime_environment: bool,
@@ -207,6 +208,7 @@ fn append_onboard_target_args(
 fn resolve_onboard_executable_path() -> CliResult<PathBuf> {
     if cfg!(debug_assertions)
         && let Some(executable_path) = std::env::var_os(TEST_ONBOARD_EXECUTABLE_ENV)
+            .or_else(|| std::env::var_os(LEGACY_TEST_ONBOARD_EXECUTABLE_ENV))
     {
         return Ok(PathBuf::from(executable_path));
     }
@@ -249,7 +251,7 @@ fn format_onboard_command_hint(config_path: Option<&str>, resolved_config_path: 
 
 pub(crate) struct CliTurnRuntime {
     pub(crate) resolved_path: PathBuf,
-    pub(crate) config: LoongClawConfig,
+    pub(crate) config: LoongConfig,
     pub(crate) session_id: String,
     pub(crate) session_address: ConversationSessionAddress,
     pub(crate) turn_coordinator: ConversationTurnCoordinator,
@@ -453,7 +455,7 @@ fn run_concurrent_cli_host_repl(options: &ConcurrentCliHostOptions) -> CliResult
     })
 }
 
-pub(crate) fn reject_disabled_cli_channel(config: &LoongClawConfig) -> CliResult<()> {
+pub(crate) fn reject_disabled_cli_channel(config: &LoongConfig) -> CliResult<()> {
     if config.cli.enabled {
         return Ok(());
     }
@@ -516,7 +518,7 @@ pub(crate) fn initialize_cli_turn_runtime(
 /// token for the same logical operation.
 pub(crate) fn initialize_cli_turn_runtime_with_loaded_config(
     resolved_path: PathBuf,
-    config: LoongClawConfig,
+    config: LoongConfig,
     session_hint: Option<&str>,
     options: &CliChatOptions,
     kernel_scope: &'static str,
@@ -560,7 +562,7 @@ pub(crate) fn initialize_cli_turn_runtime_with_loaded_config(
 /// by an outer runtime surface.
 pub(crate) fn initialize_cli_turn_runtime_with_loaded_config_and_kernel_ctx(
     resolved_path: PathBuf,
-    config: LoongClawConfig,
+    config: LoongConfig,
     session_hint: Option<&str>,
     options: &CliChatOptions,
     kernel_ctx: crate::KernelContext,
@@ -1637,17 +1639,14 @@ pub(crate) async fn run_cli_turn_with_address_and_ingress_and_error_mode_outcome
     }
 }
 
-fn reload_cli_turn_config(
-    config: &LoongClawConfig,
-    resolved_path: &Path,
-) -> CliResult<LoongClawConfig> {
+fn reload_cli_turn_config(config: &LoongConfig, resolved_path: &Path) -> CliResult<LoongConfig> {
     if resolved_path.as_os_str().is_empty() {
         return Ok(config.clone());
     }
     config.reload_provider_runtime_state_from_path(resolved_path)
 }
 
-fn is_exit_command(config: &LoongClawConfig, input: &str) -> bool {
+fn is_exit_command(config: &LoongConfig, input: &str) -> bool {
     let lower = input.to_ascii_lowercase();
     config
         .cli
@@ -1735,7 +1734,7 @@ async fn print_safe_lane_summary(
 #[allow(clippy::print_stdout)] // CLI output
 async fn print_turn_checkpoint_summary(
     turn_coordinator: &ConversationTurnCoordinator,
-    config: &LoongClawConfig,
+    config: &LoongConfig,
     session_id: &str,
     limit: usize,
     binding: ConversationRuntimeBinding<'_>,
@@ -1778,7 +1777,7 @@ async fn print_turn_checkpoint_summary(
 #[allow(clippy::print_stdout)] // CLI output
 async fn print_turn_checkpoint_repair(
     turn_coordinator: &ConversationTurnCoordinator,
-    config: &LoongClawConfig,
+    config: &LoongConfig,
     session_id: &str,
     binding: ConversationRuntimeBinding<'_>,
 ) -> CliResult<()> {
@@ -2667,7 +2666,7 @@ fn build_turn_checkpoint_summary_message_spec(
 #[cfg(test)]
 async fn load_turn_checkpoint_summary_output(
     turn_coordinator: &ConversationTurnCoordinator,
-    config: &LoongClawConfig,
+    config: &LoongConfig,
     session_id: &str,
     limit: usize,
     binding: ConversationRuntimeBinding<'_>,
@@ -3491,6 +3490,7 @@ fn format_average(sum: u64, samples: u32) -> String {
 mod tests {
     use super::*;
     use crate::conversation::ConversationRuntimeBinding;
+    use crate::test_support::ScopedEnv;
     use serde_json::json;
     use std::ffi::OsStr;
     use std::path::PathBuf;
@@ -3514,8 +3514,8 @@ mod tests {
     use serde_json::Value;
 
     #[cfg(feature = "memory-sqlite")]
-    fn test_config() -> LoongClawConfig {
-        let mut config = LoongClawConfig::default();
+    fn test_config() -> LoongConfig {
+        let mut config = LoongConfig::default();
         config.provider = crate::config::ProviderConfig::default();
         config.audit.mode = crate::config::AuditMode::InMemory;
         config
@@ -3613,6 +3613,33 @@ mod tests {
     }
 
     #[test]
+    fn build_onboard_command_prefers_loong_test_override() {
+        let mut env = ScopedEnv::new();
+        env.remove(TEST_ONBOARD_EXECUTABLE_ENV);
+        env.remove(LEGACY_TEST_ONBOARD_EXECUTABLE_ENV);
+        env.set(TEST_ONBOARD_EXECUTABLE_ENV, "/tmp/loong-onboard");
+        env.set(LEGACY_TEST_ONBOARD_EXECUTABLE_ENV, "/tmp/legacy-onboard");
+
+        let command =
+            build_onboard_command(None, Path::new("/tmp/loongclaw.toml")).expect("onboard command");
+
+        assert_eq!(command.get_program(), OsStr::new("/tmp/loong-onboard"));
+    }
+
+    #[test]
+    fn build_onboard_command_falls_back_to_legacy_override() {
+        let mut env = ScopedEnv::new();
+        env.remove(TEST_ONBOARD_EXECUTABLE_ENV);
+        env.remove(LEGACY_TEST_ONBOARD_EXECUTABLE_ENV);
+        env.set(LEGACY_TEST_ONBOARD_EXECUTABLE_ENV, "/tmp/legacy-onboard");
+
+        let command =
+            build_onboard_command(None, Path::new("/tmp/loongclaw.toml")).expect("onboard command");
+
+        assert_eq!(command.get_program(), OsStr::new("/tmp/legacy-onboard"));
+    }
+
+    #[test]
     fn build_onboard_command_forwards_explicit_config_path_to_output() {
         let command = build_onboard_command_for_executable(
             PathBuf::from("/tmp/loongclaw"),
@@ -3662,11 +3689,11 @@ mod tests {
     #[cfg(feature = "memory-sqlite")]
     pub(super) fn init_chat_test_memory(
         label: &str,
-    ) -> (LoongClawConfig, MemoryRuntimeConfig, PathBuf) {
+    ) -> (LoongConfig, MemoryRuntimeConfig, PathBuf) {
         let sqlite_path = unique_chat_sqlite_path(label);
         cleanup_chat_test_memory(&sqlite_path);
 
-        let mut config = LoongClawConfig::default();
+        let mut config = LoongConfig::default();
         config.audit.mode = crate::config::AuditMode::InMemory;
         config.memory.sqlite_path = sqlite_path.display().to_string();
         let memory_config = MemoryRuntimeConfig::from_memory_config(&config.memory);
@@ -3985,7 +4012,7 @@ mod tests {
         let shutdown = ConcurrentCliShutdown::new();
         let error = run_concurrent_cli_host(&ConcurrentCliHostOptions {
             resolved_path: PathBuf::from("/tmp/loongclaw.toml"),
-            config: LoongClawConfig::default(),
+            config: LoongConfig::default(),
             session_id: "   ".to_owned(),
             shutdown,
             initialize_runtime_environment: false,
@@ -5752,7 +5779,7 @@ allowed_decisions: yes / auto / full / esc";
         ));
         let path_string = path.display().to_string();
 
-        let mut in_memory = LoongClawConfig::default();
+        let mut in_memory = LoongConfig::default();
         in_memory.cli.exit_commands = vec!["/bye".to_owned()];
         let mut openai =
             crate::config::ProviderConfig::fresh_for_kind(crate::config::ProviderKind::Openai);

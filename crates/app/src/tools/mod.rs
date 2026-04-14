@@ -685,11 +685,15 @@ pub fn is_provider_exposed_tool_name(raw: &str) -> bool {
         .is_some_and(|entry| entry.is_provider_core())
 }
 
+pub fn runtime_tool_view_from_loong_config(config: &crate::config::LoongConfig) -> ToolView {
+    let runtime_config = runtime_config::ToolRuntimeConfig::from_loong_config(config, None);
+    runtime_tool_view_with_runtime_config(&config.tools, &runtime_config)
+}
+
 pub fn runtime_tool_view_from_loongclaw_config(
     config: &crate::config::LoongClawConfig,
 ) -> ToolView {
-    let runtime_config = runtime_config::ToolRuntimeConfig::from_loong_config(config, None);
-    runtime_tool_view_with_runtime_config(&config.tools, &runtime_config)
+    runtime_tool_view_from_loong_config(config)
 }
 
 pub(crate) fn runtime_tool_view_with_runtime_config(

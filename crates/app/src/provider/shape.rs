@@ -989,6 +989,9 @@ fn attach_provider_parse_telemetry(
     tool_count: usize,
     error_code: Option<&str>,
 ) {
+    const PROVIDER_PARSE_META_KEY: &str = "loong_provider_parse";
+    const LEGACY_PROVIDER_PARSE_META_KEY: &str = "loongclaw_provider_parse";
+
     let Some(message) = raw_meta.as_object_mut() else {
         return;
     };
@@ -1003,13 +1006,15 @@ fn attach_provider_parse_telemetry(
         );
     }
 
-    let provider_parse = message
-        .entry("loongclaw_provider_parse".to_owned())
-        .or_insert_with(|| Value::Object(serde_json::Map::new()));
-    let Some(provider_parse) = provider_parse.as_object_mut() else {
-        return;
-    };
-    provider_parse.insert(key.to_owned(), Value::Object(entry));
+    for parse_key in [PROVIDER_PARSE_META_KEY, LEGACY_PROVIDER_PARSE_META_KEY] {
+        let provider_parse = message
+            .entry(parse_key.to_owned())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        let Some(provider_parse) = provider_parse.as_object_mut() else {
+            continue;
+        };
+        provider_parse.insert(key.to_owned(), Value::Object(entry.clone()));
+    }
 }
 
 fn extract_json_tool_call_turn(
@@ -2962,12 +2967,16 @@ mod tests {
             "lease-shell-inline"
         );
         assert_eq!(
-            turn.raw_meta["loongclaw_provider_parse"]["inline_function"]["status"],
+            turn.raw_meta["loong_provider_parse"]["inline_function"]["status"],
             "parsed"
         );
         assert_eq!(
-            turn.raw_meta["loongclaw_provider_parse"]["inline_function"]["tool_count"],
+            turn.raw_meta["loong_provider_parse"]["inline_function"]["tool_count"],
             1
+        );
+        assert_eq!(
+            turn.raw_meta["loongclaw_provider_parse"]["inline_function"]["status"],
+            "parsed"
         );
     }
 
@@ -3030,12 +3039,16 @@ mod tests {
             })
         );
         assert_eq!(
-            turn.raw_meta["loongclaw_provider_parse"]["json_tool_block"]["status"],
+            turn.raw_meta["loong_provider_parse"]["json_tool_block"]["status"],
             "parsed"
         );
         assert_eq!(
-            turn.raw_meta["loongclaw_provider_parse"]["json_tool_block"]["tool_count"],
+            turn.raw_meta["loong_provider_parse"]["json_tool_block"]["tool_count"],
             1
+        );
+        assert_eq!(
+            turn.raw_meta["loongclaw_provider_parse"]["json_tool_block"]["status"],
+            "parsed"
         );
     }
 
@@ -3139,6 +3152,10 @@ mod tests {
                 "query": "read note.md",
                 "limit": 3
             })
+        );
+        assert_eq!(
+            turn.raw_meta["loong_provider_parse"]["invoke_block"]["status"],
+            "parsed"
         );
         assert_eq!(
             turn.raw_meta["loongclaw_provider_parse"]["invoke_block"]["status"],
@@ -3318,12 +3335,16 @@ mod tests {
             "let me search for the right tool first.\n{\n  \"name\": \"tool_search\",\n  \"arguments\": \"{bad\"\n}"
         );
         assert_eq!(
-            turn.raw_meta["loongclaw_provider_parse"]["json_tool_block"]["status"],
+            turn.raw_meta["loong_provider_parse"]["json_tool_block"]["status"],
             "malformed"
         );
         assert_eq!(
-            turn.raw_meta["loongclaw_provider_parse"]["json_tool_block"]["error_code"],
+            turn.raw_meta["loong_provider_parse"]["json_tool_block"]["error_code"],
             "invalid_json"
+        );
+        assert_eq!(
+            turn.raw_meta["loongclaw_provider_parse"]["json_tool_block"]["status"],
+            "malformed"
         );
     }
 
@@ -3548,12 +3569,16 @@ mod tests {
         );
         assert!(turn.tool_intents.is_empty());
         assert_eq!(
-            turn.raw_meta["loongclaw_provider_parse"]["inline_function"]["status"],
+            turn.raw_meta["loong_provider_parse"]["inline_function"]["status"],
             "malformed"
         );
         assert_eq!(
-            turn.raw_meta["loongclaw_provider_parse"]["inline_function"]["error_code"],
+            turn.raw_meta["loong_provider_parse"]["inline_function"]["error_code"],
             "missing_function_close"
+        );
+        assert_eq!(
+            turn.raw_meta["loongclaw_provider_parse"]["inline_function"]["status"],
+            "malformed"
         );
     }
 
