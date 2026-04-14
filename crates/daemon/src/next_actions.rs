@@ -94,6 +94,8 @@ pub(crate) fn collect_setup_next_actions_with_path_env(
             build_outbound_channel_doctor_action(config_path, &blocked_outbound_surfaces);
         actions.push(doctor_action);
     }
+    let channel_actions =
+        normalize_channel_actions_for_outbound_doctor(channel_actions, &blocked_outbound_surfaces);
     let channel_setup_actions = channel_actions
         .into_iter()
         .map(channel_next_action_to_setup_action);
@@ -322,6 +324,67 @@ fn channel_next_action_to_setup_action(
         label: action.label.to_owned(),
         command: action.command,
     }
+}
+
+fn normalize_channel_actions_for_outbound_doctor(
+    channel_actions: Vec<crate::migration::channels::ChannelNextAction>,
+    blocked_outbound_surface_ids: &[&'static str],
+) -> Vec<crate::migration::channels::ChannelNextAction> {
+    channel_actions
+        .into_iter()
+        .map(|action| {
+            normalize_channel_action_for_outbound_doctor(action, blocked_outbound_surface_ids)
+        })
+        .collect()
+}
+
+fn normalize_channel_action_for_outbound_doctor(
+    mut action: crate::migration::channels::ChannelNextAction,
+    blocked_outbound_surface_ids: &[&'static str],
+) -> crate::migration::channels::ChannelNextAction {
+    let is_configured_channels_action =
+        action.id == crate::migration::channels::CONFIGURED_CHANNELS_ACTION_ID;
+
+    if !is_configured_channels_action {
+        return action;
+    }
+
+    let Some(normalized_label) =
+        normalized_outbound_follow_up_label(action.label, blocked_outbound_surface_ids)
+    else {
+        return action;
+    };
+
+    action.label = Box::leak(normalized_label.into_boxed_str());
+
+    action
+}
+
+fn normalized_outbound_follow_up_label(
+    current_label: &str,
+    blocked_outbound_surface_ids: &[&'static str],
+) -> Option<String> {
+    if blocked_outbound_surface_ids.is_empty() {
+        return None;
+    }
+
+    if current_label == "review configured outbound channels" {
+        return Some("inspect configured outbound channels".to_owned());
+    }
+
+    if blocked_outbound_surface_ids.len() == 1 {
+        let channel_id = blocked_outbound_surface_ids.first().copied()?;
+        let descriptor = mvp::config::channel_descriptor(channel_id)?;
+        let review_label = format!("review {} setup", descriptor.label);
+
+        if current_label == review_label {
+            return Some(format!("inspect {}", descriptor.label));
+        }
+
+        return None;
+    }
+
+    None
 }
 
 fn should_suggest_personalization(config: &mvp::config::LoongClawConfig) -> bool {
@@ -706,6 +769,73 @@ mod tests {
         assert_eq!(
             doctor_action.command,
             "loong doctor --config '/tmp/loongclaw.toml'"
+        );
+    }
+
+    #[test]
+    fn collect_setup_next_actions_keeps_outbound_follow_up_as_inspection_after_doctor_for_single_surface()
+     {
+        let mut config = mvp::config::LoongClawConfig::default();
+        config.discord.enabled = true;
+        config.discord.bot_token = None;
+        config.discord.bot_token_env = None;
+
+        let actions = collect_setup_next_actions_with_path_env(
+            &config,
+            "/tmp/loongclaw.toml",
+            Some(std::ffi::OsStr::new("")),
+        );
+        let labels = actions
+            .iter()
+            .map(|action| action.label.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(
+            labels.contains(&"verify Discord setup"),
+            "blocked outbound-only surfaces should still expose a doctor-first handoff: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"inspect Discord"),
+            "the secondary outbound-only handoff should be inspection rather than a duplicate review label: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"review Discord setup"),
+            "outbound-only follow-up actions should not duplicate the doctor wording: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn collect_setup_next_actions_keeps_outbound_group_follow_up_as_inspection_after_doctor() {
+        let mut config = mvp::config::LoongClawConfig::default();
+        config.discord.enabled = true;
+        config.discord.bot_token = Some(loongclaw_contracts::SecretRef::Inline(
+            "discord-token".to_owned(),
+        ));
+        config.slack.enabled = true;
+        config.slack.bot_token = None;
+        config.slack.bot_token_env = None;
+
+        let actions = collect_setup_next_actions_with_path_env(
+            &config,
+            "/tmp/loongclaw.toml",
+            Some(std::ffi::OsStr::new("")),
+        );
+        let labels = actions
+            .iter()
+            .map(|action| action.label.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(
+            labels.contains(&"verify Slack setup"),
+            "blocked outbound groups should still lead with the concrete doctor handoff: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"inspect configured outbound channels"),
+            "blocked outbound groups should keep channels as an inspection handoff: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"review configured outbound channels"),
+            "grouped outbound follow-up should not repeat review wording once doctor already owns repair guidance: {labels:?}"
         );
     }
 

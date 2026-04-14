@@ -8614,7 +8614,7 @@ fn onboarding_success_summary_uses_contextual_discord_review_handoff_when_outbou
         summary.next_actions[1].kind,
         loongclaw_daemon::onboard_cli::OnboardingActionKind::Channel
     );
-    assert_eq!(summary.next_actions[1].label, "review Discord setup");
+    assert_eq!(summary.next_actions[1].label, "inspect Discord");
     assert_eq!(
         summary.next_actions[1].command,
         "loong channels --config '/tmp/loongclaw-config.toml'"
@@ -8706,7 +8706,7 @@ fn onboarding_success_summary_uses_outbound_review_handoff_when_multiple_outboun
     );
     assert_eq!(
         summary.next_actions[1].label,
-        "review configured outbound channels"
+        "inspect configured outbound channels"
     );
     assert_eq!(
         summary.next_actions[1].command,
