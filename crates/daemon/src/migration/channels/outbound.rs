@@ -280,30 +280,7 @@ fn send_operation_detail(snapshot: &mvp::channel::ChannelStatusSnapshot) -> Stri
 }
 
 fn collect_reserved_runtime_fields(snapshot: &mvp::channel::ChannelStatusSnapshot) -> Vec<String> {
-    let mut fields = Vec::new();
-
-    for note in &snapshot.notes {
-        let Some(field) = parse_reserved_runtime_field(note) else {
-            continue;
-        };
-
-        fields.push(field);
-    }
-
-    fields
-}
-
-fn parse_reserved_runtime_field(note: &str) -> Option<String> {
-    let reserved_prefix = "reserved_runtime_field=";
-
-    let field = note.strip_prefix(reserved_prefix)?;
-    let trimmed_field = field.trim();
-
-    if trimmed_field.is_empty() {
-        return None;
-    }
-
-    Some(trimmed_field.to_owned())
+    snapshot.reserved_runtime_fields.clone()
 }
 
 fn account_status_detail(account_summaries: &[OutboundAccountSummary]) -> Option<String> {
@@ -373,5 +350,82 @@ fn channel_surface_name(channel_id: &'static str) -> &'static str {
     match descriptor {
         Some(descriptor) => descriptor.surface_label,
         None => channel_label(channel_id),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn send_operation(
+        health: mvp::channel::ChannelOperationHealth,
+    ) -> mvp::channel::ChannelOperationStatus {
+        mvp::channel::ChannelOperationStatus {
+            id: mvp::channel::CHANNEL_OPERATION_SEND_ID,
+            label: "direct send",
+            command: "discord-send",
+            health,
+            detail: "ready".to_owned(),
+            issues: Vec::new(),
+            runtime: None,
+        }
+    }
+
+    fn outbound_snapshot(
+        reserved_runtime_fields: Vec<String>,
+    ) -> mvp::channel::ChannelStatusSnapshot {
+        mvp::channel::ChannelStatusSnapshot {
+            id: "discord",
+            configured_account_id: "ops".to_owned(),
+            configured_account_label: "ops".to_owned(),
+            is_default_account: true,
+            default_account_source:
+                mvp::config::ChannelDefaultAccountSelectionSource::ExplicitDefault,
+            label: "Discord",
+            aliases: vec!["discord-bot"],
+            transport: "discord_http_api",
+            compiled: true,
+            enabled: true,
+            api_base_url: Some("https://discord.com/api/v10".to_owned()),
+            notes: Vec::new(),
+            reserved_runtime_fields,
+            operations: vec![send_operation(mvp::channel::ChannelOperationHealth::Ready)],
+        }
+    }
+
+    #[test]
+    fn build_enabled_account_summary_reads_structured_reserved_runtime_fields() {
+        let snapshot = outbound_snapshot(vec![
+            "application_id".to_owned(),
+            "allowed_guild_ids:2".to_owned(),
+        ]);
+
+        let summary = build_enabled_account_summary(&snapshot);
+
+        assert_eq!(
+            summary.reserved_runtime_fields,
+            vec![
+                "application_id".to_owned(),
+                "allowed_guild_ids:2".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn reserved_runtime_fields_detail_uses_structured_fields_without_note_protocol() {
+        let snapshot = outbound_snapshot(vec![
+            "application_id".to_owned(),
+            "allowed_guild_ids:2".to_owned(),
+        ]);
+        let summary = build_enabled_account_summary(&snapshot);
+        let detail = reserved_runtime_fields_detail(&[summary]);
+
+        assert_eq!(
+            detail,
+            Some(
+                "reserved future runtime fields: ops [application_id, allowed_guild_ids:2]"
+                    .to_owned()
+            )
+        );
     }
 }

@@ -171,6 +171,8 @@ pub struct ChannelStatusSnapshot {
     pub enabled: bool,
     pub api_base_url: Option<String>,
     pub notes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reserved_runtime_fields: Vec<String>,
     pub operations: Vec<ChannelOperationStatus>,
 }
 
@@ -2695,6 +2697,7 @@ fn build_telegram_snapshot_for_account(
         enabled: resolved.enabled,
         api_base_url: Some(resolved.base_url),
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -3532,6 +3535,7 @@ fn build_dingtalk_snapshot_for_account(
             .and(webhook_url.as_deref())
             .and_then(super::http::redact_endpoint_status_url),
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -3598,10 +3602,16 @@ fn build_discord_snapshot_for_account(
         "default_account_source={}",
         default_account_source.as_str()
     ));
+    let mut reserved_runtime_fields = Vec::new();
     if resolved.application_id().is_some() {
+        reserved_runtime_fields.push("application_id".to_owned());
         notes.push("reserved_runtime_field=application_id".to_owned());
     }
     if !resolved.allowed_guild_ids.is_empty() {
+        reserved_runtime_fields.push(format!(
+            "allowed_guild_ids:{}",
+            resolved.allowed_guild_ids.len()
+        ));
         notes.push(format!(
             "reserved_runtime_field=allowed_guild_ids:{}",
             resolved.allowed_guild_ids.len()
@@ -3623,6 +3633,7 @@ fn build_discord_snapshot_for_account(
             .as_ref()
             .and_then(|_| super::http::redact_endpoint_status_url(resolved_api_base_url.as_str())),
         notes,
+        reserved_runtime_fields,
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -3705,6 +3716,7 @@ fn build_slack_snapshot_for_account(
             .as_ref()
             .and_then(|_| super::http::redact_endpoint_status_url(resolved_api_base_url.as_str())),
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -3787,6 +3799,7 @@ fn build_line_snapshot_for_account(
             .as_ref()
             .and_then(|_| super::http::redact_endpoint_status_url(resolved_api_base_url.as_str())),
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -3907,6 +3920,7 @@ fn build_whatsapp_snapshot_for_account(
             .as_ref()
             .and_then(|_| super::http::redact_endpoint_status_url(resolved_api_base_url.as_str())),
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -4041,6 +4055,7 @@ fn build_email_snapshot_for_account(
         enabled: resolved.enabled,
         api_base_url,
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -4154,6 +4169,7 @@ fn build_webhook_snapshot_for_account(
             .and(endpoint_url.as_deref())
             .and_then(super::http::redact_generic_webhook_status_url),
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -4234,6 +4250,7 @@ fn build_google_chat_snapshot_for_account(
             .and(webhook_url.as_deref())
             .and_then(super::http::redact_endpoint_status_url),
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -4317,6 +4334,7 @@ fn build_mattermost_snapshot_for_account(
             .and(server_url.as_deref())
             .and_then(super::http::redact_endpoint_status_url),
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -4400,6 +4418,7 @@ fn build_nextcloud_talk_snapshot_for_account(
             .and(server_url.as_deref())
             .and_then(super::http::redact_endpoint_status_url),
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -4491,6 +4510,7 @@ fn build_synology_chat_snapshot_for_account(
             .and(incoming_url.as_deref())
             .and_then(super::http::redact_endpoint_status_url),
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -4577,6 +4597,7 @@ fn build_signal_snapshot_for_account(
             .and(service_url.as_deref())
             .and_then(super::http::redact_endpoint_status_url),
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -4669,6 +4690,7 @@ fn build_teams_snapshot_for_account(
             .and(webhook_url.as_deref())
             .and_then(super::http::redact_generic_webhook_status_url),
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -4756,6 +4778,7 @@ fn build_imessage_snapshot_for_account(
             .and(bridge_url.as_deref())
             .and_then(super::http::redact_endpoint_status_url),
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -4864,6 +4887,7 @@ fn build_irc_snapshot_for_account(
         enabled: resolved.enabled,
         api_base_url: summarize_irc_status_endpoint(server.as_deref()),
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -5015,6 +5039,7 @@ fn build_feishu_snapshot_for_account(
         enabled: resolved.enabled,
         api_base_url: Some(resolved.resolved_base_url()),
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -5147,6 +5172,7 @@ fn build_matrix_snapshot_for_account(
         enabled: resolved.enabled,
         api_base_url: resolved.resolved_base_url(),
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -5276,6 +5302,7 @@ fn build_wecom_snapshot_for_account(
         enabled: resolved.enabled,
         api_base_url: Some(websocket_url),
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -5330,6 +5357,7 @@ fn build_invalid_telegram_snapshot(
         enabled: false,
         api_base_url: None,
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -5384,6 +5412,7 @@ fn build_invalid_feishu_snapshot(
         enabled: false,
         api_base_url: None,
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -5438,6 +5467,7 @@ fn build_invalid_matrix_snapshot(
         enabled: false,
         api_base_url: None,
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -5492,6 +5522,7 @@ fn build_invalid_wecom_snapshot(
         enabled: false,
         api_base_url: None,
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -5549,6 +5580,7 @@ fn build_invalid_discord_snapshot(
         enabled: false,
         api_base_url: None,
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -5606,6 +5638,7 @@ fn build_invalid_slack_snapshot(
         enabled: false,
         api_base_url: None,
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -5663,6 +5696,7 @@ fn build_invalid_line_snapshot(
         enabled: false,
         api_base_url: None,
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -5720,6 +5754,7 @@ fn build_invalid_dingtalk_snapshot(
         enabled: false,
         api_base_url: None,
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -5774,6 +5809,7 @@ fn build_invalid_whatsapp_snapshot(
         enabled: false,
         api_base_url: None,
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -5831,6 +5867,7 @@ fn build_invalid_email_snapshot(
         enabled: false,
         api_base_url: None,
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -5888,6 +5925,7 @@ fn build_invalid_webhook_snapshot(
         enabled: false,
         api_base_url: None,
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -5945,6 +5983,7 @@ fn build_invalid_google_chat_snapshot(
         enabled: false,
         api_base_url: None,
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -6002,6 +6041,7 @@ fn build_invalid_signal_snapshot(
         enabled: false,
         api_base_url: None,
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -6059,6 +6099,7 @@ fn build_invalid_irc_snapshot(
         enabled: false,
         api_base_url: None,
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -6116,6 +6157,7 @@ fn build_invalid_teams_snapshot(
         enabled: false,
         api_base_url: None,
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -6173,6 +6215,7 @@ fn build_invalid_imessage_snapshot(
         enabled: false,
         api_base_url: None,
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -6230,6 +6273,7 @@ fn build_invalid_mattermost_snapshot(
         enabled: false,
         api_base_url: None,
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -6287,6 +6331,7 @@ fn build_invalid_nextcloud_talk_snapshot(
         enabled: false,
         api_base_url: None,
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -6344,6 +6389,7 @@ fn build_invalid_synology_chat_snapshot(
         enabled: false,
         api_base_url: None,
         notes,
+        reserved_runtime_fields: Vec::new(),
         operations: vec![send_operation, serve_operation],
     }
 }
@@ -8579,6 +8625,7 @@ mod tests {
             enabled: false,
             api_base_url: Some("https://api.telegram.org".to_owned()),
             notes: vec![],
+            reserved_runtime_fields: Vec::new(),
             operations: vec![ChannelOperationStatus {
                 id: "serve",
                 label: "reply loop",
@@ -8897,6 +8944,14 @@ mod tests {
                 .iter()
                 .any(|note| note == "reserved_runtime_field=allowed_guild_ids:2"),
             "discord status notes should record allowed_guild_ids count when reserved runtime fields are configured: {discord:#?}"
+        );
+        assert_eq!(
+            discord.reserved_runtime_fields,
+            vec![
+                "application_id".to_owned(),
+                "allowed_guild_ids:2".to_owned()
+            ],
+            "discord status snapshots should expose structured reserved runtime fields alongside operator notes: {discord:#?}"
         );
     }
 
