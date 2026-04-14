@@ -4,6 +4,7 @@
     clippy::expect_used,
     private_interfaces
 )] // CLI daemon binary
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,

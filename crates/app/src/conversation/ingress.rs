@@ -1,7 +1,7 @@
 use serde_json::{Map, Value, json};
 
-const LOONGCLAW_INTERNAL_TOOL_INGRESS_KEY: &str = "ingress";
-const LOONGCLAW_INTERNAL_TOOL_FEISHU_CALLBACK_KEY: &str = "feishu_callback";
+const LOONG_INTERNAL_TOOL_INGRESS_KEY: &str = "ingress";
+const LOONG_INTERNAL_TOOL_FEISHU_CALLBACK_KEY: &str = "feishu_callback";
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct InjectedToolPayload {
@@ -162,7 +162,7 @@ fn inject_feishu_internal_context(
     let mut internal = Map::new();
     if ingress.has_contextual_hints() {
         internal.insert(
-            LOONGCLAW_INTERNAL_TOOL_INGRESS_KEY.to_owned(),
+            LOONG_INTERNAL_TOOL_INGRESS_KEY.to_owned(),
             ingress.as_event_payload(),
         );
     }
@@ -172,10 +172,7 @@ fn inject_feishu_internal_context(
         .as_ref()
         .and_then(|value| value.as_json())
     {
-        internal.insert(
-            LOONGCLAW_INTERNAL_TOOL_FEISHU_CALLBACK_KEY.to_owned(),
-            callback,
-        );
+        internal.insert(LOONG_INTERNAL_TOOL_FEISHU_CALLBACK_KEY.to_owned(), callback);
     }
     if internal.is_empty() {
         return InjectedToolPayload {
@@ -184,7 +181,7 @@ fn inject_feishu_internal_context(
         };
     }
     body.insert(
-        crate::tools::LOONGCLAW_INTERNAL_TOOL_CONTEXT_KEY.to_owned(),
+        crate::tools::LOONG_INTERNAL_TOOL_CONTEXT_KEY.to_owned(),
         Value::Object(internal),
     );
     InjectedToolPayload {

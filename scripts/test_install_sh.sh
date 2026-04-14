@@ -27,17 +27,18 @@ assert_not_contains() {
   fi
 }
 
-assert_installed_binary() {
+assert_installed_primary_binary() {
   local install_dir="$1"
   local expected_output="$2"
   local primary_output
 
   [[ -x "$install_dir/$PRIMARY_BIN_NAME" ]]
+  [[ ! -e "$install_dir/loongclaw" ]]
 
   primary_output="$("$install_dir/$PRIMARY_BIN_NAME")"
 
   if [[ "$primary_output" != "$expected_output" ]]; then
-    echo "expected binary output '$expected_output' but got '$primary_output'" >&2
+    echo "expected primary binary output '$expected_output' but got '$primary_output'" >&2
     exit 1
   fi
 }
@@ -58,7 +59,6 @@ host_target() {
 make_release_fixture() {
   local fixture
   fixture="$(mktemp -d)"
-  mkdir -p "$fixture/home"
   write_release_fixture_asset \
     "$fixture" \
     "${1:-v0.1.2}" \
@@ -85,7 +85,7 @@ write_release_fixture_asset() {
 set -euo pipefail
 if [[ "\${1:-}" == "onboard" ]]; then
   shift
-  selected_provider="\${LOONGCLAW_WEB_SEARCH_PROVIDER:-}"
+  selected_provider="\${LOONG_WEB_SEARCH_PROVIDER:-}"
   while [[ "\$#" -gt 0 ]]; do
     case "\${1:-}" in
       --web-search-provider)
@@ -104,6 +104,7 @@ fi
 printf '%s\n' "$binary_label"
 EOF
   chmod +x "$staging_dir/$binary_name"
+
   archive_path="$release_dir/$archive_name"
   case "$archive_name" in
     *.tar.gz)
@@ -125,7 +126,6 @@ EOF
 make_linux_dual_libc_fixture() {
   local fixture tag
   fixture="$(mktemp -d)"
-  mkdir -p "$fixture/home"
   tag="${1:-v0.1.2}"
   write_release_fixture_asset "$fixture" "$tag" "x86_64-unknown-linux-gnu" "gnu-binary"
   write_release_fixture_asset "$fixture" "$tag" "x86_64-unknown-linux-musl" "musl-binary"
@@ -286,7 +286,6 @@ source_install_functions() {
 run_linux_x86_64_prefers_gnu_when_glibc_is_supported_test() {
   local fixture install_dir output_file
   fixture="$(make_linux_dual_libc_fixture "v0.1.2")"
-  mkdir -p "$fixture/home"
   trap 'rm -rf "$fixture"' RETURN
   install_dir="$fixture/install"
   output_file="$fixture/linux-gnu.out"
@@ -296,13 +295,12 @@ run_linux_x86_64_prefers_gnu_when_glibc_is_supported_test() {
   (
     cd "$REPO_ROOT"
     PATH="$fixture/fake-bin:$PATH" \
-      HOME="$fixture/home" \
       LOONG_INSTALL_RELEASE_BASE_URL="file://$fixture/releases" \
       bash "$SCRIPT_UNDER_TEST" --version v0.1.2 --prefix "$install_dir" >"$output_file" 2>&1
   )
 
   assert_contains "$output_file" "x86_64-unknown-linux-gnu"
-  assert_installed_binary "$install_dir" "gnu-binary"
+  assert_installed_primary_binary "$install_dir" "gnu-binary"
 }
 
 
@@ -317,7 +315,6 @@ run_termux_arm64_installs_android_release_test() {
   (
     cd "$REPO_ROOT"
     PATH="$fixture/fake-bin:$PATH" \
-      HOME="$fixture/home" \
       TERMUX_VERSION="0.119.0" \
       PREFIX="/data/data/com.termux/files/usr" \
       LOONG_INSTALL_RELEASE_BASE_URL="file://$fixture/releases" \
@@ -325,7 +322,7 @@ run_termux_arm64_installs_android_release_test() {
   )
 
   assert_contains "$output_file" "aarch64-linux-android"
-  assert_installed_binary "$install_dir" "termux-binary"
+  assert_installed_primary_binary "$install_dir" "termux-binary"
 }
 
 run_linux_guest_with_termux_env_is_not_termux_test() {
@@ -354,7 +351,6 @@ run_linux_guest_with_termux_env_is_not_termux_test() {
 run_linux_guest_with_termux_env_prefers_linux_release_test() {
   local fixture install_dir output_file
   fixture="$(make_linux_dual_libc_fixture "v0.1.2")"
-  mkdir -p "$fixture/home"
   trap 'rm -rf "$fixture"' RETURN
   install_dir="$fixture/install"
   output_file="$fixture/linux-termux-env.out"
@@ -364,7 +360,6 @@ run_linux_guest_with_termux_env_prefers_linux_release_test() {
   (
     cd "$REPO_ROOT"
     PATH="$fixture/fake-bin:$PATH" \
-      HOME="$fixture/home" \
       TERMUX_VERSION="0.119.0" \
       PREFIX="/data/data/com.termux/files/usr" \
       LOONG_INSTALL_RELEASE_BASE_URL="file://$fixture/releases" \
@@ -372,13 +367,12 @@ run_linux_guest_with_termux_env_prefers_linux_release_test() {
   )
 
   assert_contains "$output_file" "x86_64-unknown-linux-gnu"
-  assert_installed_binary "$install_dir" "gnu-binary"
+  assert_installed_primary_binary "$install_dir" "gnu-binary"
 }
 
 run_termux_x86_64_rejects_android_release_test() {
   local fixture output_file
   fixture="$(mktemp -d)"
-  mkdir -p "$fixture/home"
   trap 'rm -rf "$fixture"' RETURN
   output_file="$fixture/termux-android-x86_64.out"
   make_uname_stub_bin "$fixture" "Linux" "x86_64" "Android"
@@ -386,7 +380,6 @@ run_termux_x86_64_rejects_android_release_test() {
   if (
     cd "$REPO_ROOT"
     PATH="$fixture/fake-bin:$PATH" \
-      HOME="$fixture/home" \
       TERMUX_VERSION="0.119.0" \
       PREFIX="/data/data/com.termux/files/usr" \
       LOONG_INSTALL_RELEASE_BASE_URL="file://$fixture/releases" \
@@ -403,7 +396,6 @@ run_termux_x86_64_rejects_android_release_test() {
 run_linux_x86_64_falls_back_to_musl_when_glibc_is_too_old_test() {
   local fixture install_dir output_file
   fixture="$(make_linux_dual_libc_fixture "v0.1.2")"
-  mkdir -p "$fixture/home"
   trap 'rm -rf "$fixture"' RETURN
   install_dir="$fixture/install"
   output_file="$fixture/linux-musl-old-glibc.out"
@@ -413,19 +405,17 @@ run_linux_x86_64_falls_back_to_musl_when_glibc_is_too_old_test() {
   (
     cd "$REPO_ROOT"
     PATH="$fixture/fake-bin:$PATH" \
-      HOME="$fixture/home" \
       LOONG_INSTALL_RELEASE_BASE_URL="file://$fixture/releases" \
       bash "$SCRIPT_UNDER_TEST" --version v0.1.2 --prefix "$install_dir" >"$output_file" 2>&1
   )
 
   assert_contains "$output_file" "x86_64-unknown-linux-musl"
-  assert_installed_binary "$install_dir" "musl-binary"
+  assert_installed_primary_binary "$install_dir" "musl-binary"
 }
 
 run_linux_x86_64_falls_back_to_musl_when_glibc_detection_fails_test() {
   local fixture install_dir output_file
   fixture="$(make_linux_dual_libc_fixture "v0.1.2")"
-  mkdir -p "$fixture/home"
   trap 'rm -rf "$fixture"' RETURN
   install_dir="$fixture/install"
   output_file="$fixture/linux-musl-no-glibc.out"
@@ -436,19 +426,17 @@ run_linux_x86_64_falls_back_to_musl_when_glibc_detection_fails_test() {
   (
     cd "$REPO_ROOT"
     PATH="$fixture/fake-bin:$PATH" \
-      HOME="$fixture/home" \
       LOONG_INSTALL_RELEASE_BASE_URL="file://$fixture/releases" \
       bash "$SCRIPT_UNDER_TEST" --version v0.1.2 --prefix "$install_dir" >"$output_file" 2>&1
   )
 
   assert_contains "$output_file" "x86_64-unknown-linux-musl"
-  assert_installed_binary "$install_dir" "musl-binary"
+  assert_installed_primary_binary "$install_dir" "musl-binary"
 }
 
 run_linux_x86_64_explicit_musl_override_test() {
   local fixture install_dir output_file
   fixture="$(make_linux_dual_libc_fixture "v0.1.2")"
-  mkdir -p "$fixture/home"
   trap 'rm -rf "$fixture"' RETURN
   install_dir="$fixture/install"
   output_file="$fixture/linux-musl-override.out"
@@ -458,20 +446,18 @@ run_linux_x86_64_explicit_musl_override_test() {
   (
     cd "$REPO_ROOT"
     PATH="$fixture/fake-bin:$PATH" \
-      HOME="$fixture/home" \
       LOONG_INSTALL_RELEASE_BASE_URL="file://$fixture/releases" \
       LOONG_INSTALL_TARGET_LIBC="musl" \
       bash "$SCRIPT_UNDER_TEST" --version v0.1.2 --prefix "$install_dir" >"$output_file" 2>&1
   )
 
   assert_contains "$output_file" "x86_64-unknown-linux-musl"
-  assert_installed_binary "$install_dir" "musl-binary"
+  assert_installed_primary_binary "$install_dir" "musl-binary"
 }
 
 run_linux_x86_64_explicit_gnu_override_rejects_old_glibc_test() {
   local fixture output_file
   fixture="$(make_linux_dual_libc_fixture "v0.1.2")"
-  mkdir -p "$fixture/home"
   trap 'rm -rf "$fixture"' RETURN
   output_file="$fixture/linux-gnu-override-old-glibc.out"
   make_uname_stub_bin "$fixture" "Linux" "x86_64"
@@ -480,7 +466,6 @@ run_linux_x86_64_explicit_gnu_override_rejects_old_glibc_test() {
   if (
     cd "$REPO_ROOT"
     PATH="$fixture/fake-bin:$PATH" \
-      HOME="$fixture/home" \
       LOONG_INSTALL_RELEASE_BASE_URL="file://$fixture/releases" \
       bash "$SCRIPT_UNDER_TEST" --version v0.1.2 --target-libc gnu --prefix "$fixture/install" >"$output_file" 2>&1
   ); then
@@ -495,7 +480,6 @@ run_linux_x86_64_explicit_gnu_override_rejects_old_glibc_test() {
 run_version_at_least_falls_back_when_sort_version_is_unavailable_test() {
   local fixture
   fixture="$(mktemp -d)"
-  mkdir -p "$fixture/home"
   trap 'rm -rf "$fixture"' RETURN
   make_sort_stub_bin "$fixture" "__FAIL_VERSION__"
 
@@ -552,7 +536,6 @@ run_release_target_for_install_rejects_arm64_old_glibc_without_musl_test() {
 run_linux_x86_64_prefers_gnu_when_sort_version_is_unavailable_test() {
   local fixture install_dir output_file
   fixture="$(make_linux_dual_libc_fixture "v0.1.2")"
-  mkdir -p "$fixture/home"
   trap 'rm -rf "$fixture"' RETURN
   install_dir="$fixture/install"
   output_file="$fixture/linux-gnu-no-sort-v.out"
@@ -563,19 +546,17 @@ run_linux_x86_64_prefers_gnu_when_sort_version_is_unavailable_test() {
   (
     cd "$REPO_ROOT"
     PATH="$fixture/fake-bin:$PATH" \
-      HOME="$fixture/home" \
       LOONG_INSTALL_RELEASE_BASE_URL="file://$fixture/releases" \
       bash "$SCRIPT_UNDER_TEST" --version v0.1.2 --prefix "$install_dir" >"$output_file" 2>&1
   )
 
   assert_contains "$output_file" "x86_64-unknown-linux-gnu"
-  assert_installed_binary "$install_dir" "gnu-binary"
+  assert_installed_primary_binary "$install_dir" "gnu-binary"
 }
 
 run_linux_x86_64_explicit_gnu_override_rejects_musl_ldd_output_test() {
   local fixture output_file
   fixture="$(make_linux_dual_libc_fixture "v0.1.2")"
-  mkdir -p "$fixture/home"
   trap 'rm -rf "$fixture"' RETURN
   output_file="$fixture/linux-gnu-override-musl-ldd.out"
   make_uname_stub_bin "$fixture" "Linux" "x86_64"
@@ -585,7 +566,6 @@ run_linux_x86_64_explicit_gnu_override_rejects_musl_ldd_output_test() {
   if (
     cd "$REPO_ROOT"
     PATH="$fixture/fake-bin:$PATH" \
-      HOME="$fixture/home" \
       LOONG_INSTALL_RELEASE_BASE_URL="file://$fixture/releases" \
       bash "$SCRIPT_UNDER_TEST" --version v0.1.2 --target-libc gnu --prefix "$fixture/install" >"$output_file" 2>&1
   ); then
@@ -608,7 +588,6 @@ run_linux_arm64_auto_rejects_old_glibc_without_musl_artifact_test() {
   if (
     cd "$REPO_ROOT"
     PATH="$fixture/fake-bin:$PATH" \
-      HOME="$fixture/home" \
       LOONG_INSTALL_RELEASE_BASE_URL="file://$fixture/releases" \
       bash "$SCRIPT_UNDER_TEST" --version v0.1.2 --prefix "$fixture/install" >"$output_file" 2>&1
   ); then
@@ -623,7 +602,6 @@ run_linux_arm64_auto_rejects_old_glibc_without_musl_artifact_test() {
 run_release_override_install_and_onboard_test() {
   local fixture install_dir output_file marker
   fixture="$(make_release_fixture "v0.1.2")"
-  mkdir -p "$fixture/home"
   trap 'rm -rf "$fixture"' RETURN
   install_dir="$fixture/install"
   output_file="$fixture/install.out"
@@ -634,7 +612,6 @@ run_release_override_install_and_onboard_test() {
   (
     cd "$REPO_ROOT"
     PATH="$fixture/fake-bin:$PATH" \
-      HOME="$fixture/home" \
       ONBOARD_MARKER="$marker" \
       LOONG_INSTALL_RELEASE_BASE_URL="file://$fixture/releases" \
       BRAVE_API_KEY="" \
@@ -644,12 +621,13 @@ run_release_override_install_and_onboard_test() {
       FIRECRAWL_API_KEY="" \
       JINA_API_KEY="" \
       JINA_AUTH_TOKEN="" \
-      LOONGCLAW_WEB_SEARCH_PROVIDER="" \
+      LOONG_WEB_SEARCH_PROVIDER="" \
       bash "$SCRIPT_UNDER_TEST" --version v0.1.2 --prefix "$install_dir" --onboard >"$output_file" 2>&1
   )
 
-  assert_installed_binary "$install_dir" "fixture-binary"
+  assert_installed_primary_binary "$install_dir" "fixture-binary"
   assert_contains "$output_file" "Installed loong to"
+  assert_not_contains "$output_file" "Installed compatible loongclaw command to"
   assert_contains "$output_file" "Running guided onboarding"
   assert_contains "$marker" "onboard"
 }
@@ -662,7 +640,6 @@ run_release_install_adds_path_to_bashrc_and_prints_source_hint_test() {
   local bashrc_file
   local expected_path_line
   fixture="$(make_release_fixture "v0.1.2")"
-  mkdir -p "$fixture/home"
   trap 'rm -rf "$fixture"' RETURN
   home_dir="$fixture/home"
   install_dir="$fixture/install"
@@ -676,11 +653,11 @@ run_release_install_adds_path_to_bashrc_and_prints_source_hint_test() {
     HOME="$home_dir" \
       SHELL="/bin/bash" \
       PATH="/usr/bin:/bin" \
-      LOONGCLAW_INSTALL_RELEASE_BASE_URL="file://$fixture/releases" \
+      LOONG_INSTALL_RELEASE_BASE_URL="file://$fixture/releases" \
       bash "$SCRIPT_UNDER_TEST" --version v0.1.2 --prefix "$install_dir" >"$output_file" 2>&1
   )
 
-  assert_installed_binary "$install_dir" "fixture-binary"
+  assert_installed_primary_binary "$install_dir" "fixture-binary"
   assert_contains "$bashrc_file" "# Added by Loong installer"
   assert_contains "$bashrc_file" "$expected_path_line"
   assert_contains "$output_file" "Added $install_dir to PATH in $bashrc_file"
@@ -693,7 +670,6 @@ run_release_install_skips_source_hint_when_path_is_already_available_test() {
   local install_dir
   local output_file
   fixture="$(make_release_fixture "v0.1.2")"
-  mkdir -p "$fixture/home"
   trap 'rm -rf "$fixture"' RETURN
   home_dir="$fixture/home"
   install_dir="$fixture/install"
@@ -705,11 +681,11 @@ run_release_install_skips_source_hint_when_path_is_already_available_test() {
     HOME="$home_dir" \
       SHELL="/bin/bash" \
       PATH="$install_dir:/usr/bin:/bin" \
-      LOONGCLAW_INSTALL_RELEASE_BASE_URL="file://$fixture/releases" \
+      LOONG_INSTALL_RELEASE_BASE_URL="file://$fixture/releases" \
       bash "$SCRIPT_UNDER_TEST" --version v0.1.2 --prefix "$install_dir" >"$output_file" 2>&1
   )
 
-  assert_installed_binary "$install_dir" "fixture-binary"
+  assert_installed_primary_binary "$install_dir" "fixture-binary"
   assert_not_contains "$output_file" "source \"$home_dir/.bashrc\""
   assert_not_contains "$output_file" "Add to PATH if needed:"
 }
@@ -721,7 +697,6 @@ run_release_install_keeps_source_hint_when_rc_already_has_path_entry_test() {
   local output_file
   local bashrc_file
   fixture="$(make_release_fixture "v0.1.2")"
-  mkdir -p "$fixture/home"
   trap 'rm -rf "$fixture"' RETURN
   home_dir="$fixture/home"
   install_dir="$fixture/install"
@@ -735,11 +710,11 @@ run_release_install_keeps_source_hint_when_rc_already_has_path_entry_test() {
     HOME="$home_dir" \
       SHELL="/bin/bash" \
       PATH="/usr/bin:/bin" \
-      LOONGCLAW_INSTALL_RELEASE_BASE_URL="file://$fixture/releases" \
+      LOONG_INSTALL_RELEASE_BASE_URL="file://$fixture/releases" \
       bash "$SCRIPT_UNDER_TEST" --version v0.1.2 --prefix "$install_dir" >"$output_file" 2>&1
   )
 
-  assert_installed_binary "$install_dir" "fixture-binary"
+  assert_installed_primary_binary "$install_dir" "fixture-binary"
   assert_contains "$output_file" "PATH entry already present in $bashrc_file"
   assert_contains "$output_file" "source \"$bashrc_file\""
 }
@@ -750,7 +725,6 @@ run_release_install_unsupported_shell_uses_manual_path_hint_only_test() {
   local install_dir
   local output_file
   fixture="$(make_release_fixture "v0.1.2")"
-  mkdir -p "$fixture/home"
   trap 'rm -rf "$fixture"' RETURN
   home_dir="$fixture/home"
   install_dir="$fixture/install"
@@ -762,11 +736,11 @@ run_release_install_unsupported_shell_uses_manual_path_hint_only_test() {
     HOME="$home_dir" \
       SHELL="/usr/bin/fish" \
       PATH="/usr/bin:/bin" \
-      LOONGCLAW_INSTALL_RELEASE_BASE_URL="file://$fixture/releases" \
+      LOONG_INSTALL_RELEASE_BASE_URL="file://$fixture/releases" \
       bash "$SCRIPT_UNDER_TEST" --version v0.1.2 --prefix "$install_dir" >"$output_file" 2>&1
   )
 
-  assert_installed_binary "$install_dir" "fixture-binary"
+  assert_installed_primary_binary "$install_dir" "fixture-binary"
   assert_contains "$output_file" "Add to PATH if needed:"
   assert_not_contains "$output_file" 'source "$HOME/.profile"'
 }
@@ -777,7 +751,6 @@ run_release_override_install_and_onboard_failure_preserves_install_test() {
   local output_file
   local marker
   fixture="$(make_release_fixture "v0.1.2")"
-  mkdir -p "$fixture/home"
   trap 'rm -rf "$fixture"' RETURN
   install_dir="$fixture/install"
   output_file="$fixture/install-onboard-failure.out"
@@ -788,10 +761,9 @@ run_release_override_install_and_onboard_failure_preserves_install_test() {
   (
     cd "$REPO_ROOT"
     PATH="$fixture/fake-bin:$PATH" \
-      HOME="$fixture/home" \
       ONBOARD_EXIT_CODE="130" \
       ONBOARD_MARKER="$marker" \
-      LOONGCLAW_INSTALL_RELEASE_BASE_URL="file://$fixture/releases" \
+      LOONG_INSTALL_RELEASE_BASE_URL="file://$fixture/releases" \
       BRAVE_API_KEY="" \
       TAVILY_API_KEY="" \
       PERPLEXITY_API_KEY="" \
@@ -799,11 +771,11 @@ run_release_override_install_and_onboard_failure_preserves_install_test() {
       FIRECRAWL_API_KEY="" \
       JINA_API_KEY="" \
       JINA_AUTH_TOKEN="" \
-      LOONGCLAW_WEB_SEARCH_PROVIDER="" \
+      LOONG_WEB_SEARCH_PROVIDER="" \
       bash "$SCRIPT_UNDER_TEST" --version v0.1.2 --prefix "$install_dir" --onboard >"$output_file" 2>&1
   )
 
-  assert_installed_binary "$install_dir" "fixture-binary"
+  assert_installed_primary_binary "$install_dir" "fixture-binary"
   assert_contains "$marker" "onboard"
   assert_contains "$output_file" "Onboarding exited with code 130"
   assert_contains "$output_file" "You can run 'loong onboard' later to complete setup"
@@ -813,7 +785,6 @@ run_release_override_install_and_onboard_failure_preserves_install_test() {
 run_release_override_install_and_onboard_detects_duckduckgo_default_test() {
   local fixture install_dir output_file marker
   fixture="$(make_release_fixture "v0.1.2")"
-  mkdir -p "$fixture/home"
   trap 'rm -rf "$fixture"' RETURN
   install_dir="$fixture/install"
   output_file="$fixture/install-web-search-ddg.out"
@@ -824,7 +795,6 @@ run_release_override_install_and_onboard_detects_duckduckgo_default_test() {
   (
     cd "$REPO_ROOT"
     PATH="$fixture/fake-bin:$PATH" \
-      HOME="$fixture/home" \
       LANG="C.UTF-8" \
       TZ="UTC" \
       ONBOARD_MARKER="$marker" \
@@ -836,7 +806,7 @@ run_release_override_install_and_onboard_detects_duckduckgo_default_test() {
       FIRECRAWL_API_KEY="" \
       JINA_API_KEY="" \
       JINA_AUTH_TOKEN="" \
-      LOONGCLAW_WEB_SEARCH_PROVIDER="" \
+      LOONG_WEB_SEARCH_PROVIDER="" \
       bash "$SCRIPT_UNDER_TEST" --version v0.1.2 --prefix "$install_dir" --onboard >"$output_file" 2>&1
   )
 
@@ -847,7 +817,6 @@ run_release_override_install_and_onboard_detects_duckduckgo_default_test() {
 run_release_override_install_and_onboard_prefers_tavily_for_domestic_hosts_test() {
   local fixture install_dir output_file marker
   fixture="$(make_release_fixture "v0.1.2")"
-  mkdir -p "$fixture/home"
   trap 'rm -rf "$fixture"' RETURN
   install_dir="$fixture/install"
   output_file="$fixture/install-web-search-tavily.out"
@@ -858,7 +827,6 @@ run_release_override_install_and_onboard_prefers_tavily_for_domestic_hosts_test(
   (
     cd "$REPO_ROOT"
     PATH="$fixture/fake-bin:$PATH" \
-      HOME="$fixture/home" \
       LANG="zh_CN.UTF-8" \
       TZ="Asia/Shanghai" \
       ONBOARD_MARKER="$marker" \
@@ -870,7 +838,7 @@ run_release_override_install_and_onboard_prefers_tavily_for_domestic_hosts_test(
       FIRECRAWL_API_KEY="" \
       JINA_API_KEY="" \
       JINA_AUTH_TOKEN="" \
-      LOONGCLAW_WEB_SEARCH_PROVIDER="" \
+      LOONG_WEB_SEARCH_PROVIDER="" \
       bash "$SCRIPT_UNDER_TEST" --version v0.1.2 --prefix "$install_dir" --onboard >"$output_file" 2>&1
   )
 
@@ -881,7 +849,6 @@ run_release_override_install_and_onboard_prefers_tavily_for_domestic_hosts_test(
 run_release_override_install_and_onboard_prefers_unique_ready_credential_test() {
   local fixture install_dir output_file marker
   fixture="$(make_release_fixture "v0.1.2")"
-  mkdir -p "$fixture/home"
   trap 'rm -rf "$fixture"' RETURN
   install_dir="$fixture/install"
   output_file="$fixture/install-web-search-perplexity.out"
@@ -892,7 +859,6 @@ run_release_override_install_and_onboard_prefers_unique_ready_credential_test() 
   (
     cd "$REPO_ROOT"
     PATH="$fixture/fake-bin:$PATH" \
-      HOME="$fixture/home" \
       LANG="C.UTF-8" \
       TZ="UTC" \
       ONBOARD_MARKER="$marker" \
@@ -904,7 +870,7 @@ run_release_override_install_and_onboard_prefers_unique_ready_credential_test() 
       FIRECRAWL_API_KEY="" \
       JINA_API_KEY="" \
       JINA_AUTH_TOKEN="" \
-      LOONGCLAW_WEB_SEARCH_PROVIDER="" \
+      LOONG_WEB_SEARCH_PROVIDER="" \
       bash "$SCRIPT_UNDER_TEST" --version v0.1.2 --prefix "$install_dir" --onboard >"$output_file" 2>&1
   )
 
@@ -915,7 +881,6 @@ run_release_override_install_and_onboard_prefers_unique_ready_credential_test() 
 run_release_override_install_and_onboard_prefers_unique_ready_firecrawl_credential_test() {
   local fixture install_dir output_file marker
   fixture="$(make_release_fixture "v0.1.2")"
-  mkdir -p "$fixture/home"
   trap 'rm -rf "$fixture"' RETURN
   install_dir="$fixture/install"
   output_file="$fixture/install-web-search-firecrawl.out"
@@ -926,7 +891,6 @@ run_release_override_install_and_onboard_prefers_unique_ready_firecrawl_credenti
   (
     cd "$REPO_ROOT"
     PATH="$fixture/fake-bin:$PATH" \
-      HOME="$fixture/home" \
       LANG="C.UTF-8" \
       TZ="UTC" \
       ONBOARD_MARKER="$marker" \
@@ -938,7 +902,7 @@ run_release_override_install_and_onboard_prefers_unique_ready_firecrawl_credenti
       FIRECRAWL_API_KEY="firecrawl-test-token" \
       JINA_API_KEY="" \
       JINA_AUTH_TOKEN="" \
-      LOONGCLAW_WEB_SEARCH_PROVIDER="" \
+      LOONG_WEB_SEARCH_PROVIDER="" \
       bash "$SCRIPT_UNDER_TEST" --version v0.1.2 --prefix "$install_dir" --onboard >"$output_file" 2>&1
   )
 
@@ -949,7 +913,6 @@ run_release_override_install_and_onboard_prefers_unique_ready_firecrawl_credenti
 run_release_override_install_and_onboard_preserves_signal_source_when_firecrawl_and_exa_both_exist_test() {
   local fixture install_dir output_file marker
   fixture="$(make_release_fixture "v0.1.2")"
-  mkdir -p "$fixture/home"
   trap 'rm -rf "$fixture"' RETURN
   install_dir="$fixture/install"
   output_file="$fixture/install-web-search-firecrawl-exa-ambiguous.out"
@@ -960,7 +923,6 @@ run_release_override_install_and_onboard_preserves_signal_source_when_firecrawl_
   (
     cd "$REPO_ROOT"
     PATH="$fixture/fake-bin:$PATH" \
-      HOME="$fixture/home" \
       LANG="C.UTF-8" \
       TZ="UTC" \
       ONBOARD_MARKER="$marker" \
@@ -972,7 +934,7 @@ run_release_override_install_and_onboard_preserves_signal_source_when_firecrawl_
       FIRECRAWL_API_KEY="firecrawl-test-token" \
       JINA_API_KEY="" \
       JINA_AUTH_TOKEN="" \
-      LOONGCLAW_WEB_SEARCH_PROVIDER="" \
+      LOONG_WEB_SEARCH_PROVIDER="" \
       bash "$SCRIPT_UNDER_TEST" --version v0.1.2 --prefix "$install_dir" --onboard >"$output_file" 2>&1
   )
 
@@ -983,7 +945,6 @@ run_release_override_install_and_onboard_preserves_signal_source_when_firecrawl_
 run_release_override_install_and_onboard_preserves_signal_source_when_multiple_credentials_exist_test() {
   local fixture install_dir output_file marker
   fixture="$(make_release_fixture "v0.1.2")"
-  mkdir -p "$fixture/home"
   trap 'rm -rf "$fixture"' RETURN
   install_dir="$fixture/install"
   output_file="$fixture/install-web-search-tavily-multi-credential.out"
@@ -994,7 +955,6 @@ run_release_override_install_and_onboard_preserves_signal_source_when_multiple_c
   (
     cd "$REPO_ROOT"
     PATH="$fixture/fake-bin:$PATH" \
-      HOME="$fixture/home" \
       LANG="zh_CN.UTF-8" \
       TZ="Asia/Shanghai" \
       ONBOARD_MARKER="$marker" \
@@ -1006,7 +966,7 @@ run_release_override_install_and_onboard_preserves_signal_source_when_multiple_c
       FIRECRAWL_API_KEY="" \
       JINA_API_KEY="" \
       JINA_AUTH_TOKEN="" \
-      LOONGCLAW_WEB_SEARCH_PROVIDER="" \
+      LOONG_WEB_SEARCH_PROVIDER="" \
       bash "$SCRIPT_UNDER_TEST" --version v0.1.2 --prefix "$install_dir" --onboard >"$output_file" 2>&1
   )
 
@@ -1017,7 +977,6 @@ run_release_override_install_and_onboard_preserves_signal_source_when_multiple_c
 run_checksum_mismatch_fails_test() {
   local fixture install_dir output_file tag target checksum_name
   fixture="$(make_release_fixture "v0.1.2")"
-  mkdir -p "$fixture/home"
   trap 'rm -rf "$fixture"' RETURN
   install_dir="$fixture/install"
   output_file="$fixture/checksum.out"
@@ -1042,7 +1001,6 @@ run_checksum_mismatch_fails_test() {
 run_missing_release_guidance_test() {
   local fixture output_file
   fixture="$(mktemp -d)"
-  mkdir -p "$fixture/home"
   trap 'rm -rf "$fixture"' RETURN
   output_file="$fixture/missing-release.out"
   make_latest_release_stub_bin "$fixture"
@@ -1050,7 +1008,6 @@ run_missing_release_guidance_test() {
   if (
     cd "$REPO_ROOT"
     PATH="$fixture/fake-bin:$PATH" \
-      HOME="$fixture/home" \
       bash "$SCRIPT_UNDER_TEST" --prefix "$fixture/install" >"$output_file" 2>&1
   ); then
     echo "expected install.sh to fail when no latest GitHub release exists" >&2
@@ -1081,7 +1038,6 @@ run_standalone_linux_arm64_install_rejects_missing_glibc_test() {
   if (
     cd "$fixture"
     PATH="$fixture/fake-bin:$PATH" \
-      HOME="$fixture/home" \
       LOONG_INSTALL_RELEASE_BASE_URL="file://$fixture/releases" \
       bash "$standalone_script" --version v0.1.2 --prefix "$install_dir" >"$output_file" 2>&1
   ); then

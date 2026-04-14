@@ -751,6 +751,10 @@ impl ToolRuntimeConfig {
         configured_root.unwrap_or(fallback_root)
     }
 
+    pub fn from_loong_config(config: &LoongClawConfig, config_path: Option<&Path>) -> Self {
+        Self::from_loongclaw_config(config, config_path)
+    }
+
     pub fn from_loongclaw_config(config: &LoongClawConfig, config_path: Option<&Path>) -> Self {
         let file_root = config.tools.configured_file_root();
         let workspace_root = config

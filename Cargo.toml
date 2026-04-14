@@ -15,8 +15,8 @@ edition = "2024"
 license = "MIT"
 version = "0.1.0-alpha.3"
 authors = ["chumyin"]
-repository = "https://github.com/loongclaw-ai/loongclaw"
-homepage = "https://github.com/loongclaw-ai/loongclaw"
+repository = "https://github.com/eastreams/loong"
+homepage = "https://github.com/eastreams/loong"
 
 [workspace.dependencies]
 async-trait = "0.1"

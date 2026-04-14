@@ -116,7 +116,8 @@ pub(crate) use tool_lease::{
 ))]
 pub use web_http::build_ssrf_safe_client;
 
-pub(crate) const BROWSER_SESSION_SCOPE_FIELD: &str = "__loongclaw_browser_scope";
+pub(crate) const BROWSER_SESSION_SCOPE_FIELD: &str = "__loong_browser_scope";
+pub(crate) const LEGACY_BROWSER_SESSION_SCOPE_FIELD: &str = "__loongclaw_browser_scope";
 pub const BROWSER_COMPANION_PREVIEW_SKILL_ID: &str =
     bundled_skills::BROWSER_COMPANION_PREVIEW_SKILL_ID;
 pub const BROWSER_COMPANION_COMMAND: &str = bundled_skills::BROWSER_COMPANION_COMMAND;
@@ -135,11 +136,22 @@ const HTTP_REQUEST_TOOL_NAME: &str = "http.request";
 const WEB_FETCH_TOOL_NAME: &str = "web.fetch";
 const WEB_SEARCH_TOOL_NAME: &str = "web.search";
 
+pub(crate) const LOONG_INTERNAL_TOOL_CONTEXT_KEY: &str = "_loong";
 pub(crate) const LOONGCLAW_INTERNAL_TOOL_CONTEXT_KEY: &str = "_loongclaw";
 pub(crate) const LOONGCLAW_INTERNAL_TOOL_SEARCH_KEY: &str = "tool_search";
 pub(crate) const LOONGCLAW_INTERNAL_TOOL_SEARCH_VISIBLE_TOOL_IDS_KEY: &str = "visible_tool_ids";
 pub(crate) const LOONGCLAW_INTERNAL_RUNTIME_NARROWING_KEY: &str = "runtime_narrowing";
 pub(crate) const LOONGCLAW_INTERNAL_WORKSPACE_ROOT_KEY: &str = "workspace_root";
+#[allow(dead_code)]
+pub(crate) const LOONG_INTERNAL_TOOL_SEARCH_KEY: &str = LOONGCLAW_INTERNAL_TOOL_SEARCH_KEY;
+#[allow(dead_code)]
+pub(crate) const LOONG_INTERNAL_TOOL_SEARCH_VISIBLE_TOOL_IDS_KEY: &str =
+    LOONGCLAW_INTERNAL_TOOL_SEARCH_VISIBLE_TOOL_IDS_KEY;
+#[allow(dead_code)]
+pub(crate) const LOONG_INTERNAL_RUNTIME_NARROWING_KEY: &str =
+    LOONGCLAW_INTERNAL_RUNTIME_NARROWING_KEY;
+#[allow(dead_code)]
+pub(crate) const LOONG_INTERNAL_WORKSPACE_ROOT_KEY: &str = LOONGCLAW_INTERNAL_WORKSPACE_ROOT_KEY;
 
 pub fn normalize_external_skills_domain_rule(raw: &str) -> Result<String, String> {
     external_skills::normalize_domain_rule(raw)
@@ -228,9 +240,50 @@ fn trusted_internal_tool_payload_enabled() -> bool {
 }
 
 pub(crate) fn payload_uses_reserved_internal_tool_context(payload: &Value) -> bool {
+    reserved_internal_tool_context_key_in_payload(payload).is_some()
+}
+
+fn reserved_internal_tool_context_key_in_payload(payload: &Value) -> Option<&'static str> {
     payload
         .as_object()
-        .is_some_and(|body| body.contains_key(LOONGCLAW_INTERNAL_TOOL_CONTEXT_KEY))
+        .and_then(reserved_internal_tool_context_key_in_map)
+}
+
+fn reserved_internal_tool_context_key_in_map(
+    body: &serde_json::Map<String, Value>,
+) -> Option<&'static str> {
+    if body.contains_key(LOONG_INTERNAL_TOOL_CONTEXT_KEY) {
+        Some(LOONG_INTERNAL_TOOL_CONTEXT_KEY)
+    } else if body.contains_key(LOONGCLAW_INTERNAL_TOOL_CONTEXT_KEY) {
+        Some(LOONGCLAW_INTERNAL_TOOL_CONTEXT_KEY)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn trusted_internal_tool_context_from_payload(
+    payload: &Value,
+) -> Option<&serde_json::Map<String, Value>> {
+    let body = payload.as_object()?;
+    let key = reserved_internal_tool_context_key_in_map(body)?;
+    body.get(key)?.as_object()
+}
+
+pub(crate) fn take_trusted_internal_tool_context(
+    body: &mut serde_json::Map<String, Value>,
+) -> serde_json::Map<String, Value> {
+    for key in [
+        LOONG_INTERNAL_TOOL_CONTEXT_KEY,
+        LOONGCLAW_INTERNAL_TOOL_CONTEXT_KEY,
+    ] {
+        let Some(value) = body.remove(key) else {
+            continue;
+        };
+        if let Some(object) = value.as_object() {
+            return object.clone();
+        }
+    }
+    serde_json::Map::new()
 }
 
 fn ensure_untrusted_payload_does_not_use_reserved_internal_tool_context(
@@ -241,12 +294,12 @@ fn ensure_untrusted_payload_does_not_use_reserved_internal_tool_context(
     if trusted_internal_tool_payload_enabled() {
         return Ok(());
     }
-    if !payload_uses_reserved_internal_tool_context(payload) {
+    let Some(offending_key) = reserved_internal_tool_context_key_in_payload(payload) else {
         return Ok(());
-    }
+    };
 
     Err(format!(
-        "tool `{tool_name}` {payload_path}.{LOONGCLAW_INTERNAL_TOOL_CONTEXT_KEY} is reserved for trusted internal tool context; retry without that field"
+        "tool `{tool_name}` {payload_path}.{offending_key} is reserved for trusted internal tool context; retry without that field"
     ))
 }
 /// Execute a tool request, routing through the kernel for
@@ -635,7 +688,7 @@ pub fn is_provider_exposed_tool_name(raw: &str) -> bool {
 pub fn runtime_tool_view_from_loongclaw_config(
     config: &crate::config::LoongClawConfig,
 ) -> ToolView {
-    let runtime_config = runtime_config::ToolRuntimeConfig::from_loongclaw_config(config, None);
+    let runtime_config = runtime_config::ToolRuntimeConfig::from_loong_config(config, None);
     runtime_tool_view_with_runtime_config(&config.tools, &runtime_config)
 }
 
@@ -807,7 +860,7 @@ fn is_expected_tool_request_error(error: &str) -> bool {
     if error.starts_with("invalid_internal_runtime_narrowing:") {
         return true;
     }
-    error.contains("payload._loongclaw is reserved for trusted internal tool context")
+    error.contains("reserved for trusted internal tool context")
 }
 
 fn trusted_runtime_narrowing_from_payload(
@@ -817,8 +870,7 @@ fn trusted_runtime_narrowing_from_payload(
         return Ok(None);
     }
 
-    let Some(value) = payload
-        .get(LOONGCLAW_INTERNAL_TOOL_CONTEXT_KEY)
+    let Some(value) = trusted_internal_tool_context_from_payload(payload)
         .and_then(|body| body.get(LOONGCLAW_INTERNAL_RUNTIME_NARROWING_KEY))
         .cloned()
     else {
@@ -835,8 +887,7 @@ fn trusted_workspace_root_from_payload(payload: &Value) -> Result<Option<PathBuf
         return Ok(None);
     }
 
-    let Some(value) = payload
-        .get(LOONGCLAW_INTERNAL_TOOL_CONTEXT_KEY)
+    let Some(value) = trusted_internal_tool_context_from_payload(payload)
         .and_then(|body| body.get(LOONGCLAW_INTERNAL_WORKSPACE_ROOT_KEY))
         .cloned()
     else {
@@ -867,18 +918,15 @@ pub(crate) fn merge_trusted_internal_tool_context_into_arguments(
     internal_context: &Value,
 ) -> Result<(), String> {
     let trusted_context = internal_context.as_object().cloned().ok_or_else(|| {
-        format!("tool.invoke payload.{LOONGCLAW_INTERNAL_TOOL_CONTEXT_KEY} must be an object")
+        format!("tool.invoke payload.{LOONG_INTERNAL_TOOL_CONTEXT_KEY} must be an object")
     })?;
-    if arguments.contains_key(LOONGCLAW_INTERNAL_TOOL_CONTEXT_KEY) {
+    if let Some(offending_key) = reserved_internal_tool_context_key_in_map(arguments) {
         return Err(format!(
-            "tool.invoke payload.arguments.{LOONGCLAW_INTERNAL_TOOL_CONTEXT_KEY} is reserved for trusted internal tool context"
+            "tool.invoke payload.arguments.{offending_key} is reserved for trusted internal tool context"
         ));
     }
     let merged_context = Value::Object(trusted_context);
-    arguments.insert(
-        LOONGCLAW_INTERNAL_TOOL_CONTEXT_KEY.to_owned(),
-        merged_context,
-    );
+    arguments.insert(LOONG_INTERNAL_TOOL_CONTEXT_KEY.to_owned(), merged_context);
     Ok(())
 }
 
