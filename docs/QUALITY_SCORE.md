@@ -1,23 +1,23 @@
 # Quality Score
 
-Domain grades for LoongClaw. Updated periodically to track gaps, prioritize cleanup, and measure harness maturity.
+Domain grades for Loong. Updated periodically to track gaps, prioritize cleanup, and measure harness maturity.
 
 ## Domain Grades
 
 | Domain | Grade | Last Reviewed | Gaps |
 |--------|-------|---------------|------|
 | Contracts (L0) | A | 2026-03-13 | `#[non_exhaustive]` applied; membrane field not yet enforced at runtime |
-| Kernel Security (L1) | B+ | 2026-03-13 | Policy only gates `shell.exec`; `file.read`/`file.write` bypass policy check |
+| Kernel Security (L1) | B+ | 2026-04-03 | Core tool paths now route through policy extensions; remaining gaps are non-uniform L1 coverage for connector/ACP/runtime-only analytics and explicit `Direct` compatibility lanes |
 | Execution Planes (L2) | B | 2026-03-13 | Core/extension pattern solid; no WASM fuel metering yet |
 | Orchestration (L3) | B | 2026-03-13 | HarnessBroker routes correctly; context-engine selection is pluggable, but richer engine implementations and broader runtime coverage are still limited |
-| Observability (L4) | C+ | 2026-03-13 | Audit events in-memory only; no HMAC chain; no persistent sink |
+| Observability (L4) | C+ | 2026-04-03 | Durable JSONL/fanout audit exists; remaining gaps are tamper-evident verification, query baseline, and richer export lanes |
 | Vertical Packs (L5) | B | 2026-03-13 | Pack validation works; namespace struct exists but not enforced |
 | Protocol (L5.5) | B+ | 2026-03-13 | Transport contracts and typed routing operational |
 | Integration (L6) | B | 2026-03-13 | Plugin scanning works; hotplug lifecycle incomplete |
 | Plugin IR (L7) | B- | 2026-03-13 | Bridge inference works; multi-language support limited |
 | Self-Awareness (L8) | B- | 2026-03-13 | Snapshots generated but not continuous; no drift detection agent |
 | Bootstrap (L9) | B | 2026-03-13 | Activation plans work; no policy-bounded bootstrap validation |
-| Context/Memory | C | 2026-03-13 | SQLite turns only; no scopes, no provenance, no FTS5 |
+| Context/Memory | B- | 2026-04-05 | Canonical recall now has scope/kind/metadata-backed FTS retrieval, the operator-facing `memory_search` surface spans workspace and cross-session recall, but trust scoring, TTL/hash, and richer derived-memory ranking are still limited |
 | Documentation | A- | 2026-03-13 | Strong coverage across design docs, security, product sense, and quality tracking |
 | CI/Enforcement | A | 2026-03-13 | 8 CI workflows, convention-engineering (14 files, 11 checks), check:harness mirror gate |
 | Contributor Experience | A- | 2026-03-13 | Clear tracks and recipes; could add more examples |

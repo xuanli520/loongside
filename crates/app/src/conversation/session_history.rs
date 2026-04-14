@@ -14,13 +14,12 @@ use crate::memory;
 use crate::memory::runtime_config::MemoryRuntimeConfig;
 
 use super::analytics::{
-    DiscoveryFirstEventSummary, FastLaneToolBatchEventSummary, SafeLaneEventSummary,
-    TurnCheckpointEventSummary, summarize_discovery_first_events,
-    summarize_fast_lane_tool_batch_events, summarize_safe_lane_events,
-    summarize_turn_checkpoint_history,
+    DiscoveryFirstEventSummary, FastLaneToolBatchEventSummary, PromptFrameEventSummary,
+    SafeLaneEventSummary, TurnCheckpointEventSummary, summarize_discovery_first_events,
+    summarize_fast_lane_tool_batch_events, summarize_prompt_frame_events,
+    summarize_safe_lane_events, summarize_turn_checkpoint_history,
 };
 use super::runtime_binding::ConversationRuntimeBinding;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AssistantHistoryLoadErrorCode {
     DirectReadFailed,
@@ -202,19 +201,57 @@ pub async fn load_fast_lane_tool_batch_event_summary(
     }
 }
 
+pub async fn load_prompt_frame_event_summary(
+    session_id: &str,
+    limit: usize,
+    binding: ConversationRuntimeBinding<'_>,
+    #[cfg(feature = "memory-sqlite")] memory_config: &MemoryRuntimeConfig,
+) -> CliResult<PromptFrameEventSummary> {
+    #[cfg(feature = "memory-sqlite")]
+    {
+        load_assistant_history_summary(session_id, limit, binding, memory_config, |contents| {
+            summarize_prompt_frame_events(contents.iter().map(String::as_str))
+        })
+        .await
+    }
+
+    #[cfg(not(feature = "memory-sqlite"))]
+    {
+        let _ = (session_id, limit, binding);
+        Err("prompt-frame summary unavailable: memory-sqlite feature disabled".to_owned())
+    }
+}
+
 pub async fn load_discovery_first_event_summary(
     session_id: &str,
     limit: usize,
-    kernel_ctx: Option<&KernelContext>,
+    binding: ConversationRuntimeBinding<'_>,
     #[cfg(feature = "memory-sqlite")] memory_config: &MemoryRuntimeConfig,
 ) -> CliResult<DiscoveryFirstEventSummary> {
     load_discovery_first_event_summary_with_binding(
         session_id,
         limit,
-        kernel_ctx.map_or_else(
-            ConversationRuntimeBinding::direct,
-            ConversationRuntimeBinding::kernel,
-        ),
+        binding,
+        #[cfg(feature = "memory-sqlite")]
+        memory_config,
+    )
+    .await
+}
+
+pub async fn load_discovery_first_event_summary_with_kernel_context(
+    session_id: &str,
+    limit: usize,
+    kernel_ctx: Option<&KernelContext>,
+    #[cfg(feature = "memory-sqlite")] memory_config: &MemoryRuntimeConfig,
+) -> CliResult<DiscoveryFirstEventSummary> {
+    let binding = kernel_ctx.map_or_else(
+        ConversationRuntimeBinding::direct,
+        ConversationRuntimeBinding::kernel,
+    );
+    load_discovery_first_event_summary(
+        session_id,
+        limit,
+        binding,
         #[cfg(feature = "memory-sqlite")]
         memory_config,
     )

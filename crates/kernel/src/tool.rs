@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
+use serde::Serialize;
 
 // Re-export data types from contracts
 pub use loongclaw_contracts::{
@@ -8,6 +9,28 @@ pub use loongclaw_contracts::{
 };
 
 use crate::errors::ToolPlaneError;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolConcurrencyClass {
+    ReadOnly,
+    Mutating,
+    Unknown,
+}
+
+impl ToolConcurrencyClass {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::Mutating => "mutating",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub const fn requires_serial_execution(self) -> bool {
+        !matches!(self, Self::ReadOnly)
+    }
+}
 
 #[async_trait]
 pub trait CoreToolAdapter: Send + Sync {
@@ -49,10 +72,10 @@ impl ToolPlane {
 
     pub fn register_core_adapter<A: CoreToolAdapter + 'static>(&mut self, adapter: A) {
         let name = adapter.name().to_owned();
-        self.core_adapters.insert(name.clone(), Arc::new(adapter));
         if self.default_core_adapter.is_none() {
-            self.default_core_adapter = Some(name);
+            self.default_core_adapter = Some(name.clone());
         }
+        self.core_adapters.insert(name, Arc::new(adapter));
     }
 
     pub fn register_extension_adapter<A: ToolExtensionAdapter + 'static>(&mut self, adapter: A) {
@@ -79,17 +102,19 @@ impl ToolPlane {
         request: ToolCoreRequest,
     ) -> Result<ToolCoreOutcome, ToolPlaneError> {
         let resolved_name = if let Some(name) = core_name {
-            name.to_owned()
+            name
         } else {
             self.default_core_adapter
-                .clone()
+                .as_deref()
                 .ok_or(ToolPlaneError::NoDefaultCoreAdapter)?
         };
 
         let adapter = self
             .core_adapters
-            .get(&resolved_name)
-            .ok_or(ToolPlaneError::CoreAdapterNotFound(resolved_name))?
+            .get(resolved_name)
+            .ok_or(ToolPlaneError::CoreAdapterNotFound(
+                resolved_name.to_owned(),
+            ))?
             .clone();
 
         return adapter.execute_core_tool(request).await;
@@ -108,17 +133,19 @@ impl ToolPlane {
             .clone();
 
         let resolved_core_name = if let Some(name) = core_name {
-            name.to_owned()
+            name
         } else {
             self.default_core_adapter
-                .clone()
+                .as_deref()
                 .ok_or(ToolPlaneError::NoDefaultCoreAdapter)?
         };
 
         let core = self
             .core_adapters
-            .get(&resolved_core_name)
-            .ok_or(ToolPlaneError::CoreAdapterNotFound(resolved_core_name))?
+            .get(resolved_core_name)
+            .ok_or(ToolPlaneError::CoreAdapterNotFound(
+                resolved_core_name.to_owned(),
+            ))?
             .clone();
 
         return extension

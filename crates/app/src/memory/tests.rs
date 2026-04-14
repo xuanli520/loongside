@@ -1,5 +1,6 @@
 use loongclaw_contracts::MemoryCoreRequest;
 use serde_json::json;
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use super::*;
@@ -7,6 +8,28 @@ use super::*;
 fn core_dispatch_test_lock() -> &'static Mutex<()> {
     static CORE_DISPATCH_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     CORE_DISPATCH_TEST_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+#[cfg(feature = "memory-sqlite")]
+fn isolated_memory_workspace(prefix: &str) -> (PathBuf, runtime_config::MemoryRuntimeConfig) {
+    let root = crate::test_support::unique_temp_dir(prefix);
+    std::fs::create_dir_all(&root).expect("create isolated memory workspace");
+
+    let db_path = root.join("memory.sqlite3");
+    let config = runtime_config::MemoryRuntimeConfig {
+        sqlite_path: Some(db_path),
+        sliding_window: 1,
+        ..runtime_config::MemoryRuntimeConfig::default()
+    };
+
+    (root, config)
+}
+
+#[cfg(feature = "memory-sqlite")]
+fn cleanup_memory_workspace(workspace_root: &std::path::Path, db_path: &std::path::Path) {
+    let _ = drop_cached_sqlite_runtime(db_path);
+    let _ = std::fs::remove_file(db_path);
+    let _ = std::fs::remove_dir(workspace_root);
 }
 
 #[test]
@@ -18,6 +41,27 @@ fn fallback_memory_operation_stays_compatible() {
     .expect("fallback operation should succeed");
     assert_eq!(outcome.status, "ok");
     assert_eq!(outcome.payload["adapter"], "kv-core");
+}
+
+#[test]
+fn supported_memory_core_operations_for_sqlite_are_stable() {
+    let operations = supported_memory_core_operations(crate::config::MemoryBackendKind::Sqlite);
+    let operation_names = operations
+        .into_iter()
+        .map(MemoryCoreOperation::as_str)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        operation_names,
+        vec![
+            "append_turn",
+            "window",
+            "clear_session",
+            "replace_turns",
+            "read_context",
+            "read_stage_envelope",
+        ]
+    );
 }
 
 #[tokio::test]
@@ -201,6 +245,255 @@ fn memory_window_limit_semantics_cover_explicit_fallback_and_bounds() {
 
 #[cfg(feature = "memory-sqlite")]
 #[test]
+fn load_prompt_context_with_diagnostics_omits_legacy_identity_from_profile_projection() {
+    use crate::config::{MemoryMode, MemoryProfile};
+    use std::fs;
+
+    let tmp = std::env::temp_dir().join(format!(
+        "loongclaw-test-memory-profile-diagnostics-{}",
+        std::process::id()
+    ));
+    let _ = fs::create_dir_all(&tmp);
+    let db_path = tmp.join("profile-diagnostics.sqlite3");
+    let _ = fs::remove_file(&db_path);
+
+    let profile_note = "## Imported IDENTITY.md\n# Identity\n\n- Name: Legacy build copilot\n\n## Imported External Skills Artifacts\n- kind=skills_catalog\n- declared=custom/skill-a";
+    let config = runtime_config::MemoryRuntimeConfig {
+        profile: MemoryProfile::ProfilePlusWindow,
+        mode: MemoryMode::ProfilePlusWindow,
+        sqlite_path: Some(db_path.clone()),
+        sliding_window: 2,
+        profile_note: Some(profile_note.to_owned()),
+        ..runtime_config::MemoryRuntimeConfig::default()
+    };
+
+    append_turn_direct(
+        "profile-diagnostics-session",
+        "user",
+        "recent turn",
+        &config,
+    )
+    .expect("append_turn_direct should succeed");
+
+    let (entries, _diagnostics) =
+        load_prompt_context_with_diagnostics("profile-diagnostics-session", &config)
+            .expect("load_prompt_context_with_diagnostics should succeed");
+    let profile_entry = entries
+        .iter()
+        .find(|entry| entry.kind == MemoryContextKind::Profile)
+        .expect("profile entry");
+
+    assert!(
+        profile_entry
+            .content
+            .contains("Imported External Skills Artifacts")
+    );
+    assert!(!profile_entry.content.contains("Legacy build copilot"));
+
+    let _ = fs::remove_file(&db_path);
+    let _ = fs::remove_dir(&tmp);
+}
+
+#[cfg(feature = "memory-sqlite")]
+#[test]
+fn load_prompt_context_with_diagnostics_projects_typed_personalization_without_profile_note() {
+    use crate::config::{MemoryMode, MemoryProfile};
+
+    let workspace_root = crate::test_support::unique_temp_dir(
+        "loongclaw-test-memory-profile-diagnostics-personalization",
+    );
+    std::fs::create_dir_all(&workspace_root).expect("create diagnostics workspace");
+
+    let db_path = workspace_root.join("profile-diagnostics-personalization.sqlite3");
+    let default_personalization = crate::config::PersonalizationConfig::default();
+    let schema_version = default_personalization.schema_version;
+    let personalization = crate::config::PersonalizationConfig {
+        preferred_name: Some("Chum".to_owned()),
+        response_density: Some(crate::config::ResponseDensity::Balanced),
+        initiative_level: Some(crate::config::InitiativeLevel::AskBeforeActing),
+        standing_boundaries: Some("Ask before destructive actions.".to_owned()),
+        timezone: Some("Asia/Shanghai".to_owned()),
+        locale: None,
+        prompt_state: crate::config::PersonalizationPromptState::Configured,
+        schema_version,
+        updated_at_epoch_seconds: Some(1_775_095_200),
+    };
+    let config = runtime_config::MemoryRuntimeConfig {
+        profile: MemoryProfile::ProfilePlusWindow,
+        mode: MemoryMode::ProfilePlusWindow,
+        sqlite_path: Some(db_path.clone()),
+        sliding_window: 2,
+        profile_note: None,
+        personalization: Some(personalization),
+        ..runtime_config::MemoryRuntimeConfig::default()
+    };
+
+    append_turn_direct(
+        "profile-diagnostics-personalization-session",
+        "user",
+        "recent turn",
+        &config,
+    )
+    .expect("append_turn_direct should succeed");
+
+    let diagnostics_context = load_prompt_context_with_diagnostics(
+        "profile-diagnostics-personalization-session",
+        &config,
+    );
+    let (entries, _diagnostics) =
+        diagnostics_context.expect("load_prompt_context_with_diagnostics should succeed");
+    let profile_entry = entries
+        .iter()
+        .find(|entry| entry.kind == MemoryContextKind::Profile)
+        .expect("profile entry");
+    let profile_content = profile_entry.content.as_str();
+
+    assert!(profile_content.contains("## Session Profile"));
+    assert!(profile_content.contains("Preferred name: Chum"));
+    assert!(profile_content.contains("Response density: balanced"));
+    assert!(profile_content.contains("Initiative level: ask_before_acting"));
+    assert!(profile_content.contains("Ask before destructive actions."));
+    assert!(profile_content.contains("Timezone: Asia/Shanghai"));
+    assert!(!profile_content.contains("## Resolved Runtime Identity"));
+
+    cleanup_memory_workspace(&workspace_root, &db_path);
+}
+
+#[cfg(feature = "memory-sqlite")]
+#[test]
+fn load_prompt_context_with_diagnostics_uses_selected_memory_system_id_in_provenance() {
+    let (root, mut config) = isolated_memory_workspace("loongclaw-selected-system-provenance");
+    let session_id = "selected-system-provenance-session";
+
+    config.resolved_system_id = Some(crate::memory::WORKSPACE_RECALL_MEMORY_SYSTEM_ID.to_owned());
+
+    append_turn_direct(session_id, "user", "hello from selected system", &config)
+        .expect("append_turn_direct should succeed");
+
+    let (entries, _diagnostics) = load_prompt_context_with_diagnostics(session_id, &config)
+        .expect("load_prompt_context_with_diagnostics should succeed");
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].provenance.len(), 1);
+    assert_eq!(
+        entries[0].provenance[0].memory_system_id,
+        crate::memory::WORKSPACE_RECALL_MEMORY_SYSTEM_ID
+    );
+
+    let sqlite_path = config.sqlite_path.expect("sqlite path");
+    let _ = std::fs::remove_file(sqlite_path);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(feature = "memory-sqlite")]
+#[test]
+fn pre_compaction_durable_flush_deduplicates_repeated_summary_exports() {
+    let durable_flush_lock = crate::test_support::durable_memory_flush_test_lock();
+    let _durable_flush_guard = durable_flush_lock.blocking_lock();
+    let _guard = core_dispatch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("current-thread runtime");
+
+    let (workspace_root, config) =
+        isolated_memory_workspace("loongclaw-pre-compaction-durable-flush");
+
+    append_turn_direct(
+        "durable-flush-session",
+        "user",
+        "remember the deployment cutoff",
+        &config,
+    )
+    .expect("append user turn");
+    append_turn_direct(
+        "durable-flush-session",
+        "assistant",
+        "deployment cutoff is tonight",
+        &config,
+    )
+    .expect("append assistant turn");
+
+    let first = super::durable_flush::flush_pre_compaction_durable_memory(
+        "durable-flush-session",
+        Some(workspace_root.as_path()),
+        &config,
+    );
+    let first = runtime.block_on(first).expect("first durable flush");
+    let first_path = match first {
+        super::durable_flush::PreCompactionDurableFlushOutcome::Flushed { path, .. } => path,
+        other @ super::durable_flush::PreCompactionDurableFlushOutcome::SkippedMissingWorkspaceRoot
+        | other @ super::durable_flush::PreCompactionDurableFlushOutcome::SkippedNoSummary
+        | other @ super::durable_flush::PreCompactionDurableFlushOutcome::SkippedDuplicate => {
+            panic!("expected flushed outcome, got {other:?}")
+        }
+    };
+
+    let second = super::durable_flush::flush_pre_compaction_durable_memory(
+        "durable-flush-session",
+        Some(workspace_root.as_path()),
+        &config,
+    );
+    let second = runtime.block_on(second).expect("second durable flush");
+    assert_eq!(
+        second,
+        super::durable_flush::PreCompactionDurableFlushOutcome::SkippedDuplicate
+    );
+
+    let exported = std::fs::read_to_string(&first_path).expect("read durable memory log");
+    let marker_count = exported.matches("- content_sha256: ").count();
+    assert_eq!(
+        marker_count, 1,
+        "duplicate flush should not append another entry"
+    );
+    assert!(exported.contains("Advisory durable recall"));
+    assert!(exported.contains("remember the deployment cutoff"));
+    assert!(!exported.contains("## Resolved Runtime Identity"));
+}
+
+#[cfg(feature = "memory-sqlite")]
+#[test]
+fn pre_compaction_durable_flush_skips_when_no_summary_checkpoint_exists() {
+    let durable_flush_lock = crate::test_support::durable_memory_flush_test_lock();
+    let _durable_flush_guard = durable_flush_lock.blocking_lock();
+    let _guard = core_dispatch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("current-thread runtime");
+
+    let (workspace_root, config) =
+        isolated_memory_workspace("loongclaw-pre-compaction-durable-flush-empty");
+
+    append_turn_direct(
+        "durable-flush-empty-session",
+        "user",
+        "only one turn",
+        &config,
+    )
+    .expect("append user turn");
+
+    let outcome = super::durable_flush::flush_pre_compaction_durable_memory(
+        "durable-flush-empty-session",
+        Some(workspace_root.as_path()),
+        &config,
+    );
+    let outcome = runtime
+        .block_on(outcome)
+        .expect("durable flush without summary should succeed");
+
+    assert_eq!(
+        outcome,
+        super::durable_flush::PreCompactionDurableFlushOutcome::SkippedNoSummary
+    );
+}
+
+#[cfg(feature = "memory-sqlite")]
+#[test]
 fn append_turn_direct_bypasses_core_dispatch() {
     use std::fs;
 
@@ -221,16 +514,16 @@ fn append_turn_direct_bypasses_core_dispatch() {
         ..runtime_config::MemoryRuntimeConfig::default()
     };
 
-    begin_core_dispatch_capture_for_tests();
+    super::test_support::begin_core_dispatch_capture();
     append_turn_direct("append-fast-path-session", "user", "hello", &config)
         .expect("append_turn_direct should succeed");
 
     assert_eq!(
-        core_dispatch_count_for_tests(),
+        super::test_support::core_dispatch_count(),
         0,
         "append_turn_direct should bypass core dispatch"
     );
-    end_core_dispatch_capture_for_tests();
+    super::test_support::end_core_dispatch_capture();
 
     let _ = fs::remove_file(&db_path);
     let _ = fs::remove_dir(&tmp);
@@ -260,19 +553,342 @@ fn window_direct_bypasses_core_dispatch() {
 
     append_turn_direct("window-fast-path-session", "user", "hello", &config)
         .expect("seed append_turn_direct should succeed");
-    begin_core_dispatch_capture_for_tests();
+    super::test_support::begin_core_dispatch_capture();
 
     let turns = window_direct("window-fast-path-session", 10, &config)
         .expect("window_direct should succeed");
 
     assert_eq!(turns.len(), 1);
     assert_eq!(
-        core_dispatch_count_for_tests(),
+        super::test_support::core_dispatch_count(),
         0,
         "window_direct should bypass core dispatch"
     );
-    end_core_dispatch_capture_for_tests();
+    super::test_support::end_core_dispatch_capture();
 
     let _ = fs::remove_file(&db_path);
     let _ = fs::remove_dir(&tmp);
+}
+
+#[cfg(feature = "memory-sqlite")]
+#[test]
+fn replace_session_turns_direct_rewrites_window() {
+    use std::fs;
+
+    let tmp = std::env::temp_dir().join(format!(
+        "loongclaw-test-memory-replace-turns-{}",
+        std::process::id()
+    ));
+    let _ = fs::create_dir_all(&tmp);
+    let db_path = tmp.join("replace-turns.sqlite3");
+    let _ = fs::remove_file(&db_path);
+
+    let config = runtime_config::MemoryRuntimeConfig {
+        sqlite_path: Some(db_path.clone()),
+        ..runtime_config::MemoryRuntimeConfig::default()
+    };
+
+    append_turn_direct("replace-turns-session", "user", "turn 1", &config)
+        .expect("seed turn 1 should succeed");
+    append_turn_direct("replace-turns-session", "assistant", "turn 2", &config)
+        .expect("seed turn 2 should succeed");
+
+    replace_session_turns_direct(
+        "replace-turns-session",
+        &[
+            WindowTurn {
+                role: "assistant".into(),
+                content: "summary".into(),
+                ts: Some(2),
+            },
+            WindowTurn {
+                role: "user".into(),
+                content: "recent".into(),
+                ts: Some(3),
+            },
+        ],
+        &config,
+    )
+    .expect("replace_session_turns_direct should succeed");
+
+    let turns = window_direct("replace-turns-session", 10, &config)
+        .expect("window_direct should read rewritten turns");
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0].content, "summary");
+    assert_eq!(turns[1].content, "recent");
+
+    let _ = fs::remove_file(&db_path);
+    let _ = fs::remove_dir(&tmp);
+}
+
+#[cfg(feature = "memory-sqlite")]
+#[test]
+fn replace_session_turns_direct_requires_explicit_timestamps() {
+    use std::fs;
+
+    let tmp = std::env::temp_dir().join(format!(
+        "loongclaw-test-memory-replace-turns-ts-{}",
+        std::process::id()
+    ));
+    let _ = fs::create_dir_all(&tmp);
+    let db_path = tmp.join("replace-turns-missing-ts.sqlite3");
+    let _ = fs::remove_file(&db_path);
+
+    let config = runtime_config::MemoryRuntimeConfig {
+        sqlite_path: Some(db_path.clone()),
+        ..runtime_config::MemoryRuntimeConfig::default()
+    };
+
+    let error = replace_session_turns_direct(
+        "replace-turns-session",
+        &[WindowTurn {
+            role: "assistant".into(),
+            content: "summary".into(),
+            ts: None,
+        }],
+        &config,
+    )
+    .expect_err("replace_session_turns_direct should require explicit timestamps");
+
+    assert!(error.contains("turns[*].ts"), "unexpected error: {error}");
+
+    let _ = fs::remove_file(&db_path);
+    let _ = fs::remove_dir(&tmp);
+}
+
+#[test]
+fn registry_selected_system_can_override_memory_runtime_execution() {
+    use async_trait::async_trait;
+
+    struct RuntimeExecutingMemorySystem;
+
+    struct RuntimeExecutingMemorySystemRuntime {
+        metadata: MemorySystemMetadata,
+    }
+
+    impl MemorySystem for RuntimeExecutingMemorySystem {
+        fn id(&self) -> &'static str {
+            "registry-runtime-executing"
+        }
+
+        fn metadata(&self) -> MemorySystemMetadata {
+            MemorySystemMetadata::new(
+                "registry-runtime-executing",
+                [MemorySystemCapability::PromptHydration],
+                "Registry runtime-executing test system",
+            )
+            .with_supported_pre_assembly_stage_families([MemoryStageFamily::Retrieve])
+        }
+
+        fn create_runtime(
+            &self,
+            _config: &runtime_config::MemoryRuntimeConfig,
+        ) -> crate::CliResult<Option<Box<dyn MemorySystemRuntime>>> {
+            let metadata = self.metadata();
+            let runtime = RuntimeExecutingMemorySystemRuntime { metadata };
+            let boxed_runtime: Box<dyn MemorySystemRuntime> = Box::new(runtime);
+
+            Ok(Some(boxed_runtime))
+        }
+    }
+
+    #[async_trait]
+    impl MemorySystemRuntime for RuntimeExecutingMemorySystemRuntime {
+        fn metadata(&self) -> &MemorySystemMetadata {
+            &self.metadata
+        }
+
+        fn supported_core_operations(&self) -> Vec<MemoryCoreOperation> {
+            vec![MemoryCoreOperation::ReadContext]
+        }
+
+        fn execute_core(&self, request: MemoryCoreRequest) -> Result<MemoryCoreOutcome, String> {
+            let operation = request.operation;
+            let payload = json!({
+                "adapter": "registry-runtime-executing",
+                "operation": operation,
+            });
+            let outcome = MemoryCoreOutcome {
+                status: "ok".to_owned(),
+                payload,
+            };
+
+            Ok(outcome)
+        }
+
+        fn hydrate_stage_envelope(
+            &self,
+            _session_id: &str,
+            _workspace_root: Option<&std::path::Path>,
+        ) -> Result<StageEnvelope, String> {
+            let diagnostics = MemoryDiagnostics {
+                system_id: self.metadata.id.to_owned(),
+                fail_open: true,
+                strict_mode_requested: false,
+                strict_mode_active: false,
+                degraded: false,
+                derivation_error: None,
+                retrieval_error: None,
+                rank_error: None,
+                recent_window_count: 0,
+                entry_count: 0,
+            };
+            let hydrated = HydratedMemoryContext {
+                entries: Vec::new(),
+                recent_window: Vec::new(),
+                diagnostics,
+            };
+            let envelope = StageEnvelope {
+                hydrated,
+                retrieval_request: None,
+                diagnostics: vec![StageDiagnostics::succeeded(MemoryStageFamily::Retrieve)],
+            };
+
+            Ok(envelope)
+        }
+
+        async fn run_compact_stage(
+            &self,
+            _session_id: &str,
+            _workspace_root: Option<&std::path::Path>,
+        ) -> Result<StageDiagnostics, String> {
+            let diagnostics = StageDiagnostics::succeeded(MemoryStageFamily::Compact);
+            Ok(diagnostics)
+        }
+    }
+
+    fn ensure_registry_runtime_executing_system_registered() {
+        static REGISTRY_RUNTIME_EXECUTING_SYSTEM: OnceLock<()> = OnceLock::new();
+        REGISTRY_RUNTIME_EXECUTING_SYSTEM.get_or_init(|| {
+            register_memory_system("registry-runtime-executing", || {
+                Box::new(RuntimeExecutingMemorySystem)
+            })
+            .expect("register runtime-executing memory system");
+        });
+    }
+
+    let _guard = core_dispatch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    ensure_registry_runtime_executing_system_registered();
+
+    let config = runtime_config::MemoryRuntimeConfig {
+        resolved_system_id: Some("registry-runtime-executing".to_owned()),
+        ..runtime_config::MemoryRuntimeConfig::default()
+    };
+
+    let request = MemoryCoreRequest {
+        operation: "noop".to_owned(),
+        payload: json!({}),
+    };
+    let outcome = execute_memory_core_with_config(request, &config)
+        .expect("registry runtime should handle memory core execution");
+
+    assert_eq!(outcome.payload["adapter"], "registry-runtime-executing");
+
+    let envelope = hydrate_stage_envelope("runtime-executing-session", &config)
+        .expect("registry runtime should handle stage envelope hydration");
+
+    assert_eq!(
+        envelope.hydrated.diagnostics.system_id,
+        "registry-runtime-executing"
+    );
+}
+
+#[tokio::test]
+async fn registry_selected_system_can_use_compact_stage_hook_without_custom_runtime() {
+    struct CompactHookMemorySystem;
+
+    static EXPECTED_COMPACT_HOOK_SESSION_ID: OnceLock<String> = OnceLock::new();
+    static EXPECTED_COMPACT_HOOK_WORKSPACE_ROOT: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+    impl MemorySystem for CompactHookMemorySystem {
+        fn id(&self) -> &'static str {
+            "registry-compact-hook"
+        }
+
+        fn metadata(&self) -> MemorySystemMetadata {
+            MemorySystemMetadata::new(
+                "registry-compact-hook",
+                [MemorySystemCapability::PromptHydration],
+                "Registry compact hook test system",
+            )
+            .with_runtime_fallback_kind(
+                crate::memory::MemorySystemRuntimeFallbackKind::SystemBacked,
+            )
+            .with_supported_stage_families([MemoryStageFamily::Compact])
+        }
+
+        fn run_compact_stage(
+            &self,
+            session_id: &str,
+            workspace_root: Option<&std::path::Path>,
+            _config: &runtime_config::MemoryRuntimeConfig,
+        ) -> Result<Option<StageDiagnostics>, String> {
+            let expected_session_id = EXPECTED_COMPACT_HOOK_SESSION_ID
+                .get()
+                .expect("expected compact-hook session id");
+            let expected_workspace_root = EXPECTED_COMPACT_HOOK_WORKSPACE_ROOT
+                .get()
+                .expect("expected compact-hook workspace root");
+            let actual_workspace_root = workspace_root.map(|path| path.to_path_buf());
+            let expected_workspace_root = Some(expected_workspace_root.clone());
+            if session_id != expected_session_id {
+                let error = format!(
+                    "expected compact hook session id `{expected_session_id}`, got `{session_id}`"
+                );
+
+                return Err(error);
+            }
+            if actual_workspace_root != expected_workspace_root {
+                let error = format!(
+                    "expected compact hook workspace root `{:?}`, got `{:?}`",
+                    expected_workspace_root, actual_workspace_root
+                );
+
+                return Err(error);
+            }
+            let diagnostics = StageDiagnostics::succeeded(MemoryStageFamily::Compact);
+
+            Ok(Some(diagnostics))
+        }
+    }
+
+    fn ensure_registry_compact_hook_system_registered() {
+        static REGISTRY_COMPACT_HOOK_SYSTEM: OnceLock<()> = OnceLock::new();
+        REGISTRY_COMPACT_HOOK_SYSTEM.get_or_init(|| {
+            register_memory_system("registry-compact-hook", || {
+                Box::new(CompactHookMemorySystem)
+            })
+            .expect("register compact-hook memory system");
+        });
+    }
+
+    ensure_registry_compact_hook_system_registered();
+
+    let workspace_root = crate::test_support::unique_temp_dir("compact-hook-workspace");
+    std::fs::create_dir_all(&workspace_root).expect("create compact hook workspace");
+    EXPECTED_COMPACT_HOOK_SESSION_ID
+        .set("compact-hook-session".to_owned())
+        .ok();
+    EXPECTED_COMPACT_HOOK_WORKSPACE_ROOT
+        .set(workspace_root.clone())
+        .ok();
+
+    let config = runtime_config::MemoryRuntimeConfig {
+        resolved_system_id: Some("registry-compact-hook".to_owned()),
+        ..runtime_config::MemoryRuntimeConfig::default()
+    };
+    let diagnostics = run_compact_stage(
+        "compact-hook-session",
+        Some(workspace_root.as_path()),
+        &config,
+    )
+    .await
+    .expect("compact stage should run through system-backed runtime");
+
+    assert_eq!(diagnostics.family, MemoryStageFamily::Compact);
+    assert_eq!(diagnostics.outcome, StageOutcome::Succeeded);
+    assert!(!diagnostics.fallback_activated);
 }

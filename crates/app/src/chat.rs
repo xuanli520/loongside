@@ -1,22 +1,84 @@
-#[cfg(feature = "memory-sqlite")]
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::Mutex as StdMutex;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
-#[cfg(feature = "memory-sqlite")]
-use loongclaw_contracts::Capability;
+use tokio::sync::Notify;
 
 use crate::CliResult;
 use crate::acp::{
-    AcpConversationTurnOptions, AcpTurnEventSink, JsonlAcpTurnEventSink,
-    resolve_acp_backend_selection,
+    AcpConversationTurnOptions, AcpTurnEventSink, AcpTurnProvenance, JsonlAcpTurnEventSink,
 };
 use crate::context::{DEFAULT_TOKEN_TTL_S, bootstrap_kernel_context_with_config};
 
+mod cli_input;
+#[cfg(all(test, feature = "memory-sqlite"))]
+#[allow(clippy::expect_used)]
+mod latest_session_selector_tests;
+mod live_runtime;
+mod operator_surfaces;
+mod session_surface;
+
+use self::cli_input::ConcurrentCliInputReader;
+use self::live_runtime::*;
+#[cfg(test)]
+use self::operator_surfaces::CliChatStartupSummary;
+#[cfg(test)]
+use self::operator_surfaces::ManualCompactionResult;
+#[cfg(test)]
+use self::operator_surfaces::ManualCompactionStatus;
+#[cfg(test)]
+use self::operator_surfaces::build_cli_chat_startup_summary;
+use self::operator_surfaces::is_cli_chat_status_command;
+use self::operator_surfaces::is_manual_compaction_command;
+use self::operator_surfaces::is_turn_checkpoint_repair_command;
+#[cfg(test)]
+use self::operator_surfaces::load_history_lines;
+#[cfg(test)]
+use self::operator_surfaces::load_manual_compaction_result;
+#[cfg(test)]
+use self::operator_surfaces::manual_compaction_status_from_report;
+use self::operator_surfaces::parse_exact_chat_command;
+use self::operator_surfaces::parse_fast_lane_summary_limit;
+use self::operator_surfaces::parse_safe_lane_summary_limit;
+#[cfg(test)]
+use self::operator_surfaces::parse_summary_limit;
+use self::operator_surfaces::parse_turn_checkpoint_summary_limit;
+use self::operator_surfaces::print_cli_chat_startup;
+use self::operator_surfaces::print_cli_chat_status;
+use self::operator_surfaces::print_help;
+use self::operator_surfaces::print_history;
+use self::operator_surfaces::print_manual_compaction;
+#[cfg(test)]
+use self::operator_surfaces::render_cli_chat_help_lines_with_width;
+#[cfg(test)]
+use self::operator_surfaces::render_cli_chat_history_lines_with_width;
+use self::operator_surfaces::render_cli_chat_missing_config_decline_lines_with_width;
+use self::operator_surfaces::render_cli_chat_missing_config_lines_with_width;
+#[cfg(test)]
+use self::operator_surfaces::render_cli_chat_startup_lines_with_width;
+#[cfg(test)]
+use self::operator_surfaces::render_cli_chat_status_lines_with_width;
+#[cfg(test)]
+use self::operator_surfaces::render_manual_compaction_lines_with_width;
+use self::operator_surfaces::should_run_missing_config_onboard;
+
 use super::config::{self, ConversationConfig, LoongClawConfig};
+#[cfg(test)]
+use super::conversation::ContextCompactionReport;
+#[cfg(test)]
+use super::conversation::TurnCheckpointTailRepairRuntimeProbe;
 use super::conversation::{
-    ConversationRuntimeBinding, ConversationSessionAddress, ConversationTurnCoordinator,
-    ProviderErrorMode, resolve_context_engine_selection,
+    ConversationIngressContext, ConversationRuntimeBinding, ConversationSessionAddress,
+    ConversationTurnCoordinator, ConversationTurnObserver, ConversationTurnObserverHandle,
+    ConversationTurnPhase, ConversationTurnPhaseEvent, ConversationTurnRuntimeEvent,
+    ConversationTurnToolEvent, ConversationTurnToolState, ExecutionLane, ProviderErrorMode,
+    parse_approval_prompt_view,
 };
 #[cfg(any(test, feature = "memory-sqlite"))]
 use super::conversation::{
@@ -28,7 +90,7 @@ use super::conversation::{
     TurnCheckpointDiagnostics, TurnCheckpointEventSummary, TurnCheckpointFailureStep,
     TurnCheckpointProgressStatus, TurnCheckpointRecoveryAction, TurnCheckpointRecoveryAssessment,
     TurnCheckpointSessionState, TurnCheckpointStage, TurnCheckpointTailRepairOutcome,
-    TurnCheckpointTailRepairReason, TurnCheckpointTailRepairRuntimeProbe,
+    TurnCheckpointTailRepairReason, TurnCheckpointTailRepairStatus,
 };
 #[cfg(feature = "memory-sqlite")]
 use super::conversation::{load_fast_lane_tool_batch_event_summary, load_safe_lane_event_summary};
@@ -36,8 +98,28 @@ use super::conversation::{load_fast_lane_tool_batch_event_summary, load_safe_lan
 use super::memory;
 #[cfg(feature = "memory-sqlite")]
 use super::memory::runtime_config::MemoryRuntimeConfig;
+#[cfg(feature = "memory-sqlite")]
+use super::session::LATEST_SESSION_SELECTOR;
+#[cfg(feature = "memory-sqlite")]
+use super::session::latest_resumable_root_session_id;
+use super::tui_surface::{
+    TuiCalloutTone, TuiChecklistItemSpec, TuiChecklistStatus, TuiChoiceSpec, TuiHeaderStyle,
+    TuiKeyValueSpec, TuiMessageSpec, TuiScreenSpec, TuiSectionSpec, render_tui_message_body_spec,
+    render_tui_screen_spec,
+};
+#[cfg(test)]
+use crate::tools::runtime_events::{ToolCommandMetrics, ToolFileChangePreview, ToolOutputDelta};
+use crate::tools::runtime_events::{ToolFileChangeKind, ToolRuntimeEvent, ToolRuntimeStream};
 
 pub const DEFAULT_FIRST_PROMPT: &str = "Summarize this repository and suggest the best next step.";
+const TEST_ONBOARD_EXECUTABLE_ENV: &str = "LOONGCLAW_TEST_ONBOARD_EXECUTABLE";
+const CLI_CHAT_HELP_COMMAND: &str = "/help";
+const CLI_CHAT_COMPACT_COMMAND: &str = "/compact";
+const CLI_CHAT_STATUS_COMMAND: &str = "/status";
+const CLI_CHAT_HISTORY_COMMAND: &str = "/history";
+const CLI_CHAT_TURN_CHECKPOINT_REPAIR_COMMAND: &str = "/turn_checkpoint_repair";
+const CLI_CHAT_TURN_CHECKPOINT_REPAIR_COMMAND_ALIAS: &str = "/turn-checkpoint-repair";
+const CLI_CHAT_COMPOSER_PROMPT: &str = "╰─ you · compose › ";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CliChatOptions {
@@ -45,6 +127,62 @@ pub struct CliChatOptions {
     pub acp_event_stream: bool,
     pub acp_bootstrap_mcp_servers: Vec<String>,
     pub acp_working_directory: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConcurrentCliHostOptions {
+    pub resolved_path: PathBuf,
+    pub config: LoongClawConfig,
+    pub session_id: String,
+    pub shutdown: ConcurrentCliShutdown,
+    pub initialize_runtime_environment: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConcurrentCliShutdown {
+    requested: Arc<AtomicBool>,
+    notify: Arc<Notify>,
+}
+
+impl Default for ConcurrentCliShutdown {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ConcurrentCliShutdown {
+    pub fn new() -> Self {
+        Self {
+            requested: Arc::new(AtomicBool::new(false)),
+            notify: Arc::new(Notify::new()),
+        }
+    }
+
+    pub fn request_shutdown(&self) {
+        self.requested.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    pub fn is_requested(&self) -> bool {
+        self.requested.load(Ordering::SeqCst)
+    }
+
+    pub async fn wait(&self) {
+        if self.is_requested() {
+            return;
+        }
+
+        loop {
+            if self.is_requested() {
+                return;
+            }
+            let notified = self.notify.notified();
+            if self.is_requested() {
+                return;
+            }
+            notified.await;
+        }
+    }
 }
 
 impl CliChatOptions {
@@ -56,38 +194,84 @@ impl CliChatOptions {
     }
 }
 
-struct CliTurnRuntime {
-    resolved_path: PathBuf,
-    config: LoongClawConfig,
-    session_id: String,
-    session_address: ConversationSessionAddress,
-    turn_coordinator: ConversationTurnCoordinator,
-    kernel_ctx: crate::KernelContext,
-    explicit_acp_request: bool,
-    effective_bootstrap_mcp_servers: Vec<String>,
-    effective_working_directory: Option<PathBuf>,
-    memory_label: String,
-    #[cfg(feature = "memory-sqlite")]
-    memory_config: MemoryRuntimeConfig,
+fn append_onboard_target_args(
+    command: &mut std::process::Command,
+    config_path: Option<&str>,
+    resolved_config_path: &Path,
+) {
+    if config_path.is_some() {
+        command.arg("--output").arg(resolved_config_path);
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CliChatStartupSummary {
-    config_path: String,
-    memory_label: String,
-    session_id: String,
-    context_engine_id: String,
-    context_engine_source: String,
-    acp_enabled: bool,
-    dispatch_enabled: bool,
-    conversation_routing: String,
-    allowed_channels: Vec<String>,
-    acp_backend_id: String,
-    acp_backend_source: String,
-    explicit_acp_request: bool,
-    event_stream_enabled: bool,
-    bootstrap_mcp_servers: Vec<String>,
-    working_directory: Option<String>,
+fn resolve_onboard_executable_path() -> CliResult<PathBuf> {
+    if cfg!(debug_assertions)
+        && let Some(executable_path) = std::env::var_os(TEST_ONBOARD_EXECUTABLE_ENV)
+    {
+        return Ok(PathBuf::from(executable_path));
+    }
+
+    std::env::current_exe()
+        .map_err(|error| format!("failed to resolve current executable: {error}"))
+}
+
+fn build_onboard_command_for_executable(
+    executable_path: PathBuf,
+    config_path: Option<&str>,
+    resolved_config_path: &Path,
+) -> std::process::Command {
+    let mut command = std::process::Command::new(executable_path);
+    command.arg("onboard");
+    append_onboard_target_args(&mut command, config_path, resolved_config_path);
+    command
+}
+
+fn build_onboard_command(
+    config_path: Option<&str>,
+    resolved_config_path: &Path,
+) -> CliResult<std::process::Command> {
+    let executable_path = resolve_onboard_executable_path()?;
+    Ok(build_onboard_command_for_executable(
+        executable_path,
+        config_path,
+        resolved_config_path,
+    ))
+}
+
+fn format_onboard_command_hint(config_path: Option<&str>, resolved_config_path: &Path) -> String {
+    let mut command = format!("{} onboard", config::active_cli_command_name());
+    if config_path.is_some() {
+        command.push_str(" --output ");
+        command.push_str(&resolved_config_path.display().to_string());
+    }
+    command
+}
+
+pub(crate) struct CliTurnRuntime {
+    pub(crate) resolved_path: PathBuf,
+    pub(crate) config: LoongClawConfig,
+    pub(crate) session_id: String,
+    pub(crate) session_address: ConversationSessionAddress,
+    pub(crate) turn_coordinator: ConversationTurnCoordinator,
+    pub(crate) kernel_ctx: crate::KernelContext,
+    pub(crate) explicit_acp_request: bool,
+    pub(crate) effective_bootstrap_mcp_servers: Vec<String>,
+    pub(crate) effective_working_directory: Option<PathBuf>,
+    pub(crate) memory_label: String,
+    #[cfg(feature = "memory-sqlite")]
+    pub(crate) memory_config: MemoryRuntimeConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CliSessionRequirement {
+    AllowImplicitDefault,
+    RequireExplicit,
+}
+
+enum CliChatLoopControl {
+    Continue,
+    Exit,
+    AssistantText(String),
 }
 
 #[allow(clippy::print_stdout)] // CLI REPL output
@@ -96,46 +280,76 @@ pub async fn run_cli_chat(
     session_hint: Option<&str>,
     options: &CliChatOptions,
 ) -> CliResult<()> {
-    let runtime =
-        initialize_cli_turn_runtime(config_path, session_hint, options, "cli-chat").await?;
-    print_cli_chat_startup(&runtime, options)?;
-
-    #[cfg(feature = "memory-sqlite")]
-    match runtime
-        .turn_coordinator
-        .load_turn_checkpoint_diagnostics(
-            &runtime.config,
-            &runtime.session_id,
-            crate::conversation::ConversationRuntimeBinding::kernel(&runtime.kernel_ctx),
-        )
-        .await
-    {
-        Ok(diagnostics) => {
-            if let Some(health) =
-                format_turn_checkpoint_startup_health(&runtime.session_id, &diagnostics)
-            {
-                println!("{health}");
-                if let Some(probe) = diagnostics.runtime_probe() {
-                    println!(
-                        "{}",
-                        format_turn_checkpoint_runtime_probe(&runtime.session_id, probe)
-                    );
-                }
-            }
-        }
-        Err(error) => {
-            println!(
-                "turn_checkpoint_health session={} state=unavailable error={error}",
-                runtime.session_id
-            );
-        }
+    ensure_cli_channel_enabled_for_entrypoint(config_path)?;
+    if session_surface::interactive_terminal_surface_supported() {
+        return session_surface::run_cli_chat_surface(config_path, session_hint, options).await;
     }
+
+    run_cli_chat_repl(config_path, session_hint, options).await
+}
+
+#[allow(clippy::print_stdout)] // CLI REPL output
+async fn run_cli_chat_repl(
+    config_path: Option<&str>,
+    session_hint: Option<&str>,
+    options: &CliChatOptions,
+) -> CliResult<()> {
+    let resolved_config_path = config_path
+        .map(config::expand_path)
+        .unwrap_or_else(config::default_config_path);
+    let config_exists = resolved_config_path.try_exists().map_err(|error| {
+        format!(
+            "failed to access config path {}: {error}",
+            resolved_config_path.display()
+        )
+    })?;
+
+    if !config_exists {
+        let onboard_hint = format_onboard_command_hint(config_path, &resolved_config_path);
+        let render_width = detect_cli_chat_render_width();
+        let rendered_lines =
+            render_cli_chat_missing_config_lines_with_width(&onboard_hint, render_width);
+
+        print_rendered_cli_chat_lines(&rendered_lines);
+
+        let mut input = String::new();
+        let read = io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| format!("read stdin failed: {e}"))?;
+        let should_run_onboard = should_run_missing_config_onboard(read, &input);
+
+        if should_run_onboard {
+            let mut onboard = build_onboard_command(config_path, &resolved_config_path)?;
+
+            let exit_status = onboard
+                .spawn()
+                .map_err(|e| format!("failed to spawn onboard: {e}"))?
+                .wait()
+                .map_err(|e| format!("failed to wait for onboard: {e}"))?;
+
+            if !exit_status.success() {
+                return Err(format!("onboard exited with code {:?}", exit_status.code()));
+            }
+        } else {
+            let rendered_lines = render_cli_chat_missing_config_decline_lines_with_width(
+                &onboard_hint,
+                render_width,
+            );
+
+            print_rendered_cli_chat_lines(&rendered_lines);
+        }
+        return Ok(());
+    }
+
+    let runtime = initialize_cli_turn_runtime(config_path, session_hint, options, "cli-chat")?;
+    print_cli_chat_startup(&runtime, options)?;
+    print_turn_checkpoint_startup_health(&runtime).await;
     let acp_event_printer = options
         .acp_event_stream
         .then(|| JsonlAcpTurnEventSink::stderr_with_prefix("acp-event> "));
 
     loop {
-        print!("you> ");
+        print!("{CLI_CHAT_COMPOSER_PROMPT}");
         io::stdout()
             .flush()
             .map_err(|error| format!("flush stdout failed: {error}"))?;
@@ -147,123 +361,25 @@ pub async fn run_cli_chat(
             println!();
             break;
         }
-        let input = line.trim();
-        if input.is_empty() {
-            continue;
-        }
-        if is_exit_command(&runtime.config, input) {
-            break;
-        }
-        if input == "/help" {
-            print_help();
-            continue;
-        }
-        if input == "/history" {
-            #[cfg(feature = "memory-sqlite")]
-            print_history(
-                &runtime.session_id,
-                runtime.config.memory.sliding_window,
-                ConversationRuntimeBinding::kernel(&runtime.kernel_ctx),
-                &runtime.memory_config,
-            )
-            .await?;
-            #[cfg(not(feature = "memory-sqlite"))]
-            print_history(
-                &runtime.session_id,
-                runtime.config.memory.sliding_window,
-                ConversationRuntimeBinding::kernel(&runtime.kernel_ctx),
-            )
-            .await?;
-            continue;
-        }
-        if let Some(limit) =
-            parse_fast_lane_summary_limit(input, runtime.config.memory.sliding_window)?
-        {
-            #[cfg(feature = "memory-sqlite")]
-            print_fast_lane_summary(
-                &runtime.session_id,
-                limit,
-                ConversationRuntimeBinding::kernel(&runtime.kernel_ctx),
-                &runtime.memory_config,
-            )
-            .await?;
-            #[cfg(not(feature = "memory-sqlite"))]
-            print_fast_lane_summary(
-                &runtime.session_id,
-                limit,
-                ConversationRuntimeBinding::kernel(&runtime.kernel_ctx),
-            )
-            .await?;
-            continue;
-        }
-        if let Some(limit) =
-            parse_safe_lane_summary_limit(input, runtime.config.memory.sliding_window)?
-        {
-            #[cfg(feature = "memory-sqlite")]
-            print_safe_lane_summary(
-                &runtime.session_id,
-                limit,
-                &runtime.config.conversation,
-                ConversationRuntimeBinding::kernel(&runtime.kernel_ctx),
-                &runtime.memory_config,
-            )
-            .await?;
-            #[cfg(not(feature = "memory-sqlite"))]
-            print_safe_lane_summary(
-                &runtime.session_id,
-                limit,
-                &runtime.config.conversation,
-                ConversationRuntimeBinding::kernel(&runtime.kernel_ctx),
-            )
-            .await?;
-            continue;
-        }
-        if let Some(limit) =
-            parse_turn_checkpoint_summary_limit(input, runtime.config.memory.sliding_window)?
-        {
-            #[cfg(feature = "memory-sqlite")]
-            print_turn_checkpoint_summary(
-                &runtime.turn_coordinator,
-                &runtime.config,
-                &runtime.session_id,
-                limit,
-                ConversationRuntimeBinding::kernel(&runtime.kernel_ctx),
-                &runtime.memory_config,
-            )
-            .await?;
-            #[cfg(not(feature = "memory-sqlite"))]
-            print_turn_checkpoint_summary(
-                &runtime.turn_coordinator,
-                &runtime.config,
-                &runtime.session_id,
-                limit,
-                ConversationRuntimeBinding::kernel(&runtime.kernel_ctx),
-            )
-            .await?;
-            continue;
-        }
-        if is_turn_checkpoint_repair_command(input)? {
-            print_turn_checkpoint_repair(
-                &runtime.turn_coordinator,
-                &runtime.config,
-                &runtime.session_id,
-                ConversationRuntimeBinding::kernel(&runtime.kernel_ctx),
-            )
-            .await?;
-            continue;
-        }
-
-        let assistant_text = run_cli_turn(
+        match process_cli_chat_input(
             &runtime,
-            input,
+            line.trim(),
             options,
             acp_event_printer
                 .as_ref()
                 .map(|printer| printer as &dyn AcpTurnEventSink),
         )
-        .await?;
-
-        println!("loongclaw> {assistant_text}");
+        .await?
+        {
+            CliChatLoopControl::Continue => continue,
+            CliChatLoopControl::Exit => break,
+            CliChatLoopControl::AssistantText(assistant_text) => {
+                let render_width = detect_cli_chat_render_width();
+                let rendered_lines =
+                    render_cli_chat_assistant_lines_with_width(&assistant_text, render_width);
+                print_rendered_cli_chat_lines(&rendered_lines);
+            }
+        }
     }
 
     println!("bye.");
@@ -281,39 +397,143 @@ pub async fn run_cli_ask(
     if input.is_empty() {
         return Err("ask message must not be empty".to_owned());
     }
+    ensure_cli_channel_enabled_for_entrypoint(config_path)?;
 
-    let runtime =
-        initialize_cli_turn_runtime(config_path, session_hint, options, "cli-ask").await?;
+    let runtime = initialize_cli_turn_runtime(config_path, session_hint, options, "cli-ask")?;
     let acp_event_printer = options
         .acp_event_stream
         .then(|| JsonlAcpTurnEventSink::stderr_with_prefix("acp-event> "));
     let assistant_text = run_cli_turn(
         &runtime,
         input,
-        options,
         acp_event_printer
             .as_ref()
             .map(|printer| printer as &dyn AcpTurnEventSink),
+        false,
     )
     .await?;
     println!("{assistant_text}");
     Ok(())
 }
 
-async fn initialize_cli_turn_runtime(
+pub fn run_concurrent_cli_host(options: &ConcurrentCliHostOptions) -> CliResult<()> {
+    reject_disabled_cli_channel(&options.config)?;
+    if session_surface::interactive_terminal_surface_supported() {
+        return session_surface::run_concurrent_cli_host_surface(options);
+    }
+
+    run_concurrent_cli_host_repl(options)
+}
+
+fn run_concurrent_cli_host_repl(options: &ConcurrentCliHostOptions) -> CliResult<()> {
+    let chat_options = CliChatOptions::default();
+    let runtime = initialize_cli_turn_runtime_with_loaded_config(
+        options.resolved_path.clone(),
+        options.config.clone(),
+        Some(options.session_id.as_str()),
+        &chat_options,
+        "cli-chat-concurrent",
+        CliSessionRequirement::RequireExplicit,
+        options.initialize_runtime_environment,
+    )?;
+    print_cli_chat_startup(&runtime, &chat_options)?;
+
+    let host_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("failed to initialize concurrent CLI host runtime: {error}"))?;
+
+    host_runtime.block_on(async {
+        print_turn_checkpoint_startup_health(&runtime).await;
+        run_concurrent_cli_host_loop(&runtime, &chat_options, &options.shutdown).await
+    })
+}
+
+pub(crate) fn reject_disabled_cli_channel(config: &LoongClawConfig) -> CliResult<()> {
+    if config.cli.enabled {
+        return Ok(());
+    }
+
+    Err("CLI channel is disabled by config.cli.enabled=false".to_owned())
+}
+
+fn ensure_cli_channel_enabled_for_entrypoint(config_path: Option<&str>) -> CliResult<()> {
+    let resolved_config_path = config_path
+        .map(config::expand_path)
+        .unwrap_or_else(config::default_config_path);
+    let config_exists = resolved_config_path.try_exists().map_err(|error| {
+        format!(
+            "failed to access config path {}: {error}",
+            resolved_config_path.display()
+        )
+    })?;
+    if !config_exists {
+        return Ok(());
+    }
+
+    let (_resolved_path, config) = config::load(config_path)?;
+    reject_disabled_cli_channel(&config)
+}
+
+pub(crate) fn initialize_cli_turn_runtime(
     config_path: Option<&str>,
     session_hint: Option<&str>,
     options: &CliChatOptions,
     kernel_scope: &'static str,
 ) -> CliResult<CliTurnRuntime> {
     let (resolved_path, config) = config::load(config_path)?;
-    if !config.cli.enabled {
-        return Err("CLI channel is disabled by config.cli.enabled=false".to_owned());
-    }
+    initialize_cli_turn_runtime_with_loaded_config(
+        resolved_path,
+        config,
+        session_hint,
+        options,
+        kernel_scope,
+        CliSessionRequirement::AllowImplicitDefault,
+        true,
+    )
+}
 
-    crate::runtime_env::initialize_runtime_environment(&config, Some(&resolved_path));
+pub(crate) fn initialize_cli_turn_runtime_with_loaded_config(
+    resolved_path: PathBuf,
+    config: LoongClawConfig,
+    session_hint: Option<&str>,
+    options: &CliChatOptions,
+    kernel_scope: &'static str,
+    session_requirement: CliSessionRequirement,
+    initialize_runtime_environment: bool,
+) -> CliResult<CliTurnRuntime> {
+    let mut config = config;
+    let runtime_workspace_root = std::env::current_dir()
+        .ok()
+        .unwrap_or_else(|| config.tools.resolved_file_root());
+    let runtime_workspace_root =
+        dunce::canonicalize(&runtime_workspace_root).unwrap_or(runtime_workspace_root);
+    let runtime_workspace_root = runtime_workspace_root.display().to_string();
+    config.tools.runtime_workspace_root = Some(runtime_workspace_root);
+
+    if initialize_runtime_environment {
+        crate::runtime_env::initialize_runtime_environment(&config, Some(&resolved_path));
+    }
     let kernel_ctx =
         bootstrap_kernel_context_with_config(kernel_scope, DEFAULT_TOKEN_TTL_S, &config)?;
+    initialize_cli_turn_runtime_with_loaded_config_and_kernel_ctx(
+        resolved_path,
+        config,
+        session_hint,
+        options,
+        kernel_ctx,
+        session_requirement,
+    )
+}
+
+pub(crate) fn initialize_cli_turn_runtime_with_loaded_config_and_kernel_ctx(
+    resolved_path: PathBuf,
+    config: LoongClawConfig,
+    session_hint: Option<&str>,
+    options: &CliChatOptions,
+    kernel_ctx: crate::KernelContext,
+    session_requirement: CliSessionRequirement,
+) -> CliResult<CliTurnRuntime> {
     let explicit_acp_request = options.requests_explicit_acp();
     let effective_bootstrap_mcp_servers = config
         .acp
@@ -323,24 +543,29 @@ async fn initialize_cli_turn_runtime(
         .acp_working_directory
         .clone()
         .or_else(|| config.acp.dispatch.resolved_working_directory());
-    let session_id = session_hint
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("default")
-        .to_owned();
-    let session_address = ConversationSessionAddress::from_session_id(session_id.clone());
 
     #[cfg(feature = "memory-sqlite")]
-    let (memory_config, memory_label) = {
-        let memory_config = MemoryRuntimeConfig::from_memory_config(&config.memory);
+    let memory_config = MemoryRuntimeConfig::from_memory_config(&config.memory);
+
+    #[cfg(feature = "memory-sqlite")]
+    let memory_label = {
         let sqlite_path = config.memory.resolved_sqlite_path();
         let initialized = memory::ensure_memory_db_ready(Some(sqlite_path), &memory_config)
             .map_err(|error| format!("failed to initialize sqlite memory: {error}"))?;
-        (memory_config, initialized.display().to_string())
+        initialized.display().to_string()
     };
 
     #[cfg(not(feature = "memory-sqlite"))]
     let memory_label = "disabled".to_owned();
+
+    #[cfg(feature = "memory-sqlite")]
+    let session_id =
+        resolve_cli_runtime_session_id(session_hint, session_requirement, &memory_config)?;
+
+    #[cfg(not(feature = "memory-sqlite"))]
+    let session_id = resolve_cli_session_id(session_hint, session_requirement)?;
+
+    let session_address = ConversationSessionAddress::from_session_id(session_id.clone());
 
     Ok(CliTurnRuntime {
         resolved_path,
@@ -358,105 +583,973 @@ async fn initialize_cli_turn_runtime(
     })
 }
 
-#[allow(clippy::print_stdout)] // CLI output
-fn print_cli_chat_startup(runtime: &CliTurnRuntime, options: &CliChatOptions) -> CliResult<()> {
-    let summary = build_cli_chat_startup_summary(runtime, options)?;
-    for line in render_cli_chat_startup_lines(&summary) {
-        println!("{line}");
+fn resolve_cli_session_id(
+    session_hint: Option<&str>,
+    session_requirement: CliSessionRequirement,
+) -> CliResult<String> {
+    match session_hint
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(session_id) => Ok(session_id.to_owned()),
+        None => match session_requirement {
+            CliSessionRequirement::AllowImplicitDefault => Ok("default".to_owned()),
+            CliSessionRequirement::RequireExplicit => {
+                Err("concurrent CLI host requires an explicit session id".to_owned())
+            }
+        },
     }
+}
+
+#[cfg(feature = "memory-sqlite")]
+fn resolve_cli_runtime_session_id(
+    session_hint: Option<&str>,
+    session_requirement: CliSessionRequirement,
+    memory_config: &MemoryRuntimeConfig,
+) -> CliResult<String> {
+    let session_id = resolve_cli_session_id(session_hint, session_requirement)?;
+    let should_resolve_latest = session_requirement == CliSessionRequirement::AllowImplicitDefault
+        && session_id == LATEST_SESSION_SELECTOR;
+
+    if !should_resolve_latest {
+        return Ok(session_id);
+    }
+
+    let latest_session_id = latest_resumable_root_session_id(memory_config)?;
+    let latest_session_id = latest_session_id.ok_or_else(|| {
+        "CLI session selector `latest` did not find any resumable root session".to_owned()
+    })?;
+
+    Ok(latest_session_id)
+}
+
+#[allow(clippy::print_stdout)] // CLI output
+async fn print_turn_checkpoint_startup_health(runtime: &CliTurnRuntime) {
+    operator_surfaces::print_turn_checkpoint_startup_health(runtime).await;
+}
+
+#[allow(clippy::print_stdout)] // CLI output
+async fn run_concurrent_cli_host_loop(
+    runtime: &CliTurnRuntime,
+    options: &CliChatOptions,
+    shutdown: &ConcurrentCliShutdown,
+) -> CliResult<()> {
+    if shutdown.is_requested() {
+        println!("bye.");
+        return Ok(());
+    }
+
+    let mut stdin_reader = ConcurrentCliInputReader::new()?;
+
+    loop {
+        if shutdown.is_requested() {
+            break;
+        }
+
+        print!("{CLI_CHAT_COMPOSER_PROMPT}");
+        io::stdout()
+            .flush()
+            .map_err(|error| format!("flush stdout failed: {error}"))?;
+
+        let next_line = tokio::select! {
+            _ = shutdown.wait() => {
+                println!();
+                None
+            },
+            line = stdin_reader.next_line() => Some(line?),
+        };
+
+        let Some(line) = next_line else {
+            break;
+        };
+        let Some(line) = line else {
+            println!();
+            break;
+        };
+
+        match process_cli_chat_input(runtime, line.trim(), options, None).await? {
+            CliChatLoopControl::Continue => continue,
+            CliChatLoopControl::Exit => break,
+            CliChatLoopControl::AssistantText(assistant_text) => {
+                let render_width = detect_cli_chat_render_width();
+                let rendered_lines =
+                    render_cli_chat_assistant_lines_with_width(&assistant_text, render_width);
+                print_rendered_cli_chat_lines(&rendered_lines);
+            }
+        }
+    }
+
+    println!("bye.");
     Ok(())
 }
 
-fn build_cli_chat_startup_summary(
+async fn process_cli_chat_input(
     runtime: &CliTurnRuntime,
+    input: &str,
     options: &CliChatOptions,
-) -> CliResult<CliChatStartupSummary> {
-    let context_engine_selection = resolve_context_engine_selection(&runtime.config);
-    let acp_selection = resolve_acp_backend_selection(&runtime.config);
-    Ok(CliChatStartupSummary {
-        config_path: runtime.resolved_path.display().to_string(),
-        memory_label: runtime.memory_label.clone(),
-        session_id: runtime.session_id.clone(),
-        context_engine_id: context_engine_selection.id.to_owned(),
-        context_engine_source: context_engine_selection.source.as_str().to_owned(),
-        acp_enabled: runtime.config.acp.enabled,
-        dispatch_enabled: runtime.config.acp.dispatch_enabled(),
-        conversation_routing: runtime
-            .config
-            .acp
-            .dispatch
-            .conversation_routing
-            .as_str()
-            .to_owned(),
-        allowed_channels: runtime.config.acp.dispatch.allowed_channel_ids()?,
-        acp_backend_id: acp_selection.id.to_owned(),
-        acp_backend_source: acp_selection.source.as_str().to_owned(),
-        explicit_acp_request: runtime.explicit_acp_request,
-        event_stream_enabled: options.acp_event_stream,
-        bootstrap_mcp_servers: runtime.effective_bootstrap_mcp_servers.clone(),
-        working_directory: runtime
-            .effective_working_directory
-            .as_ref()
-            .map(|path| path.display().to_string()),
+    event_sink: Option<&dyn AcpTurnEventSink>,
+) -> CliResult<CliChatLoopControl> {
+    if input.is_empty() {
+        return Ok(CliChatLoopControl::Continue);
+    }
+    if is_exit_command(&runtime.config, input) {
+        return Ok(CliChatLoopControl::Exit);
+    }
+    match classify_chat_command_match_result(parse_exact_chat_command(
+        input,
+        &[CLI_CHAT_HELP_COMMAND],
+        "usage: /help",
+    ))? {
+        ChatCommandMatchResult::Matched => {
+            print_help();
+            return Ok(CliChatLoopControl::Continue);
+        }
+        ChatCommandMatchResult::UsageError(usage) => {
+            let usage_lines = render_cli_chat_command_usage_lines_with_width(
+                &usage,
+                detect_cli_chat_render_width(),
+            );
+            print_rendered_cli_chat_lines(&usage_lines);
+            return Ok(CliChatLoopControl::Continue);
+        }
+        ChatCommandMatchResult::NotMatched => {}
+    }
+    match classify_chat_command_match_result(is_cli_chat_status_command(input))? {
+        ChatCommandMatchResult::Matched => {
+            print_cli_chat_status(runtime, options).await?;
+            return Ok(CliChatLoopControl::Continue);
+        }
+        ChatCommandMatchResult::UsageError(usage) => {
+            let usage_lines = render_cli_chat_command_usage_lines_with_width(
+                &usage,
+                detect_cli_chat_render_width(),
+            );
+            print_rendered_cli_chat_lines(&usage_lines);
+            return Ok(CliChatLoopControl::Continue);
+        }
+        ChatCommandMatchResult::NotMatched => {}
+    }
+    match classify_chat_command_match_result(is_manual_compaction_command(input))? {
+        ChatCommandMatchResult::Matched => {
+            print_manual_compaction(runtime).await?;
+            return Ok(CliChatLoopControl::Continue);
+        }
+        ChatCommandMatchResult::UsageError(usage) => {
+            let usage_lines = render_cli_chat_command_usage_lines_with_width(
+                &usage,
+                detect_cli_chat_render_width(),
+            );
+            print_rendered_cli_chat_lines(&usage_lines);
+            return Ok(CliChatLoopControl::Continue);
+        }
+        ChatCommandMatchResult::NotMatched => {}
+    }
+    match classify_chat_command_match_result(parse_exact_chat_command(
+        input,
+        &[CLI_CHAT_HISTORY_COMMAND],
+        "usage: /history",
+    ))? {
+        ChatCommandMatchResult::Matched => {
+            #[cfg(feature = "memory-sqlite")]
+            print_history(
+                &runtime.session_id,
+                runtime.config.memory.sliding_window,
+                ConversationRuntimeBinding::kernel(&runtime.kernel_ctx),
+                &runtime.memory_config,
+            )
+            .await?;
+            #[cfg(not(feature = "memory-sqlite"))]
+            print_history(
+                &runtime.session_id,
+                runtime.config.memory.sliding_window,
+                ConversationRuntimeBinding::kernel(&runtime.kernel_ctx),
+            )
+            .await?;
+            return Ok(CliChatLoopControl::Continue);
+        }
+        ChatCommandMatchResult::UsageError(usage) => {
+            let usage_lines = render_cli_chat_command_usage_lines_with_width(
+                &usage,
+                detect_cli_chat_render_width(),
+            );
+            print_rendered_cli_chat_lines(&usage_lines);
+            return Ok(CliChatLoopControl::Continue);
+        }
+        ChatCommandMatchResult::NotMatched => {}
+    }
+    let fast_lane_limit_result =
+        parse_fast_lane_summary_limit(input, runtime.config.memory.sliding_window);
+    match fast_lane_limit_result {
+        Ok(Some(limit)) => {
+            #[cfg(feature = "memory-sqlite")]
+            print_fast_lane_summary(
+                &runtime.session_id,
+                limit,
+                ConversationRuntimeBinding::kernel(&runtime.kernel_ctx),
+                &runtime.memory_config,
+            )
+            .await?;
+            #[cfg(not(feature = "memory-sqlite"))]
+            print_fast_lane_summary(
+                &runtime.session_id,
+                limit,
+                ConversationRuntimeBinding::kernel(&runtime.kernel_ctx),
+            )
+            .await?;
+            return Ok(CliChatLoopControl::Continue);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            if let Some(usage_lines) = maybe_render_nonfatal_usage_error(error.as_str()) {
+                print_rendered_cli_chat_lines(&usage_lines);
+                return Ok(CliChatLoopControl::Continue);
+            }
+
+            return Err(error);
+        }
+    }
+
+    let safe_lane_limit_result =
+        parse_safe_lane_summary_limit(input, runtime.config.memory.sliding_window);
+    match safe_lane_limit_result {
+        Ok(Some(limit)) => {
+            #[cfg(feature = "memory-sqlite")]
+            print_safe_lane_summary(
+                &runtime.session_id,
+                limit,
+                &runtime.config.conversation,
+                ConversationRuntimeBinding::kernel(&runtime.kernel_ctx),
+                &runtime.memory_config,
+            )
+            .await?;
+            #[cfg(not(feature = "memory-sqlite"))]
+            print_safe_lane_summary(
+                &runtime.session_id,
+                limit,
+                &runtime.config.conversation,
+                ConversationRuntimeBinding::kernel(&runtime.kernel_ctx),
+            )
+            .await?;
+            return Ok(CliChatLoopControl::Continue);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            if let Some(usage_lines) = maybe_render_nonfatal_usage_error(error.as_str()) {
+                print_rendered_cli_chat_lines(&usage_lines);
+                return Ok(CliChatLoopControl::Continue);
+            }
+
+            return Err(error);
+        }
+    }
+
+    let turn_checkpoint_limit_result =
+        parse_turn_checkpoint_summary_limit(input, runtime.config.memory.sliding_window);
+    match turn_checkpoint_limit_result {
+        Ok(Some(limit)) => {
+            #[cfg(feature = "memory-sqlite")]
+            print_turn_checkpoint_summary(
+                &runtime.turn_coordinator,
+                &runtime.config,
+                &runtime.session_id,
+                limit,
+                ConversationRuntimeBinding::kernel(&runtime.kernel_ctx),
+                &runtime.memory_config,
+            )
+            .await?;
+            #[cfg(not(feature = "memory-sqlite"))]
+            print_turn_checkpoint_summary(
+                &runtime.turn_coordinator,
+                &runtime.config,
+                &runtime.session_id,
+                limit,
+                ConversationRuntimeBinding::kernel(&runtime.kernel_ctx),
+            )
+            .await?;
+            return Ok(CliChatLoopControl::Continue);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            if let Some(usage_lines) = maybe_render_nonfatal_usage_error(error.as_str()) {
+                print_rendered_cli_chat_lines(&usage_lines);
+                return Ok(CliChatLoopControl::Continue);
+            }
+
+            return Err(error);
+        }
+    }
+    match classify_chat_command_match_result(is_turn_checkpoint_repair_command(input))? {
+        ChatCommandMatchResult::Matched => {
+            print_turn_checkpoint_repair(
+                &runtime.turn_coordinator,
+                &runtime.config,
+                &runtime.session_id,
+                ConversationRuntimeBinding::kernel(&runtime.kernel_ctx),
+            )
+            .await?;
+            return Ok(CliChatLoopControl::Continue);
+        }
+        ChatCommandMatchResult::UsageError(usage) => {
+            let render_width = detect_cli_chat_render_width();
+            let usage_lines = render_cli_chat_command_usage_lines_with_width(&usage, render_width);
+            print_rendered_cli_chat_lines(&usage_lines);
+            return Ok(CliChatLoopControl::Continue);
+        }
+        ChatCommandMatchResult::NotMatched => {}
+    }
+
+    let agent_runtime = crate::agent_runtime::AgentRuntime::new();
+    let turn_result = agent_runtime
+        .run_turn_with_runtime(
+            runtime,
+            &crate::agent_runtime::AgentTurnRequest {
+                message: input.to_owned(),
+                turn_mode: crate::agent_runtime::AgentTurnMode::Interactive,
+                channel_id: runtime.session_address.channel_id.clone(),
+                account_id: runtime.session_address.account_id.clone(),
+                conversation_id: runtime.session_address.conversation_id.clone(),
+                thread_id: runtime.session_address.thread_id.clone(),
+                metadata: BTreeMap::new(),
+                acp: runtime.explicit_acp_request,
+                acp_event_stream: event_sink.is_some(),
+                acp_bootstrap_mcp_servers: runtime.effective_bootstrap_mcp_servers.clone(),
+                acp_cwd: runtime
+                    .effective_working_directory
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+                live_surface_enabled: true,
+            },
+            event_sink,
+        )
+        .await?;
+
+    Ok(CliChatLoopControl::AssistantText(turn_result.output_text))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChatCommandMatchResult {
+    Matched,
+    NotMatched,
+    UsageError(String),
+}
+
+fn classify_chat_command_match_result(
+    result: CliResult<bool>,
+) -> CliResult<ChatCommandMatchResult> {
+    match result {
+        Ok(true) => Ok(ChatCommandMatchResult::Matched),
+        Ok(false) => Ok(ChatCommandMatchResult::NotMatched),
+        Err(error) if error.starts_with("usage:") => Ok(ChatCommandMatchResult::UsageError(error)),
+        Err(error) => Err(error),
+    }
+}
+
+fn detect_cli_chat_render_width() -> usize {
+    crate::presentation::detect_render_width()
+}
+
+#[allow(clippy::print_stdout)] // CLI output
+fn print_rendered_cli_chat_lines(lines: &[String]) {
+    for line in lines {
+        println!("{line}");
+    }
+}
+
+fn render_cli_chat_assistant_lines_with_width(assistant_text: &str, width: usize) -> Vec<String> {
+    if let Some(screen_spec) = build_cli_chat_approval_screen_spec(assistant_text) {
+        return render_tui_screen_spec(&screen_spec, width, false);
+    }
+    let message_spec = build_cli_chat_assistant_message_spec(assistant_text);
+    render_cli_chat_message_spec_with_width(&message_spec, width)
+}
+
+fn render_cli_chat_command_usage_lines_with_width(usage: &str, width: usize) -> Vec<String> {
+    let message_spec = TuiMessageSpec {
+        role: "chat".to_owned(),
+        caption: Some("command".to_owned()),
+        sections: vec![TuiSectionSpec::Callout {
+            tone: TuiCalloutTone::Warning,
+            title: Some("usage".to_owned()),
+            lines: vec![usage.to_owned()],
+        }],
+        footer_lines: vec!["Use /help to inspect the available command surface.".to_owned()],
+    };
+
+    render_cli_chat_message_spec_with_width(&message_spec, width)
+}
+
+fn maybe_render_nonfatal_usage_error(error: &str) -> Option<Vec<String>> {
+    let usage_error = error.contains("usage:");
+    if !usage_error {
+        return None;
+    }
+
+    let render_width = detect_cli_chat_render_width();
+    let usage_lines = render_cli_chat_command_usage_lines_with_width(error, render_width);
+
+    Some(usage_lines)
+}
+
+fn build_cli_chat_assistant_message_spec(assistant_text: &str) -> TuiMessageSpec {
+    let sections = parse_cli_chat_markdown_sections(assistant_text);
+
+    TuiMessageSpec {
+        role: config::CLI_COMMAND_NAME.to_owned(),
+        caption: Some("reply".to_owned()),
+        sections,
+        footer_lines: vec!["/help commands · /status runtime · /history transcript".to_owned()],
+    }
+}
+
+pub(super) fn build_cli_chat_approval_screen_spec(assistant_text: &str) -> Option<TuiScreenSpec> {
+    let parsed = parse_approval_prompt_view(assistant_text)?;
+    let mut intro_lines = Vec::new();
+    if let Some(preface) = parsed
+        .preface
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        intro_lines.extend(preface.lines().map(|line| line.to_owned()));
+    }
+
+    let title = parsed.title();
+
+    let mut sections = Vec::new();
+    if let Some(reason) = parsed.reason.as_deref() {
+        sections.push(TuiSectionSpec::Callout {
+            tone: TuiCalloutTone::Warning,
+            title: Some(parsed.pause_reason_title()),
+            lines: vec![reason.to_owned()],
+        });
+    }
+
+    let mut kv_items = Vec::new();
+    if let Some(tool_name) = parsed.tool_name.as_deref() {
+        kv_items.push(TuiKeyValueSpec::Plain {
+            key: parsed.tool_label(),
+            value: tool_name.to_owned(),
+        });
+    }
+    if let Some(request_id) = parsed.request_id.as_deref() {
+        kv_items.push(TuiKeyValueSpec::Plain {
+            key: parsed.request_id_label(),
+            value: request_id.to_owned(),
+        });
+    }
+    if !kv_items.is_empty() {
+        sections.push(TuiSectionSpec::KeyValues {
+            title: Some(parsed.request_section_title()),
+            items: kv_items,
+        });
+    }
+
+    let choices = parsed
+        .actions
+        .iter()
+        .map(|action| TuiChoiceSpec {
+            key: action.numeric_alias.clone(),
+            label: action.label.clone(),
+            detail_lines: action.detail_lines.clone(),
+            recommended: action.recommended,
+        })
+        .collect::<Vec<_>>();
+
+    let footer_lines = if parsed.actions.is_empty() {
+        Vec::new()
+    } else if parsed.locale.is_cjk() {
+        vec![
+            format!("也可以直接回复：{}", parsed.action_commands_text()),
+            format!("数字别名：{}", parsed.action_numeric_aliases_text()),
+        ]
+    } else {
+        vec![
+            format!("You can also reply with: {}", parsed.action_commands_text()),
+            format!("Numeric aliases: {}", parsed.action_numeric_aliases_text()),
+        ]
+    };
+
+    Some(TuiScreenSpec {
+        header_style: TuiHeaderStyle::Compact,
+        subtitle: Some(parsed.subtitle()),
+        title,
+        progress_line: None,
+        intro_lines,
+        sections,
+        choices,
+        footer_lines,
     })
 }
 
-fn render_cli_chat_startup_lines(summary: &CliChatStartupSummary) -> Vec<String> {
-    let mut lines = vec![
-        "loongclaw chat ready".to_owned(),
-        "start here".to_owned(),
-        format!("- first prompt: {DEFAULT_FIRST_PROMPT}"),
-        "- type your request, or use /help for commands".to_owned(),
-        "session details".to_owned(),
-        format!("- session: {}", summary.session_id),
-        format!("- config: {}", summary.config_path),
-        format!("- memory: {}", summary.memory_label),
-        "runtime details".to_owned(),
-    ];
+fn cli_chat_card_inner_width(width: usize) -> usize {
+    width.saturating_sub(2).max(24)
+}
 
-    let allowed_channels = if summary.allowed_channels.is_empty() {
-        "-".to_owned()
+fn build_cli_chat_message_card_title(role: &str, caption: Option<&str>) -> String {
+    let trimmed_role = role.trim();
+    let trimmed_caption = caption.map(str::trim).unwrap_or("");
+    let role_label = if trimmed_role.is_empty() {
+        "message"
     } else {
-        summary.allowed_channels.join(",")
+        trimmed_role
     };
-    lines.push(format!(
-        "- context engine: {} ({})",
-        summary.context_engine_id, summary.context_engine_source
-    ));
-    lines.push(format!(
-        "- acp: enabled={} dispatch_enabled={} routing={} backend={} ({}) allowed_channels={allowed_channels}",
-        summary.acp_enabled,
-        summary.dispatch_enabled,
-        summary.conversation_routing,
-        summary.acp_backend_id,
-        summary.acp_backend_source,
-    ));
 
-    if summary.explicit_acp_request
-        || summary.event_stream_enabled
-        || !summary.bootstrap_mcp_servers.is_empty()
-        || summary.working_directory.is_some()
-    {
-        let bootstrap_label = if summary.bootstrap_mcp_servers.is_empty() {
-            "-".to_owned()
-        } else {
-            summary.bootstrap_mcp_servers.join(",")
-        };
-        let cwd_label = summary.working_directory.as_deref().unwrap_or("-");
-        lines.push(format!(
-            "- acp overrides: explicit={} event_stream={} bootstrap_mcp_servers={bootstrap_label} cwd={cwd_label}",
-            summary.explicit_acp_request, summary.event_stream_enabled,
-        ));
+    if trimmed_caption.is_empty() {
+        return role_label.to_owned();
     }
 
+    format!("{role_label} · {trimmed_caption}")
+}
+
+fn render_cli_chat_message_card_lines(
+    role: &str,
+    caption: Option<&str>,
+    rendered_message_lines: &[String],
+    width: usize,
+) -> Vec<String> {
+    let title = build_cli_chat_message_card_title(role, caption);
+    render_cli_chat_card_lines(title.as_str(), rendered_message_lines, width)
+}
+
+fn render_cli_chat_message_spec_with_width(spec: &TuiMessageSpec, width: usize) -> Vec<String> {
+    let body_lines = render_tui_message_body_spec(spec, cli_chat_card_inner_width(width));
+    render_cli_chat_message_card_lines(
+        spec.role.as_str(),
+        spec.caption.as_deref(),
+        &body_lines,
+        width,
+    )
+}
+
+fn render_cli_chat_card_lines(title: &str, body_lines: &[String], width: usize) -> Vec<String> {
+    let inner_width = cli_chat_card_inner_width(width);
+    let mut lines = vec![format!("╭─ {title}")];
+    if body_lines.is_empty() {
+        lines.push("│".to_owned());
+    } else {
+        for line in body_lines {
+            if line.is_empty() {
+                lines.push("│".to_owned());
+            } else {
+                for wrapped_line in
+                    crate::presentation::render_wrapped_display_line(line.as_str(), inner_width)
+                {
+                    lines.push(format!("│ {wrapped_line}"));
+                }
+            }
+        }
+    }
+
+    lines.push("╰─".to_owned());
     lines
 }
 
-async fn run_cli_turn(
+fn parse_cli_chat_markdown_sections(text: &str) -> Vec<TuiSectionSpec> {
+    let mut sections = Vec::new();
+    let mut pending_title = None;
+    let mut narrative_lines = Vec::new();
+    let mut callout_lines = Vec::new();
+    let mut code_title = None;
+    let mut code_language = None;
+    let mut code_lines = Vec::new();
+    let mut inside_code_block = false;
+
+    for raw_line in text.lines() {
+        let trimmed_end = raw_line.trim_end();
+
+        if inside_code_block {
+            if is_markdown_fence_close(trimmed_end) {
+                push_preformatted_section(
+                    &mut sections,
+                    &mut code_title,
+                    &mut code_language,
+                    &mut code_lines,
+                );
+                inside_code_block = false;
+                continue;
+            }
+
+            code_lines.push(trimmed_end.to_owned());
+            continue;
+        }
+
+        if let Some(language) = parse_markdown_fence_language(trimmed_end) {
+            push_callout_section(&mut sections, &mut pending_title, &mut callout_lines);
+            push_narrative_section(&mut sections, &mut pending_title, &mut narrative_lines);
+            code_title = pending_title.take();
+            code_language = language;
+            inside_code_block = true;
+            continue;
+        }
+
+        if let Some(heading_text) = parse_markdown_heading(trimmed_end) {
+            push_callout_section(&mut sections, &mut pending_title, &mut callout_lines);
+            push_narrative_section(&mut sections, &mut pending_title, &mut narrative_lines);
+            push_standalone_title_section(&mut sections, &mut pending_title);
+            pending_title = Some(heading_text.to_owned());
+            continue;
+        }
+
+        if let Some(callout_line) = parse_markdown_quote_line(trimmed_end) {
+            push_narrative_section(&mut sections, &mut pending_title, &mut narrative_lines);
+            callout_lines.push(callout_line);
+            continue;
+        }
+
+        if !callout_lines.is_empty() {
+            push_callout_section(&mut sections, &mut pending_title, &mut callout_lines);
+        }
+
+        let normalized_line = normalize_markdown_display_line(trimmed_end);
+        let is_blank_line = normalized_line.trim().is_empty();
+
+        if is_blank_line && narrative_lines.is_empty() {
+            continue;
+        }
+
+        narrative_lines.push(normalized_line);
+    }
+
+    if inside_code_block {
+        push_preformatted_section(
+            &mut sections,
+            &mut code_title,
+            &mut code_language,
+            &mut code_lines,
+        );
+    }
+
+    push_callout_section(&mut sections, &mut pending_title, &mut callout_lines);
+    push_narrative_section(&mut sections, &mut pending_title, &mut narrative_lines);
+    push_standalone_title_section(&mut sections, &mut pending_title);
+
+    if sections.is_empty() {
+        sections.push(TuiSectionSpec::Narrative {
+            title: None,
+            lines: vec!["(empty reply)".to_owned()],
+        });
+    }
+
+    refine_cli_chat_sections(sections)
+}
+
+fn refine_cli_chat_sections(sections: Vec<TuiSectionSpec>) -> Vec<TuiSectionSpec> {
+    sections
+        .into_iter()
+        .map(|section| match section {
+            TuiSectionSpec::Narrative {
+                title: Some(title),
+                lines,
+            } if is_reasoning_section_title(title.as_str()) && !lines.is_empty() => {
+                TuiSectionSpec::Callout {
+                    tone: TuiCalloutTone::Info,
+                    title: Some("reasoning".to_owned()),
+                    lines,
+                }
+            }
+            TuiSectionSpec::Preformatted {
+                title,
+                language: Some(language),
+                lines,
+            } if is_diff_language(language.as_str()) => TuiSectionSpec::Preformatted {
+                title: Some(title.unwrap_or_else(|| "diff".to_owned())),
+                language: Some(language),
+                lines,
+            },
+            TuiSectionSpec::Narrative {
+                title: Some(title),
+                lines,
+            } if is_tool_activity_section_title(title.as_str()) && !lines.is_empty() => {
+                TuiSectionSpec::Callout {
+                    tone: TuiCalloutTone::Info,
+                    title: Some("tool activity".to_owned()),
+                    lines,
+                }
+            }
+            other @ TuiSectionSpec::Narrative { .. }
+            | other @ TuiSectionSpec::KeyValues { .. }
+            | other @ TuiSectionSpec::ActionGroup { .. }
+            | other @ TuiSectionSpec::Checklist { .. }
+            | other @ TuiSectionSpec::Callout { .. }
+            | other @ TuiSectionSpec::Preformatted { .. } => other,
+        })
+        .collect()
+}
+
+fn is_reasoning_section_title(title: &str) -> bool {
+    let normalized = title.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "reasoning" | "analysis" | "thinking" | "thought process"
+    )
+}
+
+fn is_diff_language(language: &str) -> bool {
+    matches!(
+        language.trim().to_ascii_lowercase().as_str(),
+        "diff" | "patch"
+    )
+}
+
+fn is_tool_activity_section_title(title: &str) -> bool {
+    matches!(
+        title.trim().to_ascii_lowercase().as_str(),
+        "tool activity" | "tools" | "tool calls"
+    )
+}
+
+fn push_narrative_section(
+    sections: &mut Vec<TuiSectionSpec>,
+    pending_title: &mut Option<String>,
+    narrative_lines: &mut Vec<String>,
+) {
+    trim_blank_line_edges(narrative_lines);
+    if narrative_lines.is_empty() {
+        return;
+    }
+
+    let title = pending_title.take();
+    let lines = std::mem::take(narrative_lines);
+    sections.push(TuiSectionSpec::Narrative { title, lines });
+}
+
+fn push_standalone_title_section(
+    sections: &mut Vec<TuiSectionSpec>,
+    pending_title: &mut Option<String>,
+) {
+    let Some(title) = pending_title.take() else {
+        return;
+    };
+
+    sections.push(TuiSectionSpec::Narrative {
+        title: Some(title),
+        lines: Vec::new(),
+    });
+}
+
+fn push_callout_section(
+    sections: &mut Vec<TuiSectionSpec>,
+    pending_title: &mut Option<String>,
+    callout_lines: &mut Vec<String>,
+) {
+    trim_blank_line_edges(callout_lines);
+    if callout_lines.is_empty() {
+        return;
+    }
+
+    let lines = std::mem::take(callout_lines);
+    let title = pending_title
+        .take()
+        .or_else(|| Some("quoted context".to_owned()));
+
+    sections.push(TuiSectionSpec::Callout {
+        tone: TuiCalloutTone::Info,
+        title,
+        lines,
+    });
+}
+
+fn push_preformatted_section(
+    sections: &mut Vec<TuiSectionSpec>,
+    code_title: &mut Option<String>,
+    code_language: &mut Option<String>,
+    code_lines: &mut Vec<String>,
+) {
+    let title = code_title.take();
+    let language = code_language.take();
+    let lines = std::mem::take(code_lines);
+    sections.push(TuiSectionSpec::Preformatted {
+        title,
+        language,
+        lines,
+    });
+}
+
+fn trim_blank_line_edges(lines: &mut Vec<String>) {
+    while lines.first().is_some_and(|line| line.trim().is_empty()) {
+        lines.remove(0);
+    }
+
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+}
+
+fn is_markdown_fence_close(line: &str) -> bool {
+    line.trim() == "```"
+}
+
+fn parse_markdown_fence_language(line: &str) -> Option<Option<String>> {
+    let trimmed = line.trim();
+    let raw_language = trimmed.strip_prefix("```")?;
+    let language = raw_language.trim();
+
+    if language.is_empty() {
+        return Some(None);
+    }
+
+    Some(Some(language.to_owned()))
+}
+
+fn parse_markdown_heading(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    let marker_count = trimmed
+        .chars()
+        .take_while(|character| *character == '#')
+        .count();
+
+    if marker_count == 0 || marker_count > 6 {
+        return None;
+    }
+
+    let heading_text = trimmed.get(marker_count..)?;
+    let separator = heading_text.chars().next()?;
+    if separator != ' ' && separator != '\t' {
+        return None;
+    }
+
+    let heading_text = heading_text.trim_start_matches([' ', '\t']);
+    let normalized_text = trim_markdown_heading_closing_sequence(heading_text).trim();
+
+    if normalized_text.is_empty() {
+        return None;
+    }
+
+    Some(normalized_text)
+}
+
+fn trim_markdown_heading_closing_sequence(text: &str) -> &str {
+    let trimmed_end = text.trim_end_matches([' ', '\t']);
+    let trailing_hash_count = trimmed_end
+        .chars()
+        .rev()
+        .take_while(|character| *character == '#')
+        .count();
+
+    if trailing_hash_count == 0 {
+        return trimmed_end;
+    }
+
+    let content_end = trimmed_end.len().saturating_sub(trailing_hash_count);
+    let content = trimmed_end.get(..content_end).unwrap_or(trimmed_end);
+    let ends_with_heading_space = content
+        .chars()
+        .last()
+        .is_some_and(|character| character == ' ' || character == '\t');
+
+    if !ends_with_heading_space {
+        return trimmed_end;
+    }
+
+    content.trim_end_matches([' ', '\t'])
+}
+
+fn parse_markdown_quote_line(line: &str) -> Option<String> {
+    let trimmed_start = line.trim_start();
+    let quote_body = trimmed_start.strip_prefix('>')?;
+    let normalized_text = quote_body.trim_start();
+    Some(normalized_text.to_owned())
+}
+
+fn normalize_markdown_display_line(line: &str) -> String {
+    let trimmed_end = line.trim_end();
+    let leading_space_count = trimmed_end
+        .chars()
+        .take_while(|character| character.is_ascii_whitespace())
+        .count();
+    let indent = trimmed_end.get(..leading_space_count).unwrap_or("");
+    let trimmed_start = trimmed_end.get(leading_space_count..).unwrap_or("");
+
+    if let Some(rest) = trimmed_start.strip_prefix("* ") {
+        return format!("{indent}- {rest}");
+    }
+
+    if let Some(rest) = trimmed_start.strip_prefix("+ ") {
+        return format!("{indent}- {rest}");
+    }
+
+    trimmed_end.to_owned()
+}
+
+pub(crate) async fn run_cli_turn(
     runtime: &CliTurnRuntime,
     input: &str,
-    _options: &CliChatOptions,
     event_sink: Option<&dyn AcpTurnEventSink>,
+    live_surface_enabled: bool,
+) -> CliResult<String> {
+    run_cli_turn_with_address(
+        runtime,
+        &runtime.session_address,
+        input,
+        event_sink,
+        live_surface_enabled,
+        None,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn run_cli_turn_with_address(
+    runtime: &CliTurnRuntime,
+    address: &ConversationSessionAddress,
+    input: &str,
+    event_sink: Option<&dyn AcpTurnEventSink>,
+    live_surface_enabled: bool,
+    metadata: Option<&BTreeMap<String, String>>,
+    observer_override: Option<ConversationTurnObserverHandle>,
+) -> CliResult<String> {
+    run_cli_turn_with_address_and_ingress_and_error_mode(
+        runtime,
+        address,
+        input,
+        event_sink,
+        live_surface_enabled,
+        metadata,
+        None,
+        AcpTurnProvenance::default(),
+        ProviderErrorMode::InlineMessage,
+        observer_override,
+    )
+    .await
+}
+
+pub(crate) async fn run_cli_turn_with_address_and_ingress_and_error_mode(
+    runtime: &CliTurnRuntime,
+    address: &ConversationSessionAddress,
+    input: &str,
+    event_sink: Option<&dyn AcpTurnEventSink>,
+    live_surface_enabled: bool,
+    metadata: Option<&BTreeMap<String, String>>,
+    ingress: Option<&ConversationIngressContext>,
+    provenance: AcpTurnProvenance<'_>,
+    provider_error_mode: ProviderErrorMode,
+    observer_override: Option<ConversationTurnObserverHandle>,
+) -> CliResult<String> {
+    run_cli_turn_with_address_and_ingress(
+        runtime,
+        address,
+        input,
+        event_sink,
+        live_surface_enabled,
+        metadata,
+        ingress,
+        provenance,
+        provider_error_mode,
+        observer_override,
+    )
+    .await
+}
+
+pub(crate) async fn run_cli_turn_with_address_and_ingress(
+    runtime: &CliTurnRuntime,
+    address: &ConversationSessionAddress,
+    input: &str,
+    event_sink: Option<&dyn AcpTurnEventSink>,
+    live_surface_enabled: bool,
+    metadata: Option<&BTreeMap<String, String>>,
+    ingress: Option<&ConversationIngressContext>,
+    provenance: AcpTurnProvenance<'_>,
+    provider_error_mode: ProviderErrorMode,
+    observer_override: Option<ConversationTurnObserverHandle>,
 ) -> CliResult<String> {
     let turn_config = reload_cli_turn_config(&runtime.config, runtime.resolved_path.as_path())?;
     let acp_options = if runtime.explicit_acp_request {
@@ -466,24 +1559,54 @@ async fn run_cli_turn(
     }
     .with_event_sink(event_sink)
     .with_additional_bootstrap_mcp_servers(&runtime.effective_bootstrap_mcp_servers)
-    .with_working_directory(runtime.effective_working_directory.as_deref());
-    runtime
-        .turn_coordinator
-        .handle_turn_with_address_and_acp_options(
-            &turn_config,
-            &runtime.session_address,
-            input,
-            ProviderErrorMode::InlineMessage,
-            &acp_options,
-            crate::conversation::ConversationRuntimeBinding::kernel(&runtime.kernel_ctx),
-        )
-        .await
+    .with_working_directory(runtime.effective_working_directory.as_deref())
+    .with_metadata(metadata)
+    .with_provenance(provenance);
+    let live_surface_observer = if let Some(observer) = observer_override {
+        Some(observer)
+    } else if live_surface_enabled {
+        let render_width = detect_cli_chat_render_width();
+        Some(build_cli_chat_live_surface_observer(render_width))
+    } else {
+        None
+    };
+    if let Some(ingress) = ingress {
+        runtime
+            .turn_coordinator
+            .handle_turn_with_address_and_acp_options_and_ingress_and_observer(
+                &turn_config,
+                address,
+                input,
+                provider_error_mode,
+                &acp_options,
+                crate::conversation::ConversationRuntimeBinding::kernel(&runtime.kernel_ctx),
+                Some(ingress),
+                live_surface_observer,
+            )
+            .await
+    } else {
+        runtime
+            .turn_coordinator
+            .handle_production_turn_with_address_and_acp_options_and_observer(
+                &turn_config,
+                address,
+                input,
+                provider_error_mode,
+                &acp_options,
+                crate::conversation::ConversationRuntimeBinding::kernel(&runtime.kernel_ctx),
+                live_surface_observer,
+            )
+            .await
+    }
 }
 
 fn reload_cli_turn_config(
     config: &LoongClawConfig,
     resolved_path: &Path,
 ) -> CliResult<LoongClawConfig> {
+    if resolved_path.as_os_str().is_empty() {
+        return Ok(config.clone());
+    }
     config.reload_provider_runtime_state_from_path(resolved_path)
 }
 
@@ -498,189 +1621,6 @@ fn is_exit_command(config: &LoongClawConfig, input: &str) -> bool {
 }
 
 #[allow(clippy::print_stdout)] // CLI output
-fn print_help() {
-    println!("/help    show this help");
-    println!("/history print current session sliding window");
-    println!("/fast_lane_summary [limit]  summarize fast-lane batch execution events");
-    println!("/safe_lane_summary [limit]  summarize safe-lane runtime events");
-    println!("/turn_checkpoint_summary [limit]  summarize durable turn finalization state");
-    println!("/turn_checkpoint_repair  repair durable turn finalization tail when safe");
-    println!("/exit    quit chat");
-}
-
-#[allow(clippy::print_stdout)] // CLI output
-async fn print_history(
-    session_id: &str,
-    limit: usize,
-    binding: ConversationRuntimeBinding<'_>,
-    #[cfg(feature = "memory-sqlite")] memory_config: &MemoryRuntimeConfig,
-) -> CliResult<()> {
-    #[cfg(feature = "memory-sqlite")]
-    {
-        for line in load_history_lines(session_id, limit, binding, memory_config).await? {
-            println!("{line}");
-        }
-        Ok(())
-    }
-
-    #[cfg(not(feature = "memory-sqlite"))]
-    {
-        let _ = (session_id, limit, binding);
-        println!("history unavailable: memory-sqlite feature disabled");
-        Ok(())
-    }
-}
-
-#[cfg(any(test, feature = "memory-sqlite"))]
-fn format_window_history_lines(turns: &[memory::WindowTurn]) -> Vec<String> {
-    if turns.is_empty() {
-        return vec!["(no history yet)".to_owned()];
-    }
-
-    turns
-        .iter()
-        .map(|turn| {
-            format!(
-                "[{}] {}: {}",
-                turn.ts.unwrap_or_default(),
-                turn.role,
-                turn.content
-            )
-        })
-        .collect()
-}
-
-#[cfg(any(test, feature = "memory-sqlite"))]
-fn format_prompt_context_history_lines(entries: &[memory::MemoryContextEntry]) -> Vec<String> {
-    if entries.is_empty() {
-        return vec!["(no history yet)".to_owned()];
-    }
-
-    let mut lines = Vec::new();
-    for entry in entries {
-        match entry.kind {
-            memory::MemoryContextKind::Profile => {
-                lines.push("[profile]".to_owned());
-                lines.push(entry.content.clone());
-            }
-            memory::MemoryContextKind::Summary => {
-                lines.push("[summary]".to_owned());
-                lines.push(entry.content.clone());
-            }
-            memory::MemoryContextKind::Turn => {
-                lines.push(format!("{}: {}", entry.role, entry.content));
-            }
-        }
-    }
-    lines
-}
-
-#[cfg(feature = "memory-sqlite")]
-async fn load_history_lines(
-    session_id: &str,
-    limit: usize,
-    binding: ConversationRuntimeBinding<'_>,
-    memory_config: &MemoryRuntimeConfig,
-) -> CliResult<Vec<String>> {
-    if let Some(ctx) = binding.kernel_context() {
-        let request = memory::build_window_request(session_id, limit);
-        let caps = BTreeSet::from([Capability::MemoryRead]);
-        let outcome = ctx
-            .kernel
-            .execute_memory_core(ctx.pack_id(), &ctx.token, &caps, None, request)
-            .await
-            .map_err(|error| format!("load history via kernel failed: {error}"))?;
-        if outcome.status != "ok" {
-            return Err(format!(
-                "load history via kernel returned non-ok status: {}",
-                outcome.status
-            ));
-        }
-        let turns = memory::decode_window_turns(&outcome.payload);
-        return Ok(format_window_history_lines(&turns));
-    }
-
-    let entries = memory::load_prompt_context(session_id, memory_config)
-        .map_err(|error| format!("load history failed: {error}"))?;
-    Ok(format_prompt_context_history_lines(&entries))
-}
-
-fn parse_safe_lane_summary_limit(input: &str, default_window: usize) -> CliResult<Option<usize>> {
-    parse_summary_limit(
-        input,
-        default_window,
-        &["/safe_lane_summary", "/safe-lane-summary"],
-    )
-}
-
-fn parse_fast_lane_summary_limit(input: &str, default_window: usize) -> CliResult<Option<usize>> {
-    parse_summary_limit(
-        input,
-        default_window,
-        &["/fast_lane_summary", "/fast-lane-summary"],
-    )
-}
-
-fn parse_summary_limit(
-    input: &str,
-    default_window: usize,
-    aliases: &[&str],
-) -> CliResult<Option<usize>> {
-    let Some(primary_alias) = aliases.first().copied() else {
-        return Ok(None);
-    };
-
-    let mut tokens = input.split_whitespace();
-    let Some(command) = tokens.next() else {
-        return Ok(None);
-    };
-    if !aliases.contains(&command) {
-        return Ok(None);
-    }
-
-    let usage = format!("usage: {primary_alias} [limit]");
-    let default_limit = default_window.saturating_mul(4).max(64);
-    let limit = match tokens.next() {
-        Some(raw) => raw
-            .parse::<usize>()
-            .map_err(|error| format!("invalid {primary_alias} limit `{raw}`: {error}; {usage}"))?,
-        None => default_limit,
-    };
-    if limit == 0 {
-        return Err(format!("invalid {primary_alias} limit `0`; {usage}"));
-    }
-    if tokens.next().is_some() {
-        return Err(usage);
-    }
-    Ok(Some(limit))
-}
-
-fn parse_turn_checkpoint_summary_limit(
-    input: &str,
-    default_window: usize,
-) -> CliResult<Option<usize>> {
-    parse_summary_limit(
-        input,
-        default_window,
-        &["/turn_checkpoint_summary", "/turn-checkpoint-summary"],
-    )
-}
-
-fn is_turn_checkpoint_repair_command(input: &str) -> CliResult<bool> {
-    let mut tokens = input.split_whitespace();
-    let Some(command) = tokens.next() else {
-        return Ok(false);
-    };
-    if command != "/turn_checkpoint_repair" && command != "/turn-checkpoint-repair" {
-        return Ok(false);
-    }
-    if tokens.next().is_some() {
-        return Err("usage: /turn_checkpoint_repair".to_owned());
-    }
-    Ok(true)
-}
-
-#[allow(clippy::print_stdout)] // CLI output
 async fn print_fast_lane_summary(
     session_id: &str,
     limit: usize,
@@ -689,31 +1629,30 @@ async fn print_fast_lane_summary(
 ) -> CliResult<()> {
     #[cfg(feature = "memory-sqlite")]
     {
-        println!(
-            "{}",
-            load_fast_lane_summary_output(session_id, limit, binding, memory_config).await?
-        );
+        let summary =
+            load_fast_lane_tool_batch_event_summary(session_id, limit, binding, memory_config)
+                .await?;
+        let render_width = detect_cli_chat_render_width();
+        let rendered_lines =
+            render_fast_lane_summary_lines_with_width(session_id, limit, &summary, render_width);
+
+        print_rendered_cli_chat_lines(&rendered_lines);
         Ok(())
     }
 
     #[cfg(not(feature = "memory-sqlite"))]
     {
         let _ = (session_id, limit, binding);
-        println!("fast-lane summary unavailable: memory-sqlite feature disabled");
+        let render_width = detect_cli_chat_render_width();
+        let rendered_lines = render_cli_chat_feature_unavailable_lines_with_width(
+            "fast-lane",
+            "fast-lane summary unavailable: memory-sqlite feature disabled",
+            render_width,
+        );
+
+        print_rendered_cli_chat_lines(&rendered_lines);
         Ok(())
     }
-}
-
-#[cfg(feature = "memory-sqlite")]
-async fn load_fast_lane_summary_output(
-    session_id: &str,
-    limit: usize,
-    binding: ConversationRuntimeBinding<'_>,
-    memory_config: &MemoryRuntimeConfig,
-) -> CliResult<String> {
-    let summary =
-        load_fast_lane_tool_batch_event_summary(session_id, limit, binding, memory_config).await?;
-    Ok(format_fast_lane_summary(session_id, limit, &summary))
 }
 
 #[allow(clippy::print_stdout)] // CLI output
@@ -726,43 +1665,34 @@ async fn print_safe_lane_summary(
 ) -> CliResult<()> {
     #[cfg(feature = "memory-sqlite")]
     {
-        println!(
-            "{}",
-            load_safe_lane_summary_output(
-                session_id,
-                limit,
-                conversation_config,
-                binding,
-                memory_config,
-            )
-            .await?
+        let summary =
+            load_safe_lane_event_summary(session_id, limit, binding, memory_config).await?;
+        let render_width = detect_cli_chat_render_width();
+        let rendered_lines = render_safe_lane_summary_lines_with_width(
+            session_id,
+            limit,
+            conversation_config,
+            &summary,
+            render_width,
         );
+
+        print_rendered_cli_chat_lines(&rendered_lines);
         Ok(())
     }
 
     #[cfg(not(feature = "memory-sqlite"))]
     {
         let _ = (session_id, limit, conversation_config, binding);
-        println!("safe-lane summary unavailable: memory-sqlite feature disabled");
+        let render_width = detect_cli_chat_render_width();
+        let rendered_lines = render_cli_chat_feature_unavailable_lines_with_width(
+            "safe-lane",
+            "safe-lane summary unavailable: memory-sqlite feature disabled",
+            render_width,
+        );
+
+        print_rendered_cli_chat_lines(&rendered_lines);
         Ok(())
     }
-}
-
-#[cfg(feature = "memory-sqlite")]
-async fn load_safe_lane_summary_output(
-    session_id: &str,
-    limit: usize,
-    conversation_config: &ConversationConfig,
-    binding: ConversationRuntimeBinding<'_>,
-    memory_config: &MemoryRuntimeConfig,
-) -> CliResult<String> {
-    let summary = load_safe_lane_event_summary(session_id, limit, binding, memory_config).await?;
-    Ok(format_safe_lane_summary(
-        session_id,
-        limit,
-        conversation_config,
-        &summary,
-    ))
 }
 
 #[allow(clippy::print_stdout)] // CLI output
@@ -776,44 +1706,36 @@ async fn print_turn_checkpoint_summary(
 ) -> CliResult<()> {
     #[cfg(feature = "memory-sqlite")]
     {
-        println!(
-            "{}",
-            load_turn_checkpoint_summary_output(
-                turn_coordinator,
-                config,
-                session_id,
-                limit,
-                binding,
+        let diagnostics = turn_coordinator
+            .load_production_turn_checkpoint_diagnostics_with_limit(
+                config, session_id, limit, binding,
             )
-            .await?
+            .await?;
+        let render_width = detect_cli_chat_render_width();
+        let rendered_lines = render_turn_checkpoint_summary_lines_with_width(
+            session_id,
+            limit,
+            &diagnostics,
+            render_width,
         );
+
+        print_rendered_cli_chat_lines(&rendered_lines);
         Ok(())
     }
 
     #[cfg(not(feature = "memory-sqlite"))]
     {
         let _ = (turn_coordinator, config, session_id, limit, binding);
-        println!("turn checkpoint summary unavailable: memory-sqlite feature disabled");
+        let render_width = detect_cli_chat_render_width();
+        let rendered_lines = render_cli_chat_feature_unavailable_lines_with_width(
+            "checkpoint",
+            "turn checkpoint summary unavailable: memory-sqlite feature disabled",
+            render_width,
+        );
+
+        print_rendered_cli_chat_lines(&rendered_lines);
         Ok(())
     }
-}
-
-#[cfg(feature = "memory-sqlite")]
-async fn load_turn_checkpoint_summary_output(
-    turn_coordinator: &ConversationTurnCoordinator,
-    config: &LoongClawConfig,
-    session_id: &str,
-    limit: usize,
-    binding: ConversationRuntimeBinding<'_>,
-) -> CliResult<String> {
-    let diagnostics = turn_coordinator
-        .load_turn_checkpoint_diagnostics_with_limit(config, session_id, limit, binding)
-        .await?;
-    Ok(format_turn_checkpoint_summary_output(
-        session_id,
-        limit,
-        &diagnostics,
-    ))
 }
 
 #[allow(clippy::print_stdout)] // CLI output
@@ -825,33 +1747,977 @@ async fn print_turn_checkpoint_repair(
 ) -> CliResult<()> {
     #[cfg(feature = "memory-sqlite")]
     {
-        println!(
-            "{}",
-            load_turn_checkpoint_repair_output(turn_coordinator, config, session_id, binding)
-                .await?
-        );
+        let outcome = turn_coordinator
+            .repair_production_turn_checkpoint_tail(config, session_id, binding)
+            .await?;
+        let render_width = detect_cli_chat_render_width();
+        let rendered_lines =
+            render_turn_checkpoint_repair_lines_with_width(session_id, &outcome, render_width);
+
+        print_rendered_cli_chat_lines(&rendered_lines);
         Ok(())
     }
 
     #[cfg(not(feature = "memory-sqlite"))]
     {
         let _ = (turn_coordinator, config, session_id, binding);
-        println!("turn checkpoint repair unavailable: memory-sqlite feature disabled");
+        let render_width = detect_cli_chat_render_width();
+        let rendered_lines = render_cli_chat_feature_unavailable_lines_with_width(
+            "repair",
+            "turn checkpoint repair unavailable: memory-sqlite feature disabled",
+            render_width,
+        );
+
+        print_rendered_cli_chat_lines(&rendered_lines);
         Ok(())
     }
 }
 
-#[cfg(feature = "memory-sqlite")]
-async fn load_turn_checkpoint_repair_output(
+#[cfg(not(feature = "memory-sqlite"))]
+fn render_cli_chat_feature_unavailable_lines_with_width(
+    role: &str,
+    detail: &str,
+    width: usize,
+) -> Vec<String> {
+    let message_spec = build_cli_chat_feature_unavailable_message_spec(role, detail);
+    render_cli_chat_message_spec_with_width(&message_spec, width)
+}
+
+#[cfg(not(feature = "memory-sqlite"))]
+fn build_cli_chat_feature_unavailable_message_spec(role: &str, detail: &str) -> TuiMessageSpec {
+    let sections = vec![TuiSectionSpec::Callout {
+        tone: TuiCalloutTone::Warning,
+        title: Some("feature unavailable".to_owned()),
+        lines: vec![detail.to_owned()],
+    }];
+
+    TuiMessageSpec {
+        role: role.to_owned(),
+        caption: Some("unavailable".to_owned()),
+        sections,
+        footer_lines: vec![
+            "Feature gated in this build; /help shows the available chat surface.".to_owned(),
+        ],
+    }
+}
+
+fn tui_plain_item(key: &str, value: String) -> TuiKeyValueSpec {
+    let key = key.to_owned();
+
+    TuiKeyValueSpec::Plain { key, value }
+}
+
+fn tui_csv_item(key: &str, values: Vec<String>) -> TuiKeyValueSpec {
+    let key = key.to_owned();
+
+    TuiKeyValueSpec::Csv { key, values }
+}
+
+fn csv_values_or_dash(values: Vec<String>) -> Vec<String> {
+    if values.is_empty() {
+        return vec!["-".to_owned()];
+    }
+
+    values
+}
+
+fn collect_rollup_values(counts: &std::collections::BTreeMap<String, u32>) -> Vec<String> {
+    counts
+        .iter()
+        .map(|(key, value)| format!("{key}:{value}"))
+        .collect()
+}
+
+fn bool_yes_no_value(value: bool) -> String {
+    if value {
+        return "yes".to_owned();
+    }
+
+    "no".to_owned()
+}
+
+fn recovery_callout_tone(recovery_needed: bool) -> TuiCalloutTone {
+    if recovery_needed {
+        return TuiCalloutTone::Warning;
+    }
+
+    TuiCalloutTone::Success
+}
+
+fn safe_lane_health_tone(severity: &str) -> TuiCalloutTone {
+    if severity == "critical" || severity == "warn" {
+        return TuiCalloutTone::Warning;
+    }
+
+    if severity == "ok" {
+        return TuiCalloutTone::Success;
+    }
+
+    TuiCalloutTone::Info
+}
+
+#[cfg(any(test, feature = "memory-sqlite"))]
+fn render_turn_checkpoint_health_error_lines_with_width(
+    session_id: &str,
+    error: &str,
+    width: usize,
+) -> Vec<String> {
+    let message_spec = build_turn_checkpoint_health_error_message_spec(session_id, error);
+    render_cli_chat_message_spec_with_width(&message_spec, width)
+}
+
+#[cfg(any(test, feature = "memory-sqlite"))]
+fn build_turn_checkpoint_health_error_message_spec(
+    session_id: &str,
+    error: &str,
+) -> TuiMessageSpec {
+    let caption = format!("session={session_id}");
+    let sections = vec![
+        TuiSectionSpec::KeyValues {
+            title: Some("durability status".to_owned()),
+            items: vec![
+                tui_plain_item("state", "unavailable".to_owned()),
+                tui_plain_item("session", session_id.to_owned()),
+            ],
+        },
+        TuiSectionSpec::Callout {
+            tone: TuiCalloutTone::Warning,
+            title: Some("durability unavailable".to_owned()),
+            lines: vec![format!("error: {error}")],
+        },
+    ];
+
+    TuiMessageSpec {
+        role: "checkpoint".to_owned(),
+        caption: Some(caption),
+        sections,
+        footer_lines: vec![
+            "Durability state is unavailable until the next successful checkpoint sample."
+                .to_owned(),
+        ],
+    }
+}
+
+#[cfg(test)]
+#[cfg(any(test, feature = "memory-sqlite"))]
+fn render_turn_checkpoint_startup_health_lines_with_width(
+    session_id: &str,
+    diagnostics: &TurnCheckpointDiagnostics,
+    width: usize,
+) -> Option<Vec<String>> {
+    operator_surfaces::render_turn_checkpoint_startup_health_lines_with_width(
+        session_id,
+        diagnostics,
+        width,
+    )
+}
+
+#[cfg(any(test, feature = "memory-sqlite"))]
+fn render_fast_lane_summary_lines_with_width(
+    session_id: &str,
+    limit: usize,
+    summary: &FastLaneToolBatchEventSummary,
+    width: usize,
+) -> Vec<String> {
+    let message_spec = build_fast_lane_summary_message_spec(session_id, limit, summary);
+    render_cli_chat_message_spec_with_width(&message_spec, width)
+}
+
+#[cfg(any(test, feature = "memory-sqlite"))]
+fn build_fast_lane_summary_message_spec(
+    session_id: &str,
+    limit: usize,
+    summary: &FastLaneToolBatchEventSummary,
+) -> TuiMessageSpec {
+    let parallel_safe_ratio = format_ratio(
+        summary.total_parallel_safe_intents_seen,
+        summary.total_intents_seen,
+    );
+    let serial_only_ratio = format_ratio(
+        summary.total_serial_only_intents_seen,
+        summary.total_intents_seen,
+    );
+    let configured_max_in_flight_avg = format_average(
+        summary.parallel_execution_max_in_flight_sum,
+        summary.parallel_execution_max_in_flight_samples,
+    );
+    let observed_peak_in_flight_avg = format_average(
+        summary.observed_peak_in_flight_sum,
+        summary.observed_peak_in_flight_samples,
+    );
+    let observed_wall_time_ms_avg = format_average(
+        summary.observed_wall_time_ms_sum,
+        summary.observed_wall_time_ms_samples,
+    );
+    let scheduling_class_values = collect_rollup_values(&summary.scheduling_class_counts);
+    let execution_mode_values = collect_rollup_values(&summary.execution_mode_counts);
+    let rollup_scheduling_classes = csv_values_or_dash(scheduling_class_values);
+    let rollup_execution_modes = csv_values_or_dash(execution_mode_values);
+    let latest_segment_lines = build_fast_lane_segment_lines(&summary.latest_segments);
+    let caption = format!("session={session_id} limit={limit}");
+    let sections = vec![
+        TuiSectionSpec::KeyValues {
+            title: Some("events".to_owned()),
+            items: vec![
+                tui_plain_item("batch events", summary.batch_events.to_string()),
+                tui_plain_item(
+                    "schema version",
+                    format_fast_lane_summary_optional(summary.latest_schema_version),
+                ),
+            ],
+        },
+        TuiSectionSpec::KeyValues {
+            title: Some("batch mix".to_owned()),
+            items: vec![
+                tui_plain_item(
+                    "parallel enabled",
+                    summary.parallel_execution_enabled_batches.to_string(),
+                ),
+                tui_plain_item("parallel only", summary.parallel_only_batches.to_string()),
+                tui_plain_item("mixed", summary.mixed_execution_batches.to_string()),
+                tui_plain_item(
+                    "sequential only",
+                    summary.sequential_only_batches.to_string(),
+                ),
+                tui_plain_item(
+                    "without segments",
+                    summary.batches_without_segments.to_string(),
+                ),
+            ],
+        },
+        TuiSectionSpec::KeyValues {
+            title: Some("intent mix".to_owned()),
+            items: vec![
+                tui_plain_item("total intents", summary.total_intents_seen.to_string()),
+                tui_plain_item(
+                    "parallel-safe intents",
+                    summary.total_parallel_safe_intents_seen.to_string(),
+                ),
+                tui_plain_item(
+                    "serial-only intents",
+                    summary.total_serial_only_intents_seen.to_string(),
+                ),
+                tui_plain_item("parallel-safe ratio", parallel_safe_ratio),
+                tui_plain_item("serial-only ratio", serial_only_ratio),
+                tui_plain_item(
+                    "parallel segments",
+                    summary.total_parallel_segments_seen.to_string(),
+                ),
+                tui_plain_item(
+                    "sequential segments",
+                    summary.total_sequential_segments_seen.to_string(),
+                ),
+            ],
+        },
+        TuiSectionSpec::KeyValues {
+            title: Some("execution".to_owned()),
+            items: vec![
+                tui_plain_item("configured max in flight avg", configured_max_in_flight_avg),
+                tui_plain_item(
+                    "configured max in flight max",
+                    format_fast_lane_summary_optional(summary.parallel_execution_max_in_flight_max),
+                ),
+                tui_plain_item(
+                    "configured max in flight samples",
+                    summary.parallel_execution_max_in_flight_samples.to_string(),
+                ),
+                tui_plain_item("observed peak avg", observed_peak_in_flight_avg),
+                tui_plain_item(
+                    "observed peak max",
+                    format_fast_lane_summary_optional(summary.observed_peak_in_flight_max),
+                ),
+                tui_plain_item(
+                    "observed peak samples",
+                    summary.observed_peak_in_flight_samples.to_string(),
+                ),
+                tui_plain_item("wall time avg", observed_wall_time_ms_avg),
+                tui_plain_item(
+                    "wall time max",
+                    format_fast_lane_summary_optional(summary.observed_wall_time_ms_max),
+                ),
+                tui_plain_item(
+                    "wall time samples",
+                    summary.observed_wall_time_ms_samples.to_string(),
+                ),
+                tui_plain_item(
+                    "degraded parallel segments",
+                    summary.degraded_parallel_segments.to_string(),
+                ),
+            ],
+        },
+        TuiSectionSpec::KeyValues {
+            title: Some("latest batch".to_owned()),
+            items: vec![
+                tui_plain_item(
+                    "total intents",
+                    format_fast_lane_summary_optional(summary.latest_total_intents),
+                ),
+                tui_plain_item(
+                    "parallel enabled",
+                    format_fast_lane_summary_optional(summary.latest_parallel_execution_enabled),
+                ),
+                tui_plain_item(
+                    "max in flight",
+                    format_fast_lane_summary_optional(
+                        summary.latest_parallel_execution_max_in_flight,
+                    ),
+                ),
+                tui_plain_item(
+                    "observed peak",
+                    format_fast_lane_summary_optional(summary.latest_observed_peak_in_flight),
+                ),
+                tui_plain_item(
+                    "wall time ms",
+                    format_fast_lane_summary_optional(summary.latest_observed_wall_time_ms),
+                ),
+                tui_plain_item(
+                    "parallel-safe intents",
+                    format_fast_lane_summary_optional(summary.latest_parallel_safe_intents),
+                ),
+                tui_plain_item(
+                    "serial-only intents",
+                    format_fast_lane_summary_optional(summary.latest_serial_only_intents),
+                ),
+                tui_plain_item(
+                    "parallel segments",
+                    format_fast_lane_summary_optional(summary.latest_parallel_segments),
+                ),
+                tui_plain_item(
+                    "sequential segments",
+                    format_fast_lane_summary_optional(summary.latest_sequential_segments),
+                ),
+            ],
+        },
+        TuiSectionSpec::KeyValues {
+            title: Some("rollups".to_owned()),
+            items: vec![
+                tui_csv_item("scheduling classes", rollup_scheduling_classes),
+                tui_csv_item("execution modes", rollup_execution_modes),
+            ],
+        },
+        TuiSectionSpec::Narrative {
+            title: Some("latest segments".to_owned()),
+            lines: latest_segment_lines,
+        },
+    ];
+
+    TuiMessageSpec {
+        role: "fast-lane".to_owned(),
+        caption: Some(caption),
+        sections,
+        footer_lines: vec![
+            "Use /fast_lane_summary after tool-heavy turns to inspect concurrency behavior."
+                .to_owned(),
+        ],
+    }
+}
+
+#[cfg(any(test, feature = "memory-sqlite"))]
+fn build_fast_lane_segment_lines(segments: &[FastLaneToolBatchSegmentSnapshot]) -> Vec<String> {
+    if segments.is_empty() {
+        return vec!["- no segment snapshot recorded".to_owned()];
+    }
+
+    let mut lines = Vec::new();
+
+    for segment in segments {
+        let peak_in_flight = format_fast_lane_summary_optional(segment.observed_peak_in_flight);
+        let wall_time_ms = format_fast_lane_summary_optional(segment.observed_wall_time_ms);
+        let line = format!(
+            "- segment {}: class={} mode={} intents={} peak={} wall_ms={}",
+            segment.segment_index,
+            segment.scheduling_class,
+            segment.execution_mode,
+            segment.intent_count,
+            peak_in_flight,
+            wall_time_ms,
+        );
+
+        lines.push(line);
+    }
+
+    lines
+}
+
+#[cfg(test)]
+async fn load_fast_lane_summary_output(
+    session_id: &str,
+    limit: usize,
+    binding: ConversationRuntimeBinding<'_>,
+    memory_config: &MemoryRuntimeConfig,
+) -> CliResult<String> {
+    let summary =
+        load_fast_lane_tool_batch_event_summary(session_id, limit, binding, memory_config).await?;
+
+    Ok(format_fast_lane_summary(session_id, limit, &summary))
+}
+
+#[cfg(any(test, feature = "memory-sqlite"))]
+fn render_safe_lane_summary_lines_with_width(
+    session_id: &str,
+    limit: usize,
+    conversation_config: &ConversationConfig,
+    summary: &SafeLaneEventSummary,
+    width: usize,
+) -> Vec<String> {
+    let message_spec =
+        build_safe_lane_summary_message_spec(session_id, limit, conversation_config, summary);
+    render_cli_chat_message_spec_with_width(&message_spec, width)
+}
+
+#[cfg(any(test, feature = "memory-sqlite"))]
+fn build_safe_lane_summary_message_spec(
+    session_id: &str,
+    limit: usize,
+    conversation_config: &ConversationConfig,
+    summary: &SafeLaneEventSummary,
+) -> TuiMessageSpec {
+    let final_status = match summary.final_status {
+        Some(SafeLaneFinalStatus::Succeeded) => "succeeded",
+        Some(SafeLaneFinalStatus::Failed) => "failed",
+        None => "unknown",
+    };
+    let final_failure_code = summary.final_failure_code.as_deref().unwrap_or("-");
+    let final_route_decision = summary.final_route_decision.as_deref().unwrap_or("-");
+    let final_route_reason = summary.final_route_reason.as_deref().unwrap_or("-");
+    let metrics = summary.latest_metrics.as_ref();
+    let rounds_started = metrics
+        .map(|value| value.rounds_started as f64)
+        .unwrap_or(summary.round_started_events as f64);
+    let replan_rate = if rounds_started > 0.0 {
+        summary.replan_triggered_events as f64 / rounds_started
+    } else {
+        0.0
+    };
+    let verify_failure_rate = if rounds_started > 0.0 {
+        summary.verify_failed_events as f64 / rounds_started
+    } else {
+        0.0
+    };
+    let governor_trend_failure_ewma =
+        format_milli_ratio(summary.session_governor_latest_trend_failure_ewma_milli);
+    let governor_trend_backpressure_ewma =
+        format_milli_ratio(summary.session_governor_latest_trend_backpressure_ewma_milli);
+    let latest_tool_truncation_ratio = format_milli_ratio(
+        summary
+            .latest_tool_output
+            .as_ref()
+            .map(|snapshot| snapshot.truncation_ratio_milli),
+    );
+    let aggregate_tool_truncation_ratio_milli = summary
+        .tool_output_aggregate_truncation_ratio_milli
+        .or_else(|| {
+            if summary.tool_output_result_lines_total == 0 {
+                return None;
+            }
+
+            let truncated_lines = summary.tool_output_truncated_result_lines_total;
+            let total_lines = summary.tool_output_result_lines_total;
+            let ratio_milli = truncated_lines
+                .saturating_mul(1000)
+                .saturating_div(total_lines)
+                .min(u32::MAX as u64) as u32;
+
+            Some(ratio_milli)
+        });
+    let aggregate_tool_truncation_ratio =
+        aggregate_tool_truncation_ratio_milli.map(|milli| (milli as f64) / 1000.0);
+    let aggregate_tool_truncation_ratio_text = aggregate_tool_truncation_ratio
+        .map(|value| format!("{value:.3}"))
+        .unwrap_or_else(|| "-".to_owned());
+    let health_signal = derive_safe_lane_health_signal(
+        conversation_config,
+        summary,
+        replan_rate,
+        verify_failure_rate,
+        aggregate_tool_truncation_ratio,
+    );
+    let health_flags = if health_signal.flags.is_empty() {
+        "none".to_owned()
+    } else {
+        health_signal.flags.join(", ")
+    };
+    let latest_health_event_severity = summary
+        .latest_health_signal
+        .as_ref()
+        .map(|snapshot| snapshot.severity.as_str())
+        .unwrap_or("-");
+    let latest_health_event_flags = summary
+        .latest_health_signal
+        .as_ref()
+        .map(|snapshot| {
+            if snapshot.flags.is_empty() {
+                return "none".to_owned();
+            }
+
+            snapshot.flags.join(", ")
+        })
+        .unwrap_or_else(|| "-".to_owned());
+    let route_decision_values = collect_rollup_values(&summary.route_decision_counts);
+    let route_reason_values = collect_rollup_values(&summary.route_reason_counts);
+    let failure_code_values = collect_rollup_values(&summary.failure_code_counts);
+    let rollup_route_decisions = csv_values_or_dash(route_decision_values);
+    let rollup_route_reasons = csv_values_or_dash(route_reason_values);
+    let rollup_failure_codes = csv_values_or_dash(failure_code_values);
+    let health_tone = safe_lane_health_tone(health_signal.severity);
+    let latest_metrics_section = match metrics {
+        Some(metrics) => TuiSectionSpec::KeyValues {
+            title: Some("latest metrics".to_owned()),
+            items: vec![
+                tui_plain_item("rounds started", metrics.rounds_started.to_string()),
+                tui_plain_item("rounds succeeded", metrics.rounds_succeeded.to_string()),
+                tui_plain_item("rounds failed", metrics.rounds_failed.to_string()),
+                tui_plain_item("verify failures", metrics.verify_failures.to_string()),
+                tui_plain_item("replans triggered", metrics.replans_triggered.to_string()),
+                tui_plain_item("attempts used", metrics.total_attempts_used.to_string()),
+            ],
+        },
+        None => TuiSectionSpec::KeyValues {
+            title: Some("latest metrics".to_owned()),
+            items: vec![tui_plain_item("status", "unavailable".to_owned())],
+        },
+    };
+    let caption = format!("session={session_id} limit={limit}");
+    let sections = vec![
+        TuiSectionSpec::KeyValues {
+            title: Some("terminal status".to_owned()),
+            items: vec![
+                tui_plain_item("status", final_status.to_owned()),
+                tui_plain_item("failure code", final_failure_code.to_owned()),
+                tui_plain_item("route decision", final_route_decision.to_owned()),
+                tui_plain_item("route reason", final_route_reason.to_owned()),
+            ],
+        },
+        TuiSectionSpec::KeyValues {
+            title: Some("events".to_owned()),
+            items: vec![
+                tui_plain_item("lane selected", summary.lane_selected_events.to_string()),
+                tui_plain_item("round started", summary.round_started_events.to_string()),
+                tui_plain_item(
+                    "round succeeded",
+                    summary.round_completed_succeeded_events.to_string(),
+                ),
+                tui_plain_item(
+                    "round failed",
+                    summary.round_completed_failed_events.to_string(),
+                ),
+                tui_plain_item("verify failed", summary.verify_failed_events.to_string()),
+                tui_plain_item(
+                    "verify policy adjusted",
+                    summary.verify_policy_adjusted_events.to_string(),
+                ),
+                tui_plain_item(
+                    "replan triggered",
+                    summary.replan_triggered_events.to_string(),
+                ),
+                tui_plain_item("final status", summary.final_status_events.to_string()),
+            ],
+        },
+        TuiSectionSpec::KeyValues {
+            title: Some("rates".to_owned()),
+            items: vec![
+                tui_plain_item("replan per round", format!("{replan_rate:.3}")),
+                tui_plain_item("verify fail per round", format!("{verify_failure_rate:.3}")),
+            ],
+        },
+        TuiSectionSpec::KeyValues {
+            title: Some("governor".to_owned()),
+            items: vec![
+                tui_plain_item(
+                    "engaged events",
+                    summary.session_governor_engaged_events.to_string(),
+                ),
+                tui_plain_item(
+                    "force no replan",
+                    summary.session_governor_force_no_replan_events.to_string(),
+                ),
+                tui_plain_item(
+                    "failed threshold triggers",
+                    summary
+                        .session_governor_failed_threshold_triggered_events
+                        .to_string(),
+                ),
+                tui_plain_item(
+                    "backpressure threshold triggers",
+                    summary
+                        .session_governor_backpressure_threshold_triggered_events
+                        .to_string(),
+                ),
+                tui_plain_item(
+                    "trend threshold triggers",
+                    summary
+                        .session_governor_trend_threshold_triggered_events
+                        .to_string(),
+                ),
+                tui_plain_item(
+                    "recovery threshold triggers",
+                    summary
+                        .session_governor_recovery_threshold_triggered_events
+                        .to_string(),
+                ),
+                tui_plain_item(
+                    "metric snapshots",
+                    summary.session_governor_metrics_snapshots_seen.to_string(),
+                ),
+                tui_plain_item(
+                    "trend samples",
+                    format_fast_lane_summary_optional(
+                        summary.session_governor_latest_trend_samples,
+                    ),
+                ),
+                tui_plain_item(
+                    "trend min samples",
+                    format_fast_lane_summary_optional(
+                        summary.session_governor_latest_trend_min_samples,
+                    ),
+                ),
+                tui_plain_item("trend failure ewma", governor_trend_failure_ewma),
+                tui_plain_item("trend backpressure ewma", governor_trend_backpressure_ewma),
+                tui_plain_item(
+                    "recovery success streak",
+                    format_fast_lane_summary_optional(
+                        summary.session_governor_latest_recovery_success_streak,
+                    ),
+                ),
+                tui_plain_item(
+                    "recovery streak threshold",
+                    format_fast_lane_summary_optional(
+                        summary.session_governor_latest_recovery_success_streak_threshold,
+                    ),
+                ),
+            ],
+        },
+        TuiSectionSpec::KeyValues {
+            title: Some("tool output".to_owned()),
+            items: vec![
+                tui_plain_item("snapshots", summary.tool_output_snapshots_seen.to_string()),
+                tui_plain_item(
+                    "truncated events",
+                    summary.tool_output_truncated_events.to_string(),
+                ),
+                tui_plain_item(
+                    "result lines total",
+                    summary.tool_output_result_lines_total.to_string(),
+                ),
+                tui_plain_item(
+                    "truncated result lines",
+                    summary.tool_output_truncated_result_lines_total.to_string(),
+                ),
+                tui_plain_item("latest truncation ratio", latest_tool_truncation_ratio),
+                tui_plain_item(
+                    "aggregate truncation ratio",
+                    aggregate_tool_truncation_ratio_text,
+                ),
+                tui_plain_item(
+                    "aggregate truncation ratio milli",
+                    format_fast_lane_summary_optional(aggregate_tool_truncation_ratio_milli),
+                ),
+                tui_plain_item(
+                    "truncation verify failed",
+                    summary
+                        .tool_output_truncation_verify_failed_events
+                        .to_string(),
+                ),
+                tui_plain_item(
+                    "truncation replan",
+                    summary.tool_output_truncation_replan_events.to_string(),
+                ),
+                tui_plain_item(
+                    "truncation final failure",
+                    summary
+                        .tool_output_truncation_final_failure_events
+                        .to_string(),
+                ),
+            ],
+        },
+        TuiSectionSpec::Callout {
+            tone: health_tone,
+            title: Some("health".to_owned()),
+            lines: vec![
+                format!("severity: {}", health_signal.severity),
+                format!("flags: {health_flags}"),
+            ],
+        },
+        TuiSectionSpec::KeyValues {
+            title: Some("health events".to_owned()),
+            items: vec![
+                tui_plain_item(
+                    "snapshots",
+                    summary.health_signal_snapshots_seen.to_string(),
+                ),
+                tui_plain_item("warn events", summary.health_signal_warn_events.to_string()),
+                tui_plain_item(
+                    "critical events",
+                    summary.health_signal_critical_events.to_string(),
+                ),
+                tui_plain_item("latest severity", latest_health_event_severity.to_owned()),
+                tui_plain_item("latest flags", latest_health_event_flags),
+            ],
+        },
+        latest_metrics_section,
+        TuiSectionSpec::KeyValues {
+            title: Some("rollups".to_owned()),
+            items: vec![
+                tui_csv_item("route decisions", rollup_route_decisions),
+                tui_csv_item("route reasons", rollup_route_reasons),
+                tui_csv_item("failure codes", rollup_failure_codes),
+            ],
+        },
+    ];
+
+    TuiMessageSpec {
+        role: "safe-lane".to_owned(),
+        caption: Some(caption),
+        sections,
+        footer_lines: vec![
+            "Use /safe_lane_summary when verify/replan behavior needs inspection.".to_owned(),
+        ],
+    }
+}
+
+#[cfg(test)]
+async fn load_safe_lane_summary_output(
+    session_id: &str,
+    limit: usize,
+    conversation_config: &ConversationConfig,
+    binding: ConversationRuntimeBinding<'_>,
+    memory_config: &MemoryRuntimeConfig,
+) -> CliResult<String> {
+    let summary = load_safe_lane_event_summary(session_id, limit, binding, memory_config).await?;
+
+    Ok(format_safe_lane_summary(
+        session_id,
+        limit,
+        conversation_config,
+        &summary,
+    ))
+}
+
+#[cfg(any(test, feature = "memory-sqlite"))]
+fn render_turn_checkpoint_summary_lines_with_width(
+    session_id: &str,
+    limit: usize,
+    diagnostics: &TurnCheckpointDiagnostics,
+    width: usize,
+) -> Vec<String> {
+    let message_spec = build_turn_checkpoint_summary_message_spec(session_id, limit, diagnostics);
+    render_cli_chat_message_spec_with_width(&message_spec, width)
+}
+
+#[cfg(any(test, feature = "memory-sqlite"))]
+fn build_turn_checkpoint_summary_message_spec(
+    session_id: &str,
+    limit: usize,
+    diagnostics: &TurnCheckpointDiagnostics,
+) -> TuiMessageSpec {
+    let summary = diagnostics.summary();
+    let render_labels = TurnCheckpointSummaryRenderLabels::from_summary(summary);
+    let durability_labels = TurnCheckpointDurabilityRenderLabels::from_summary(summary);
+    let recovery_labels =
+        TurnCheckpointRecoveryRenderLabels::from_assessment(diagnostics.recovery());
+    let failure_step = format_turn_checkpoint_failure_step(summary.latest_failure_step);
+    let failure_error = summary.latest_failure_error.as_deref().unwrap_or("-");
+    let reply_durable = bool_yes_no_value(summary.reply_durable);
+    let checkpoint_durable = bool_yes_no_value(summary.checkpoint_durable);
+    let recovery_needed = bool_yes_no_value(summary.requires_recovery);
+    let recovery_tone = recovery_callout_tone(summary.requires_recovery);
+    let stage_rollup_values = collect_rollup_values(&summary.stage_counts);
+    let stage_rollups = csv_values_or_dash(stage_rollup_values);
+    let caption = format!("session={session_id} limit={limit}");
+    let mut sections = vec![
+        TuiSectionSpec::KeyValues {
+            title: Some("summary".to_owned()),
+            items: vec![
+                tui_plain_item("checkpoints", summary.checkpoint_events.to_string()),
+                tui_plain_item("state", render_labels.session_state.to_owned()),
+                tui_plain_item("durability", durability_labels.durability.to_owned()),
+                tui_plain_item("reply durable", reply_durable),
+                tui_plain_item("checkpoint durable", checkpoint_durable),
+                tui_plain_item("requires recovery", recovery_needed),
+            ],
+        },
+        TuiSectionSpec::Callout {
+            tone: recovery_tone,
+            title: Some("recovery".to_owned()),
+            lines: vec![
+                format!("action: {}", recovery_labels.action),
+                format!("source: {}", recovery_labels.source),
+                format!("reason: {}", recovery_labels.reason),
+            ],
+        },
+        TuiSectionSpec::KeyValues {
+            title: Some("latest checkpoint".to_owned()),
+            items: vec![
+                tui_plain_item("stage", render_labels.stage.to_owned()),
+                tui_plain_item("after turn", render_labels.after_turn.to_owned()),
+                tui_plain_item("compaction", render_labels.compaction.to_owned()),
+                tui_plain_item("lane", render_labels.lane.to_owned()),
+                tui_plain_item("result kind", render_labels.result_kind.to_owned()),
+                tui_plain_item(
+                    "persistence mode",
+                    render_labels.persistence_mode.to_owned(),
+                ),
+                tui_plain_item("identity", render_labels.identity.to_owned()),
+                tui_plain_item("failure step", failure_step.to_owned()),
+                tui_plain_item("failure error", failure_error.to_owned()),
+            ],
+        },
+        TuiSectionSpec::KeyValues {
+            title: Some("events".to_owned()),
+            items: vec![
+                tui_plain_item("post persist", summary.post_persist_events.to_string()),
+                tui_plain_item("finalized", summary.finalized_events.to_string()),
+                tui_plain_item(
+                    "finalization failed",
+                    summary.finalization_failed_events.to_string(),
+                ),
+                tui_plain_item(
+                    "schema version",
+                    format_fast_lane_summary_optional(summary.latest_schema_version),
+                ),
+            ],
+        },
+        TuiSectionSpec::KeyValues {
+            title: Some("rollups".to_owned()),
+            items: vec![tui_csv_item("stages", stage_rollups)],
+        },
+    ];
+
+    if render_labels.safe_lane_route_decision != "-"
+        || render_labels.safe_lane_route_reason != "-"
+        || render_labels.safe_lane_route_source != "-"
+    {
+        sections.insert(
+            3,
+            TuiSectionSpec::KeyValues {
+                title: Some("safe-lane route".to_owned()),
+                items: vec![
+                    tui_plain_item(
+                        "decision",
+                        render_labels.safe_lane_route_decision.to_owned(),
+                    ),
+                    tui_plain_item("reason", render_labels.safe_lane_route_reason.to_owned()),
+                    tui_plain_item("source", render_labels.safe_lane_route_source.to_owned()),
+                ],
+            },
+        );
+    }
+
+    if let Some(probe) = diagnostics.runtime_probe() {
+        let probe_lines = vec![
+            format!("action: {}", probe.action().as_str()),
+            format!("source: {}", probe.source().as_str()),
+            format!("reason: {}", probe.reason().as_str()),
+        ];
+
+        sections.push(TuiSectionSpec::Callout {
+            tone: TuiCalloutTone::Info,
+            title: Some("runtime probe".to_owned()),
+            lines: probe_lines,
+        });
+    }
+
+    TuiMessageSpec {
+        role: "checkpoint".to_owned(),
+        caption: Some(caption),
+        sections,
+        footer_lines: vec![
+            "Use /turn_checkpoint_repair when the latest durable state needs repair.".to_owned(),
+        ],
+    }
+}
+
+#[cfg(test)]
+async fn load_turn_checkpoint_summary_output(
     turn_coordinator: &ConversationTurnCoordinator,
     config: &LoongClawConfig,
     session_id: &str,
+    limit: usize,
     binding: ConversationRuntimeBinding<'_>,
 ) -> CliResult<String> {
-    let outcome = turn_coordinator
-        .repair_turn_checkpoint_tail(config, session_id, binding)
+    let diagnostics = turn_coordinator
+        .load_turn_checkpoint_diagnostics_with_limit(config, session_id, limit, binding)
         .await?;
-    Ok(format_turn_checkpoint_repair(session_id, &outcome))
+
+    Ok(format_turn_checkpoint_summary_output(
+        session_id,
+        limit,
+        &diagnostics,
+    ))
+}
+
+#[cfg(any(test, feature = "memory-sqlite"))]
+fn render_turn_checkpoint_repair_lines_with_width(
+    session_id: &str,
+    outcome: &TurnCheckpointTailRepairOutcome,
+    width: usize,
+) -> Vec<String> {
+    let message_spec = build_turn_checkpoint_repair_message_spec(session_id, outcome);
+    render_cli_chat_message_spec_with_width(&message_spec, width)
+}
+
+#[cfg(any(test, feature = "memory-sqlite"))]
+fn build_turn_checkpoint_repair_message_spec(
+    session_id: &str,
+    outcome: &TurnCheckpointTailRepairOutcome,
+) -> TuiMessageSpec {
+    let after_turn = outcome.after_turn_status().unwrap_or("-");
+    let compaction = outcome.compaction_status().unwrap_or("-");
+    let source = outcome.source().map(|value| value.as_str()).unwrap_or("-");
+    let status = outcome.status();
+    let (callout_tone, callout_lines) = match status {
+        TurnCheckpointTailRepairStatus::Repaired => (
+            TuiCalloutTone::Success,
+            vec!["Repair completed and durable checkpoint state was updated.".to_owned()],
+        ),
+        TurnCheckpointTailRepairStatus::ManualRequired => (
+            TuiCalloutTone::Warning,
+            vec!["Manual inspection is still required before replaying the session.".to_owned()],
+        ),
+        TurnCheckpointTailRepairStatus::NotNeeded => (
+            TuiCalloutTone::Success,
+            vec!["No repair action was required for the latest durable checkpoint.".to_owned()],
+        ),
+        TurnCheckpointTailRepairStatus::NoCheckpoint => (
+            TuiCalloutTone::Info,
+            vec!["No durable checkpoint was available to repair.".to_owned()],
+        ),
+    };
+    let caption = format!("session={session_id}");
+    let sections = vec![
+        TuiSectionSpec::KeyValues {
+            title: Some("repair status".to_owned()),
+            items: vec![
+                tui_plain_item("status", status.as_str().to_owned()),
+                tui_plain_item("action", outcome.action().as_str().to_owned()),
+                tui_plain_item("source", source.to_owned()),
+                tui_plain_item("reason", outcome.reason().as_str().to_owned()),
+            ],
+        },
+        TuiSectionSpec::KeyValues {
+            title: Some("checkpoint state".to_owned()),
+            items: vec![
+                tui_plain_item("session state", outcome.session_state().as_str().to_owned()),
+                tui_plain_item("checkpoints", outcome.checkpoint_events().to_string()),
+                tui_plain_item("after turn", after_turn.to_owned()),
+                tui_plain_item("compaction", compaction.to_owned()),
+            ],
+        },
+        TuiSectionSpec::Callout {
+            tone: callout_tone,
+            title: Some("repair result".to_owned()),
+            lines: callout_lines,
+        },
+    ];
+
+    TuiMessageSpec {
+        role: "repair".to_owned(),
+        caption: Some(caption),
+        sections,
+        footer_lines: vec![
+            "Re-run /status after repair to confirm the checkpoint state.".to_owned(),
+        ],
+    }
 }
 
 #[cfg(any(test, feature = "memory-sqlite"))]
@@ -864,7 +2730,7 @@ where
         .unwrap_or_else(|| "-".to_owned())
 }
 
-#[cfg(any(test, feature = "memory-sqlite"))]
+#[cfg(test)]
 fn format_fast_lane_segments(segments: &[FastLaneToolBatchSegmentSnapshot]) -> String {
     if segments.is_empty() {
         return "-".to_owned();
@@ -897,7 +2763,7 @@ fn format_fast_lane_segments(segments: &[FastLaneToolBatchSegmentSnapshot]) -> S
         .join(",")
 }
 
-#[cfg(any(test, feature = "memory-sqlite"))]
+#[cfg(test)]
 fn format_fast_lane_summary(
     session_id: &str,
     limit: usize,
@@ -992,7 +2858,7 @@ fn format_fast_lane_summary(
     .join("\n")
 }
 
-#[cfg(any(test, feature = "memory-sqlite"))]
+#[cfg(test)]
 fn format_safe_lane_summary(
     session_id: &str,
     limit: usize,
@@ -1273,6 +3139,7 @@ impl TurnCheckpointRecoveryRenderLabels {
         }
     }
 
+    #[cfg(test)]
     fn from_outcome(outcome: &TurnCheckpointTailRepairOutcome) -> Self {
         Self {
             action: outcome.action().as_str(),
@@ -1281,6 +3148,7 @@ impl TurnCheckpointRecoveryRenderLabels {
         }
     }
 
+    #[cfg(test)]
     fn from_probe(probe: &TurnCheckpointTailRepairRuntimeProbe) -> Self {
         Self {
             action: probe.action().as_str(),
@@ -1355,7 +3223,7 @@ impl TurnCheckpointDurabilityRenderLabels {
     }
 }
 
-#[cfg(any(test, feature = "memory-sqlite"))]
+#[cfg(test)]
 fn format_turn_checkpoint_summary(
     session_id: &str,
     limit: usize,
@@ -1407,7 +3275,7 @@ fn format_turn_checkpoint_summary(
     lines.join("\n")
 }
 
-#[cfg(any(test, feature = "memory-sqlite"))]
+#[cfg(test)]
 fn format_turn_checkpoint_summary_output(
     session_id: &str,
     limit: usize,
@@ -1421,7 +3289,7 @@ fn format_turn_checkpoint_summary_output(
     rendered
 }
 
-#[cfg(any(test, feature = "memory-sqlite"))]
+#[cfg(test)]
 fn format_turn_checkpoint_startup_health(
     session_id: &str,
     diagnostics: &TurnCheckpointDiagnostics,
@@ -1459,7 +3327,7 @@ fn format_turn_checkpoint_startup_health(
     ))
 }
 
-#[cfg(any(test, feature = "memory-sqlite"))]
+#[cfg(test)]
 fn format_turn_checkpoint_repair(
     session_id: &str,
     outcome: &TurnCheckpointTailRepairOutcome,
@@ -1478,7 +3346,7 @@ fn format_turn_checkpoint_repair(
     )
 }
 
-#[cfg(any(test, feature = "memory-sqlite"))]
+#[cfg(test)]
 fn format_turn_checkpoint_runtime_probe(
     session_id: &str,
     probe: &TurnCheckpointTailRepairRuntimeProbe,
@@ -1547,7 +3415,7 @@ struct SafeLaneHealthSignal {
     flags: Vec<String>,
 }
 
-#[cfg(any(test, feature = "memory-sqlite"))]
+#[cfg(test)]
 fn format_rollup_counts(counts: &std::collections::BTreeMap<String, u32>) -> String {
     if counts.is_empty() {
         return "-".to_owned();
@@ -1586,11 +3454,14 @@ fn format_average(sum: u64, samples: u32) -> String {
 mod tests {
     use super::*;
     use crate::conversation::ConversationRuntimeBinding;
+    use serde_json::json;
+    use std::ffi::OsStr;
     use std::path::PathBuf;
+    use std::sync::Arc;
     #[cfg(feature = "memory-sqlite")]
     use std::{
         collections::{BTreeMap, BTreeSet},
-        sync::{Arc, Mutex},
+        sync::Mutex,
     };
 
     #[cfg(feature = "memory-sqlite")]
@@ -1603,7 +3474,58 @@ mod tests {
         MemoryCoreRequest, StaticPolicyEngine, VerticalPackManifest,
     };
     #[cfg(feature = "memory-sqlite")]
-    use serde_json::{Value, json};
+    use serde_json::Value;
+
+    #[cfg(feature = "memory-sqlite")]
+    fn test_config() -> LoongClawConfig {
+        let mut config = LoongClawConfig::default();
+        config.provider = crate::config::ProviderConfig::default();
+        config.audit.mode = crate::config::AuditMode::InMemory;
+        config
+    }
+
+    #[cfg(feature = "memory-sqlite")]
+    fn test_kernel_context_with_memory(
+        agent_id: &str,
+        memory_config: &MemoryRuntimeConfig,
+    ) -> crate::KernelContext {
+        let clock = Arc::new(FixedClock::new(1_700_000_000));
+        let audit = Arc::new(InMemoryAuditSink::default());
+        let mut kernel = LoongClawKernel::with_runtime(StaticPolicyEngine::default(), clock, audit);
+
+        let pack = VerticalPackManifest {
+            pack_id: "test-pack-memory".to_owned(),
+            domain: "testing".to_owned(),
+            version: "0.1.0".to_owned(),
+            default_route: ExecutionRoute {
+                harness_kind: HarnessKind::EmbeddedPi,
+                adapter: None,
+            },
+            allowed_connectors: BTreeSet::new(),
+            granted_capabilities: BTreeSet::from([Capability::MemoryRead, Capability::MemoryWrite]),
+            metadata: BTreeMap::new(),
+        };
+
+        kernel
+            .register_pack(pack)
+            .expect("register memory test pack");
+
+        let adapter = crate::memory::MvpMemoryAdapter::with_config(memory_config.clone());
+        kernel.register_core_memory_adapter(adapter);
+
+        kernel
+            .set_default_core_memory_adapter("mvp-memory")
+            .expect("set memory test adapter");
+
+        let token = kernel
+            .issue_token("test-pack-memory", agent_id, 60)
+            .expect("issue memory test token");
+
+        crate::KernelContext {
+            kernel: Arc::new(kernel),
+            token,
+        }
+    }
 
     #[test]
     fn cli_chat_options_detect_explicit_acp_requests() {
@@ -1637,6 +3559,51 @@ mod tests {
         assert!(!CliChatOptions::default().requests_explicit_acp());
     }
 
+    #[test]
+    fn build_onboard_command_defaults_to_current_executable() {
+        let expected_executable = std::env::current_exe().expect("current executable");
+        let command =
+            build_onboard_command(None, Path::new("/tmp/loongclaw.toml")).expect("onboard command");
+
+        assert_eq!(command.get_program(), expected_executable.as_os_str());
+        assert_eq!(
+            command
+                .get_args()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec!["onboard".to_owned()]
+        );
+    }
+
+    #[test]
+    fn build_onboard_command_forwards_explicit_config_path_to_output() {
+        let command = build_onboard_command_for_executable(
+            PathBuf::from("/tmp/loongclaw"),
+            Some("custom.toml"),
+            Path::new("/tmp/custom.toml"),
+        );
+
+        assert_eq!(command.get_program(), OsStr::new("/tmp/loongclaw"));
+        assert_eq!(
+            command
+                .get_args()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec![
+                "onboard".to_owned(),
+                "--output".to_owned(),
+                "/tmp/custom.toml".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn onboard_command_hint_preserves_explicit_config_path() {
+        let hint = format_onboard_command_hint(Some("custom.toml"), Path::new("/tmp/custom.toml"));
+
+        assert_eq!(hint, "loong onboard --output /tmp/custom.toml");
+    }
+
     #[cfg(feature = "memory-sqlite")]
     fn unique_chat_sqlite_path(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -1649,18 +3616,21 @@ mod tests {
     }
 
     #[cfg(feature = "memory-sqlite")]
-    fn cleanup_chat_test_memory(sqlite_path: &Path) {
+    pub(super) fn cleanup_chat_test_memory(sqlite_path: &Path) {
         let _ = std::fs::remove_file(sqlite_path);
         let _ = std::fs::remove_file(format!("{}-wal", sqlite_path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", sqlite_path.display()));
     }
 
     #[cfg(feature = "memory-sqlite")]
-    fn init_chat_test_memory(label: &str) -> (LoongClawConfig, MemoryRuntimeConfig, PathBuf) {
+    pub(super) fn init_chat_test_memory(
+        label: &str,
+    ) -> (LoongClawConfig, MemoryRuntimeConfig, PathBuf) {
         let sqlite_path = unique_chat_sqlite_path(label);
         cleanup_chat_test_memory(&sqlite_path);
 
         let mut config = LoongClawConfig::default();
+        config.audit.mode = crate::config::AuditMode::InMemory;
         config.memory.sqlite_path = sqlite_path.display().to_string();
         let memory_config = MemoryRuntimeConfig::from_memory_config(&config.memory);
         crate::memory::ensure_memory_db_ready(
@@ -1670,6 +3640,16 @@ mod tests {
         .expect("initialize sqlite memory");
 
         (config, memory_config, sqlite_path)
+    }
+
+    #[cfg(feature = "memory-sqlite")]
+    #[test]
+    fn init_chat_test_memory_uses_in_memory_audit_mode() {
+        let (config, _memory_config, sqlite_path) = init_chat_test_memory("audit-mode");
+
+        assert_eq!(config.audit.mode, crate::config::AuditMode::InMemory);
+
+        cleanup_chat_test_memory(&sqlite_path);
     }
 
     #[cfg(feature = "memory-sqlite")]
@@ -1961,6 +3941,50 @@ mod tests {
             .expect_err("empty one-shot message should fail");
 
         assert!(error.contains("ask message must not be empty"));
+    }
+
+    #[test]
+    fn concurrent_cli_host_requires_explicit_session_id() {
+        let shutdown = ConcurrentCliShutdown::new();
+        let error = run_concurrent_cli_host(&ConcurrentCliHostOptions {
+            resolved_path: PathBuf::from("/tmp/loongclaw.toml"),
+            config: LoongClawConfig::default(),
+            session_id: "   ".to_owned(),
+            shutdown,
+            initialize_runtime_environment: false,
+        })
+        .expect_err("concurrent host should reject an implicit session id");
+
+        assert!(
+            error.contains("explicit session"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "memory-sqlite")]
+    async fn concurrent_cli_host_exits_when_shutdown_is_requested() {
+        let (mut config, _memory_config, sqlite_path) = init_chat_test_memory("concurrent-host");
+        config.audit.mode = crate::config::AuditMode::InMemory;
+        let options = CliChatOptions::default();
+        let runtime = initialize_cli_turn_runtime_with_loaded_config(
+            PathBuf::from("/tmp/loongclaw.toml"),
+            config,
+            Some("cli-supervisor"),
+            &options,
+            "cli-chat-concurrent-test",
+            CliSessionRequirement::RequireExplicit,
+            false,
+        )
+        .expect("concurrent host runtime");
+        let shutdown = ConcurrentCliShutdown::new();
+        shutdown.request_shutdown();
+
+        run_concurrent_cli_host_loop(&runtime, &options, &shutdown)
+            .await
+            .expect("concurrent host should stop cleanly when shutdown is requested");
+
+        cleanup_chat_test_memory(&sqlite_path);
     }
 
     #[cfg(feature = "memory-sqlite")]
@@ -2376,34 +4400,43 @@ mod tests {
 
     #[test]
     fn render_cli_chat_startup_lines_prioritize_first_turn_guidance() {
-        let lines = render_cli_chat_startup_lines(&CliChatStartupSummary {
-            config_path: "/tmp/loongclaw.toml".to_owned(),
-            memory_label: "/tmp/loongclaw.db".to_owned(),
-            session_id: "default".to_owned(),
-            context_engine_id: "threaded".to_owned(),
-            context_engine_source: "config".to_owned(),
-            acp_enabled: true,
-            dispatch_enabled: true,
-            conversation_routing: "automatic".to_owned(),
-            allowed_channels: vec!["cli".to_owned()],
-            acp_backend_id: "builtin".to_owned(),
-            acp_backend_source: "default".to_owned(),
-            explicit_acp_request: false,
-            event_stream_enabled: false,
-            bootstrap_mcp_servers: Vec::new(),
-            working_directory: None,
-        });
+        let lines = render_cli_chat_startup_lines_with_width(
+            &CliChatStartupSummary {
+                config_path: "/tmp/loongclaw.toml".to_owned(),
+                memory_label: "/tmp/loongclaw.db".to_owned(),
+                session_id: "default".to_owned(),
+                context_engine_id: "threaded".to_owned(),
+                context_engine_source: "config".to_owned(),
+                compaction_enabled: true,
+                compaction_min_messages: Some(6),
+                compaction_trigger_estimated_tokens: Some(120),
+                compaction_preserve_recent_turns: 4,
+                compaction_fail_open: false,
+                acp_enabled: true,
+                dispatch_enabled: true,
+                conversation_routing: "automatic".to_owned(),
+                allowed_channels: vec!["cli".to_owned()],
+                acp_backend_id: "builtin".to_owned(),
+                acp_backend_source: "default".to_owned(),
+                explicit_acp_request: false,
+                event_stream_enabled: false,
+                bootstrap_mcp_servers: Vec::new(),
+                working_directory: None,
+            },
+            80,
+        );
 
-        assert_eq!(lines[0], "loongclaw chat ready");
         assert!(
-            lines.iter().any(|line| line == "start here"),
-            "chat startup should lead with a dedicated first-action heading: {lines:#?}"
+            lines
+                .first()
+                .is_some_and(|line| line.starts_with("LOONGCLAW")),
+            "chat startup should now use the shared compact brand header: {lines:#?}"
         );
         assert!(
             lines.iter().any(|line| {
-                line == "- first prompt: Summarize this repository and suggest the best next step."
+                line == "start here: Summarize this repository and suggest the best next step."
             }),
-            "chat startup should suggest a concrete first prompt: {lines:#?}"
+            "chat startup should render the first prompt through the structured action group: {lines:#?}"
         );
         assert!(
             lines
@@ -2412,45 +4445,1261 @@ mod tests {
             "chat startup should keep the usage hint, but under the assistant-first opening block: {lines:#?}"
         );
         assert!(
-            lines.iter().any(|line| line == "session details"),
-            "chat startup should tuck session/config facts into a secondary section: {lines:#?}"
+            lines.iter().any(|line| line.contains("session details")),
+            "chat startup should keep session/config facts in a structured key-value section: {lines:#?}"
         );
         assert!(
-            lines.iter().any(|line| line == "runtime details"),
+            lines.iter().any(|line| line.contains("runtime details")),
             "chat startup should still preserve runtime context in a compact secondary section: {lines:#?}"
         );
         assert!(
-            lines.iter().any(|line| line == "- session: default"),
+            lines
+                .iter()
+                .any(|line| line.contains("continuity maintenance")),
+            "chat startup should show compaction maintenance settings in a dedicated section: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("- session: default")),
             "chat startup should continue to show session identity after the handoff block: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("- compaction: true")),
+            "chat startup should show whether automatic compaction is enabled: {lines:#?}"
         );
     }
 
     #[test]
     fn render_cli_chat_startup_lines_surface_explicit_acp_overrides() {
-        let lines = render_cli_chat_startup_lines(&CliChatStartupSummary {
-            config_path: "/tmp/loongclaw.toml".to_owned(),
-            memory_label: "/tmp/loongclaw.db".to_owned(),
-            session_id: "thread-42".to_owned(),
-            context_engine_id: "threaded".to_owned(),
-            context_engine_source: "env".to_owned(),
-            acp_enabled: true,
-            dispatch_enabled: true,
-            conversation_routing: "manual".to_owned(),
-            allowed_channels: vec!["cli".to_owned(), "telegram".to_owned()],
-            acp_backend_id: "jsonrpc".to_owned(),
-            acp_backend_source: "config".to_owned(),
-            explicit_acp_request: true,
-            event_stream_enabled: true,
-            bootstrap_mcp_servers: vec!["filesystem".to_owned()],
-            working_directory: Some("/workspace/project".to_owned()),
-        });
+        let lines = render_cli_chat_startup_lines_with_width(
+            &CliChatStartupSummary {
+                config_path: "/tmp/loongclaw.toml".to_owned(),
+                memory_label: "/tmp/loongclaw.db".to_owned(),
+                session_id: "thread-42".to_owned(),
+                context_engine_id: "threaded".to_owned(),
+                context_engine_source: "env".to_owned(),
+                compaction_enabled: true,
+                compaction_min_messages: Some(6),
+                compaction_trigger_estimated_tokens: Some(120),
+                compaction_preserve_recent_turns: 4,
+                compaction_fail_open: false,
+                acp_enabled: true,
+                dispatch_enabled: true,
+                conversation_routing: "manual".to_owned(),
+                allowed_channels: vec!["cli".to_owned(), "telegram".to_owned()],
+                acp_backend_id: "jsonrpc".to_owned(),
+                acp_backend_source: "config".to_owned(),
+                explicit_acp_request: true,
+                event_stream_enabled: true,
+                bootstrap_mcp_servers: vec!["filesystem".to_owned()],
+                working_directory: Some("/workspace/project".to_owned()),
+            },
+            80,
+        );
 
         assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("note: acp overrides")),
+            "chat startup should group ACP overrides under a dedicated callout heading: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("- bootstrap MCP servers: filesystem")),
+            "chat startup should still surface the bootstrap MCP override details: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("- working directory: /workspace/project")),
+            "chat startup should still surface the working directory override: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn render_cli_chat_status_lines_focus_on_runtime_state_without_start_here() {
+        let lines = render_cli_chat_status_lines_with_width(
+            &CliChatStartupSummary {
+                config_path: "/tmp/loongclaw.toml".to_owned(),
+                memory_label: "/tmp/loongclaw.db".to_owned(),
+                session_id: "default".to_owned(),
+                context_engine_id: "threaded".to_owned(),
+                context_engine_source: "config".to_owned(),
+                compaction_enabled: true,
+                compaction_min_messages: Some(6),
+                compaction_trigger_estimated_tokens: Some(120),
+                compaction_preserve_recent_turns: 4,
+                compaction_fail_open: false,
+                acp_enabled: true,
+                dispatch_enabled: true,
+                conversation_routing: "automatic".to_owned(),
+                allowed_channels: vec!["cli".to_owned()],
+                acp_backend_id: "builtin".to_owned(),
+                acp_backend_source: "default".to_owned(),
+                explicit_acp_request: false,
+                event_stream_enabled: false,
+                bootstrap_mcp_servers: Vec::new(),
+                working_directory: None,
+            },
+            80,
+        );
+
+        assert_eq!(lines[0], "╭─ status · session=default");
+        assert!(
+            lines.iter().any(|line| line.contains("session details")),
+            "status output should keep session facts grouped under a section: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("runtime details")),
+            "status output should keep runtime facts grouped under a section: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("continuity maintenance")),
+            "status output should surface compaction maintenance settings: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("note: operator controls")),
+            "status output should include the operator control callout: {lines:#?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.starts_with("start here:")),
+            "status output should not re-render the first-turn guidance block: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn should_run_missing_config_onboard_uses_default_yes_and_respects_decline() {
+        assert!(should_run_missing_config_onboard(1, "\n"));
+        assert!(should_run_missing_config_onboard(1, "yes\n"));
+        assert!(!should_run_missing_config_onboard(1, "n\n"));
+        assert!(!should_run_missing_config_onboard(0, ""));
+    }
+
+    #[test]
+    fn render_cli_chat_missing_config_lines_wrap_setup_prompt_in_surface() {
+        let command = "loong onboard --output /tmp/loongclaw.toml";
+        let lines = render_cli_chat_missing_config_lines_with_width(command, 80);
+
+        assert!(
+            lines
+                .first()
+                .is_some_and(|line| line.starts_with("LOONGCLAW")),
+            "missing-config setup prompt should keep the shared compact header: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| line == "setup required"),
+            "missing-config setup prompt should promote the title into the shared screen surface: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "setup command: loong onboard --output /tmp/loongclaw.toml"),
+            "missing-config setup prompt should surface the setup command block: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "y) run setup wizard (recommended)"),
+            "missing-config setup prompt should show the default acceptance choice explicitly: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| line == "Press Enter to accept y."),
+            "missing-config setup prompt should explain the default-enter behavior: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn render_turn_checkpoint_startup_health_lines_surface_recovery_and_probe() {
+        let summary = TurnCheckpointEventSummary {
+            checkpoint_events: 1,
+            latest_stage: Some(TurnCheckpointStage::PostPersist),
+            latest_after_turn: Some(TurnCheckpointProgressStatus::Pending),
+            latest_compaction: Some(TurnCheckpointProgressStatus::Pending),
+            latest_lane: Some("safe".to_owned()),
+            latest_result_kind: Some("tool_error".to_owned()),
+            latest_persistence_mode: Some("success".to_owned()),
+            latest_safe_lane_terminal_route: Some(
+                crate::conversation::SafeLaneTerminalRouteSnapshot {
+                    decision: crate::conversation::SafeLaneFailureRouteDecision::Terminal,
+                    reason: crate::conversation::SafeLaneFailureRouteReason::BackpressureAttemptsExhausted,
+                    source: crate::conversation::SafeLaneFailureRouteSource::BackpressureGuard,
+                },
+            ),
+            latest_identity_present: Some(true),
+            session_state: TurnCheckpointSessionState::PendingFinalization,
+            checkpoint_durable: true,
+            requires_recovery: true,
+            reply_durable: true,
+            ..TurnCheckpointEventSummary::default()
+        };
+        let probe = TurnCheckpointTailRepairRuntimeProbe::new(
+            TurnCheckpointRecoveryAction::InspectManually,
+            crate::conversation::TurnCheckpointTailRepairSource::Runtime,
+            crate::conversation::TurnCheckpointTailRepairReason::CheckpointPreparationFingerprintMismatch,
+        );
+        let diagnostics = test_turn_checkpoint_diagnostics(summary, Some(probe));
+        let lines = render_turn_checkpoint_startup_health_lines_with_width(
+            "session-health",
+            &diagnostics,
+            80,
+        )
+        .expect("startup health surface");
+
+        assert_eq!(lines[0], "╭─ checkpoint · session=session-health");
+        assert!(
+            lines.iter().any(|line| line.contains("durability status")),
+            "startup health should group durability facts under a shared key-value section: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("attention: recovery")),
+            "startup health should surface pending recovery as a warning callout: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("- action: inspect_manually")),
+            "startup health should preserve the concrete recovery action in the callout: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("note: runtime probe")),
+            "startup health should surface runtime probe context as a secondary structured callout: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn render_turn_checkpoint_startup_health_lines_skip_non_durable_sessions() {
+        let summary = TurnCheckpointEventSummary {
+            session_state: TurnCheckpointSessionState::NotDurable,
+            checkpoint_durable: false,
+            reply_durable: false,
+            ..TurnCheckpointEventSummary::default()
+        };
+        let diagnostics = test_turn_checkpoint_diagnostics(summary, None);
+
+        let lines = render_turn_checkpoint_startup_health_lines_with_width(
+            "session-health",
+            &diagnostics,
+            80,
+        );
+
+        assert!(
+            lines.is_none(),
+            "startup health should stay quiet until a durable checkpoint exists"
+        );
+    }
+
+    #[test]
+    fn render_turn_checkpoint_startup_health_lines_surface_non_durable_recovery() {
+        let summary = TurnCheckpointEventSummary {
+            session_state: TurnCheckpointSessionState::NotDurable,
+            checkpoint_durable: false,
+            reply_durable: false,
+            requires_recovery: true,
+            ..TurnCheckpointEventSummary::default()
+        };
+        let diagnostics = test_turn_checkpoint_diagnostics(summary, None);
+
+        let lines = render_turn_checkpoint_startup_health_lines_with_width(
+            "session-health",
+            &diagnostics,
+            80,
+        )
+        .expect("non-durable recovery should still render");
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("recovery needed: yes")),
+            "startup health should surface non-durable recovery cases: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn render_turn_checkpoint_status_health_lines_surface_non_durable_sessions() {
+        let summary = TurnCheckpointEventSummary {
+            session_state: TurnCheckpointSessionState::NotDurable,
+            checkpoint_durable: false,
+            reply_durable: false,
+            ..TurnCheckpointEventSummary::default()
+        };
+        let diagnostics = test_turn_checkpoint_diagnostics(summary, None);
+        let lines = operator_surfaces::render_turn_checkpoint_status_health_lines_with_width(
+            "session-health",
+            &diagnostics,
+            80,
+        );
+
+        assert_eq!(lines[0], "╭─ checkpoint · session=session-health");
+        assert!(
+            lines.iter().any(|line| line.contains("state: not_durable")),
+            "status health should surface non-durable sessions explicitly: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("checkpoint durable: no")),
+            "status health should surface checkpoint durability explicitly: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn render_fast_lane_summary_lines_surface_aggregates_and_segments() {
+        let mut summary = FastLaneToolBatchEventSummary {
+            batch_events: 2,
+            total_intents_seen: 4,
+            total_parallel_safe_intents_seen: 3,
+            total_serial_only_intents_seen: 1,
+            total_parallel_segments_seen: 2,
+            total_sequential_segments_seen: 1,
+            parallel_execution_max_in_flight_samples: 1,
+            parallel_execution_max_in_flight_sum: 4,
+            observed_peak_in_flight_samples: 1,
+            observed_peak_in_flight_sum: 3,
+            observed_wall_time_ms_samples: 1,
+            observed_wall_time_ms_sum: 120,
+            latest_schema_version: Some(3),
+            latest_total_intents: Some(2),
+            latest_parallel_execution_enabled: Some(true),
+            latest_parallel_execution_max_in_flight: Some(4),
+            latest_observed_peak_in_flight: Some(3),
+            latest_observed_wall_time_ms: Some(120),
+            latest_parallel_safe_intents: Some(2),
+            latest_serial_only_intents: Some(0),
+            latest_parallel_segments: Some(1),
+            latest_sequential_segments: Some(0),
+            latest_segments: vec![FastLaneToolBatchSegmentSnapshot {
+                segment_index: 0,
+                scheduling_class: "parallel_safe".to_owned(),
+                execution_mode: "parallel".to_owned(),
+                intent_count: 2,
+                observed_peak_in_flight: Some(3),
+                observed_wall_time_ms: Some(120),
+            }],
+            ..FastLaneToolBatchEventSummary::default()
+        };
+        summary
+            .scheduling_class_counts
+            .insert("parallel_safe".to_owned(), 2);
+        summary
+            .execution_mode_counts
+            .insert("parallel".to_owned(), 2);
+
+        let lines = render_fast_lane_summary_lines_with_width("session-fast", 64, &summary, 80);
+
+        assert_eq!(lines[0], "╭─ fast-lane · session=session-fast limit=64");
+        assert!(
+            lines.iter().any(|line| line.contains("intent mix")),
+            "fast-lane summary should promote aggregate intent counters into a titled section: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("latest segments")),
+            "fast-lane summary should keep the latest segment narrative visible: {lines:#?}"
+        );
+        assert!(
             lines.iter().any(|line| {
-                line
-                    == "- acp overrides: explicit=true event_stream=true bootstrap_mcp_servers=filesystem cwd=/workspace/project"
+                line.contains(
+                    "- segment 0: class=parallel_safe mode=parallel intents=2 peak=3 wall_ms=120",
+                )
             }),
-            "chat startup should surface ACP override knobs only when they matter: {lines:#?}"
+            "fast-lane summary should render latest segment details as readable surface lines: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn render_safe_lane_summary_lines_surface_health_and_rollups() {
+        let config = ConversationConfig::default();
+        let mut summary = SafeLaneEventSummary {
+            lane_selected_events: 1,
+            round_started_events: 2,
+            round_completed_succeeded_events: 1,
+            round_completed_failed_events: 1,
+            verify_failed_events: 1,
+            replan_triggered_events: 1,
+            final_status_events: 1,
+            final_status: Some(SafeLaneFinalStatus::Failed),
+            final_failure_code: Some("safe_lane_plan_verify_failed".to_owned()),
+            final_route_decision: Some("terminal".to_owned()),
+            final_route_reason: Some("session_governor_no_replan".to_owned()),
+            latest_metrics: Some(crate::conversation::SafeLaneMetricsSnapshot {
+                rounds_started: 2,
+                rounds_succeeded: 1,
+                rounds_failed: 1,
+                verify_failures: 1,
+                replans_triggered: 1,
+                total_attempts_used: 3,
+            }),
+            tool_output_snapshots_seen: 2,
+            tool_output_truncated_events: 1,
+            tool_output_result_lines_total: 3,
+            tool_output_truncated_result_lines_total: 1,
+            tool_output_aggregate_truncation_ratio_milli: Some(333),
+            ..SafeLaneEventSummary::default()
+        };
+        summary
+            .route_decision_counts
+            .insert("terminal".to_owned(), 1);
+        summary
+            .route_reason_counts
+            .insert("session_governor_no_replan".to_owned(), 1);
+        summary
+            .failure_code_counts
+            .insert("safe_lane_plan_verify_failed".to_owned(), 1);
+
+        let lines =
+            render_safe_lane_summary_lines_with_width("session-safe", 32, &config, &summary, 80);
+
+        assert_eq!(lines[0], "╭─ safe-lane · session=session-safe limit=32");
+        assert!(
+            lines.iter().any(|line| line.contains("attention: health")),
+            "safe-lane summary should surface warning health as a structured callout: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("- severity: critical")),
+            "safe-lane health callout should preserve the derived severity: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("rollups")),
+            "safe-lane summary should keep the route and failure rollups in a dedicated section: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn render_turn_checkpoint_summary_lines_surface_runtime_probe() {
+        let summary = TurnCheckpointEventSummary {
+            checkpoint_events: 2,
+            post_persist_events: 1,
+            finalized_events: 1,
+            latest_stage: Some(TurnCheckpointStage::FinalizationFailed),
+            latest_after_turn: Some(TurnCheckpointProgressStatus::Completed),
+            latest_compaction: Some(TurnCheckpointProgressStatus::Failed),
+            latest_lane: Some("fast".to_owned()),
+            latest_result_kind: Some("final_text".to_owned()),
+            latest_persistence_mode: Some("success".to_owned()),
+            latest_identity_present: Some(true),
+            session_state: TurnCheckpointSessionState::FinalizationFailed,
+            checkpoint_durable: true,
+            requires_recovery: true,
+            reply_durable: true,
+            ..TurnCheckpointEventSummary::default()
+        };
+        let probe = TurnCheckpointTailRepairRuntimeProbe::new(
+            TurnCheckpointRecoveryAction::InspectManually,
+            crate::conversation::TurnCheckpointTailRepairSource::Runtime,
+            crate::conversation::TurnCheckpointTailRepairReason::CheckpointPreparationFingerprintMismatch,
+        );
+        let diagnostics = test_turn_checkpoint_diagnostics(summary, Some(probe));
+        let lines = render_turn_checkpoint_summary_lines_with_width(
+            "session-summary",
+            64,
+            &diagnostics,
+            80,
+        );
+
+        assert_eq!(lines[0], "╭─ checkpoint · session=session-summary limit=64");
+        assert!(
+            lines.iter().any(|line| line.contains("summary")),
+            "turn checkpoint summary should group the latest durability state in a titled section: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("note: runtime probe")),
+            "turn checkpoint summary should append runtime probe context as a structured callout: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn render_turn_checkpoint_repair_lines_surface_manual_result() {
+        let summary = TurnCheckpointEventSummary {
+            checkpoint_events: 1,
+            latest_stage: Some(TurnCheckpointStage::PostPersist),
+            session_state: TurnCheckpointSessionState::PendingFinalization,
+            checkpoint_durable: true,
+            requires_recovery: true,
+            reply_durable: true,
+            ..TurnCheckpointEventSummary::default()
+        };
+        let outcome = crate::conversation::TurnCheckpointTailRepairOutcome::from_summary(
+            crate::conversation::TurnCheckpointTailRepairStatus::ManualRequired,
+            TurnCheckpointRecoveryAction::InspectManually,
+            Some(crate::conversation::TurnCheckpointTailRepairSource::Summary),
+            crate::conversation::TurnCheckpointTailRepairReason::CheckpointIdentityMissing,
+            &summary,
+        );
+        let lines = render_turn_checkpoint_repair_lines_with_width("session-repair", &outcome, 80);
+
+        assert_eq!(lines[0], "╭─ repair · session=session-repair");
+        assert!(
+            lines.iter().any(|line| line.contains("repair status")),
+            "turn checkpoint repair should group repair facts in a structured key-value section: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("attention: repair result")),
+            "manual repair outcomes should surface a warning callout: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn render_cli_chat_help_lines_promotes_commands_to_surface() {
+        let lines = render_cli_chat_help_lines_with_width(72);
+
+        assert_eq!(lines[0], "╭─ chat · commands");
+        assert!(
+            lines.iter().any(|line| line.contains("slash commands")),
+            "help output should keep a dedicated slash-command section: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("/history: print the current session sliding window")),
+            "help output should render slash commands as readable key-value rows: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| line
+                .contains("/status: show session, runtime, compaction, and durability status")),
+            "help output should surface the status command: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| line
+                .contains("/compact: write a continuity-safe checkpoint into the active window")),
+            "help output should surface the manual compaction command: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("note: usage notes")),
+            "help output should preserve operator guidance as a callout: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn render_cli_chat_command_usage_lines_wrap_usage_in_warning_card() {
+        let lines = render_cli_chat_command_usage_lines_with_width("usage: /history", 72);
+
+        assert_eq!(lines[0], "╭─ chat · command");
+        assert!(
+            lines.iter().any(|line| line.contains("attention: usage")),
+            "usage errors should render inside a warning pane: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("usage: /history")),
+            "usage pane should preserve the concrete command usage: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn render_cli_chat_status_lines_surface_runtime_and_compaction_controls() {
+        let summary = CliChatStartupSummary {
+            config_path: "/tmp/loongclaw.toml".to_owned(),
+            memory_label: "window_plus_summary".to_owned(),
+            session_id: "session-status".to_owned(),
+            context_engine_id: "default".to_owned(),
+            context_engine_source: "config".to_owned(),
+            compaction_enabled: true,
+            compaction_min_messages: Some(6),
+            compaction_trigger_estimated_tokens: Some(12_000),
+            compaction_preserve_recent_turns: 4,
+            compaction_fail_open: true,
+            acp_enabled: true,
+            dispatch_enabled: true,
+            conversation_routing: "auto".to_owned(),
+            allowed_channels: vec!["cli".to_owned()],
+            acp_backend_id: "builtin".to_owned(),
+            acp_backend_source: "config".to_owned(),
+            explicit_acp_request: false,
+            event_stream_enabled: false,
+            bootstrap_mcp_servers: Vec::new(),
+            working_directory: None,
+        };
+
+        let lines = render_cli_chat_status_lines_with_width(&summary, 80);
+
+        assert_eq!(lines[0], "╭─ status · session=session-status");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("continuity maintenance")),
+            "status output should expose compaction settings as a dedicated section: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("compaction: true")),
+            "status output should expose compaction enablement: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("trigger tokens: 12000")),
+            "status output should surface the compaction token trigger: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("note: operator controls")),
+            "status output should append the operator controls callout: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("checkpoint the active session window on demand")),
+            "status output should direct operators toward manual compaction: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn render_manual_compaction_lines_surface_structured_result() {
+        let result = ManualCompactionResult {
+            status: ManualCompactionStatus::Applied,
+            before_turns: 8,
+            after_turns: 3,
+            estimated_tokens_before: Some(1200),
+            estimated_tokens_after: Some(420),
+            summary_headline: Some("Compacted 6 earlier turns".to_owned()),
+            detail: "Compacted 6 earlier turns. Session-local recall only. It does not replace Runtime Self Context.".to_owned(),
+        };
+
+        let lines = render_manual_compaction_lines_with_width("session-compact", &result, 80);
+
+        assert_eq!(lines[0], "╭─ compact · session=session-compact");
+        assert!(
+            lines.iter().any(|line| line.contains("compaction result")),
+            "manual compaction should render a dedicated result section: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("status: applied")),
+            "manual compaction should surface the applied status: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("tokens after: 420")),
+            "manual compaction should surface token estimates: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Runtime Self Context")),
+            "manual compaction should preserve the continuity boundary detail: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn render_cli_chat_history_lines_wrap_history_in_surface() {
+        let history_lines = vec![
+            "user: summarize the current repo".to_owned(),
+            "assistant: start with the daemon crate".to_owned(),
+        ];
+        let lines = render_cli_chat_history_lines_with_width("session-7", 24, &history_lines, 72);
+
+        assert_eq!(lines[0], "╭─ history · session=session-7 limit=24");
+        assert!(
+            lines.iter().any(|line| line.contains("sliding window")),
+            "history output should keep a dedicated window section: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("user: summarize the current repo")),
+            "history output should still surface the original transcript entries: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn render_cli_chat_assistant_lines_promotes_markdown_to_structured_sections() {
+        let assistant_text = "\
+## Plan
+
+- inspect the active config
+* compare runtime state
+> reuse current provider settings when safe
+
+```rust
+let value = input.trim();
+println!(\"{value}\");
+```";
+        let lines = render_cli_chat_assistant_lines_with_width(assistant_text, 72);
+
+        assert_eq!(lines[0], "╭─ loong · reply");
+        assert!(
+            lines.iter().any(|line| line.contains("Plan")),
+            "markdown headings should become section titles: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("- inspect the active config")),
+            "markdown list items should remain visible in the narrative block: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("- compare runtime state")),
+            "markdown star bullets should normalize into wrapped display bullets: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("note: quoted context")),
+            "markdown blockquotes should render as structured callouts: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("code [rust]")),
+            "markdown fences should render as preformatted sections: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("let value = input.trim();")),
+            "preformatted sections should keep code indentation intact: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn render_cli_chat_assistant_lines_preserve_heading_before_quotes_and_at_eof() {
+        let assistant_text = "\
+## Risks
+> keep credentials in env vars
+
+## Next";
+        let lines = render_cli_chat_assistant_lines_with_width(assistant_text, 72);
+
+        assert!(
+            lines.iter().any(|line| line.contains("note: Risks")),
+            "headings should stay attached to quoted sections instead of falling back to a generic title: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("- keep credentials in env vars")),
+            "quoted content should stay visible after preserving the heading: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("Next")),
+            "a trailing heading should still render even when it has no body lines yet: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn parse_cli_chat_markdown_sections_promotes_reasoning_heading_to_callout() {
+        let sections = parse_cli_chat_markdown_sections(
+            "## Reasoning\nThe provider compared two options before choosing one.",
+        );
+        assert!(matches!(
+            sections.first(),
+            Some(TuiSectionSpec::Callout { title, .. }) if title.as_deref() == Some("reasoning")
+        ));
+    }
+
+    #[test]
+    fn parse_cli_chat_markdown_sections_promotes_tool_activity_heading_to_callout() {
+        let sections = parse_cli_chat_markdown_sections(
+            "## Tool Activity\nfile.read completed with 1 result line.",
+        );
+        assert!(matches!(
+            sections.first(),
+            Some(TuiSectionSpec::Callout { title, .. }) if title.as_deref() == Some("tool activity")
+        ));
+    }
+
+    #[test]
+    fn render_cli_chat_assistant_lines_promotes_tool_approval_to_choice_screen() {
+        let assistant_text = "\
+我准备调用 provider.switch 来切换后续会话的 provider。
+[tool_approval_required]
+tool: provider.switch
+request_id: apr_provider_switch
+rule_id: session_tool_consent_auto_blocked
+reason: `provider.switch` is not eligible for auto mode and needs operator confirmation
+allowed_decisions: yes / auto / full / esc";
+        let lines = render_cli_chat_assistant_lines_with_width(assistant_text, 72);
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("准备调用 provider.switch")),
+            "approval replies should render as a dedicated screen title: {lines:#?}"
+        );
+        let first_choice_visible = lines.iter().any(|line| line.trim_start().starts_with("1)"));
+        let second_choice_visible = lines.iter().any(|line| line.trim_start().starts_with("2)"));
+
+        assert!(
+            first_choice_visible && second_choice_visible,
+            "approval choice screen should expose numbered choices in order: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("yes / auto / full / esc")),
+            "approval choice screen should keep the raw keyword controls visible: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn render_cli_chat_live_surface_lines_show_pipeline_status_and_preview() {
+        let snapshot = CliChatLiveSurfaceSnapshot {
+            phase: ConversationTurnPhase::RequestingProvider,
+            provider_round: Some(1),
+            lane: None,
+            tool_call_count: 0,
+            message_count: Some(4),
+            estimated_tokens: Some(128),
+            draft_preview: Some("Inspecting the repo layout...".to_owned()),
+            tools: Vec::new(),
+        };
+        let lines = render_cli_chat_live_surface_lines_with_width(&snapshot, 72);
+
+        assert_eq!(lines[0], "╭─ loong · live · round 1 · 4 msgs · ~128 tok");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("note: querying model")),
+            "live surface should explain the active phase through a callout: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("turn pipeline")),
+            "live surface should keep the pipeline checklist visible: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| {
+                line.contains("[WARN] call model") && line.contains("provider round 1 in progress")
+            }),
+            "live surface should keep the model step actively highlighted: {lines:#?}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("streaming provider round 1")),
+            "live surface should avoid claiming streaming when the snapshot does not encode that capability: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("draft preview")),
+            "live surface should surface partial text as a dedicated preview block: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Inspecting the repo layout...")),
+            "live surface should preserve the partial preview text: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn cli_chat_live_surface_observer_emits_phase_and_stream_preview_batches() {
+        let captured_batches = Arc::new(StdMutex::new(Vec::<Vec<String>>::new()));
+        let render_sink: CliChatLiveSurfaceSink = {
+            let captured_batches = Arc::clone(&captured_batches);
+            Arc::new(move |lines| {
+                let mut batches = captured_batches
+                    .lock()
+                    .expect("captured batches lock should not be poisoned");
+                batches.push(lines);
+            })
+        };
+        let observer = CliChatLiveSurfaceObserver::new(72, render_sink);
+
+        observer.on_phase(ConversationTurnPhaseEvent::preparing());
+        observer.on_phase(ConversationTurnPhaseEvent::requesting_provider(
+            1,
+            3,
+            Some(96),
+        ));
+        observer.on_streaming_token(crate::acp::StreamingTokenEvent {
+            event_type: "text_delta".to_owned(),
+            delta: crate::acp::TokenDelta {
+                text: Some("Draft response".to_owned()),
+                tool_call: None,
+            },
+            index: None,
+        });
+
+        let batches = captured_batches
+            .lock()
+            .expect("captured batches lock should not be poisoned");
+        assert!(
+            batches.len() >= 3,
+            "observer should emit both phase updates and the first preview update: {batches:#?}"
+        );
+
+        let preview_batch = batches
+            .iter()
+            .find(|lines| lines.iter().any(|line| line.contains("draft preview")))
+            .expect("preview batch");
+        assert!(
+            preview_batch
+                .iter()
+                .any(|line| line.contains("Draft response")),
+            "preview batch should include the streamed text: {preview_batch:#?}"
+        );
+    }
+
+    #[test]
+    fn cli_chat_live_surface_observer_renders_tool_lifecycle_updates() {
+        let captured_batches = Arc::new(StdMutex::new(Vec::<Vec<String>>::new()));
+        let render_sink: CliChatLiveSurfaceSink = {
+            let captured_batches = Arc::clone(&captured_batches);
+            Arc::new(move |lines| {
+                let mut batches = captured_batches
+                    .lock()
+                    .expect("captured batches lock should not be poisoned");
+                batches.push(lines);
+            })
+        };
+        let observer = CliChatLiveSurfaceObserver::new(72, render_sink);
+
+        observer.on_phase(ConversationTurnPhaseEvent::running_tools(
+            1,
+            ExecutionLane::Fast,
+            1,
+        ));
+        observer.on_streaming_token(crate::acp::StreamingTokenEvent {
+            event_type: "tool_call_start".to_owned(),
+            delta: crate::acp::TokenDelta {
+                text: None,
+                tool_call: Some(crate::acp::ToolCallDelta {
+                    name: Some("file.read".to_owned()),
+                    args: None,
+                    id: Some("call-tool-1".to_owned()),
+                }),
+            },
+            index: Some(0),
+        });
+        observer.on_streaming_token(crate::acp::StreamingTokenEvent {
+            event_type: "tool_call_input_delta".to_owned(),
+            delta: crate::acp::TokenDelta {
+                text: None,
+                tool_call: Some(crate::acp::ToolCallDelta {
+                    name: None,
+                    args: Some("{\"path\":\"README.md\"}".to_owned()),
+                    id: None,
+                }),
+            },
+            index: Some(0),
+        });
+        observer.on_tool(ConversationTurnToolEvent::completed(
+            "call-tool-1",
+            "file.read",
+            Some("ok".to_owned()),
+        ));
+
+        let batches = captured_batches
+            .lock()
+            .expect("captured batches lock should not be poisoned");
+        let running_batch = batches
+            .iter()
+            .find(|lines| lines.iter().any(|line| line.contains("tool activity")))
+            .expect("running tool batch");
+        let completed_batch = batches
+            .iter()
+            .rev()
+            .find(|lines| {
+                lines
+                    .iter()
+                    .any(|line| line.contains("[completed] file.read (id=call-tool-1) - ok"))
+            })
+            .expect("completed tool batch");
+
+        assert!(
+            running_batch
+                .iter()
+                .any(|line| line.contains("[running] file.read (id=call-tool-1)")),
+            "tool batch should surface the running tool state: {running_batch:#?}"
+        );
+
+        assert!(
+            completed_batch
+                .iter()
+                .any(|line| line.contains("[completed] file.read (id=call-tool-1) - ok")),
+            "tool batch should surface the completed tool state: {completed_batch:#?}"
+        );
+        assert!(
+            completed_batch
+                .iter()
+                .any(|line| line.contains("args: {\"path\":\"README.md\"}")),
+            "tool batch should preserve streamed tool args: {completed_batch:#?}"
+        );
+    }
+
+    #[test]
+    fn cli_chat_live_surface_observer_renders_runtime_output_and_file_change_updates() {
+        let captured_batches = Arc::new(StdMutex::new(Vec::<Vec<String>>::new()));
+        let render_sink: CliChatLiveSurfaceSink = {
+            let captured_batches = Arc::clone(&captured_batches);
+            Arc::new(move |lines| {
+                let mut batches = captured_batches
+                    .lock()
+                    .expect("captured batches lock should not be poisoned");
+                batches.push(lines);
+            })
+        };
+        let observer = CliChatLiveSurfaceObserver::new(72, render_sink);
+
+        observer.on_phase(ConversationTurnPhaseEvent::running_tools(
+            1,
+            ExecutionLane::Fast,
+            1,
+        ));
+        observer.on_tool(
+            ConversationTurnToolEvent::running("call-tool-2", "shell.exec")
+                .with_request_summary(Some("{\"command\":\"printf\"}".to_owned())),
+        );
+        observer.on_runtime(ConversationTurnRuntimeEvent::new(
+            "call-tool-2",
+            ToolRuntimeEvent::OutputDelta(ToolOutputDelta {
+                stream: ToolRuntimeStream::Stdout,
+                chunk: "first line\nsecond line".to_owned(),
+                total_bytes: 22,
+                total_lines: 2,
+                truncated: false,
+            }),
+        ));
+        observer.on_runtime(ConversationTurnRuntimeEvent::new(
+            "call-tool-2",
+            ToolRuntimeEvent::FileChangePreview(ToolFileChangePreview {
+                path: "src/lib.rs".to_owned(),
+                kind: ToolFileChangeKind::Edit,
+                added_lines: 2,
+                removed_lines: 1,
+                preview: Some("@@ -1,1 +1,2 @@\n-old\n+new\n+line".to_owned()),
+            }),
+        ));
+        observer.on_runtime(ConversationTurnRuntimeEvent::new(
+            "call-tool-2",
+            ToolRuntimeEvent::CommandMetrics(ToolCommandMetrics {
+                exit_code: Some(0),
+                duration_ms: 42,
+            }),
+        ));
+        observer.on_tool(ConversationTurnToolEvent::completed(
+            "call-tool-2",
+            "shell.exec",
+            Some("ok".to_owned()),
+        ));
+
+        let batches = captured_batches
+            .lock()
+            .expect("captured batches lock should not be poisoned");
+        let final_batch = batches.last().expect("final runtime batch");
+
+        assert!(
+            final_batch
+                .iter()
+                .any(|line| line.contains("stdout: 2 lines · 22 bytes")),
+            "runtime output should surface stdout counters: {final_batch:#?}"
+        );
+        assert!(
+            final_batch.iter().any(|line| line.contains("first line")),
+            "runtime output should retain stdout preview lines: {final_batch:#?}"
+        );
+        assert!(
+            final_batch
+                .iter()
+                .any(|line| line.contains("file: edit src/lib.rs (+2 / -1)")),
+            "runtime output should surface file change summaries: {final_batch:#?}"
+        );
+        assert!(
+            final_batch
+                .iter()
+                .any(|line| line.contains("metrics: 42ms · exit=0")),
+            "runtime output should surface command metrics: {final_batch:#?}"
+        );
+    }
+
+    #[test]
+    fn build_cli_chat_live_surface_snapshot_preserves_structured_tool_state() {
+        let mut state = CliChatLiveSurfaceState {
+            latest_phase_event: Some(ConversationTurnPhaseEvent::running_tools(
+                1,
+                ExecutionLane::Fast,
+                1,
+            )),
+            ..CliChatLiveSurfaceState::default()
+        };
+
+        let tool_state = ensure_cli_chat_live_tool_state(&mut state, "call-structured");
+        tool_state.name = Some("shell.exec".to_owned());
+        tool_state.request_summary = Some("{\"command\":\"printf\"}".to_owned());
+        tool_state.args = "{\"command\":\"printf\"}".to_owned();
+        tool_state.stdout = CliChatLiveOutputView {
+            text: "hello".to_owned(),
+            total_bytes: 5,
+            total_lines: 1,
+            truncated: false,
+        };
+        tool_state.duration_ms = Some(12);
+        tool_state.exit_code = Some(0);
+
+        let snapshot =
+            build_cli_chat_live_surface_snapshot(&state).expect("snapshot should be available");
+        let tool = snapshot
+            .tools
+            .first()
+            .expect("snapshot should include one tool");
+
+        assert_eq!(snapshot.tools.len(), 1);
+        assert_eq!(tool.tool_call_id, "call-structured");
+        assert_eq!(tool.name.as_deref(), Some("shell.exec"));
+        assert_eq!(
+            tool.request_summary.as_deref(),
+            Some("{\"command\":\"printf\"}")
+        );
+        assert_eq!(tool.args, "{\"command\":\"printf\"}");
+        assert_eq!(tool.stdout.text, "hello");
+        assert_eq!(tool.duration_ms, Some(12));
+        assert_eq!(tool.exit_code, Some(0));
+    }
+
+    #[test]
+    fn parse_markdown_heading_follows_commonmark_atx_rules() {
+        assert_eq!(parse_markdown_heading("## Plan"), Some("Plan"));
+        assert_eq!(parse_markdown_heading("### Plan ###"), Some("Plan"));
+        assert_eq!(parse_markdown_heading("## C#"), Some("C#"));
+        assert_eq!(parse_markdown_heading("#NoSpace"), None);
+        assert_eq!(parse_markdown_heading("#!/bin/bash"), None);
+        assert_eq!(parse_markdown_heading("####### too many"), None);
+    }
+
+    #[test]
+    fn cli_chat_live_surface_observer_resets_request_scoped_buffers_between_rounds() {
+        let captured_batches = Arc::new(StdMutex::new(Vec::<Vec<String>>::new()));
+        let render_sink: CliChatLiveSurfaceSink = {
+            let captured_batches = Arc::clone(&captured_batches);
+            Arc::new(move |lines| {
+                let mut batches = captured_batches
+                    .lock()
+                    .expect("captured batches lock should not be poisoned");
+                batches.push(lines);
+            })
+        };
+        let observer = CliChatLiveSurfaceObserver::new(72, render_sink);
+
+        observer.on_phase(ConversationTurnPhaseEvent::requesting_provider(
+            1,
+            3,
+            Some(96),
+        ));
+        observer.on_streaming_token(crate::acp::StreamingTokenEvent {
+            event_type: "text_delta".to_owned(),
+            delta: crate::acp::TokenDelta {
+                text: Some("Draft response".to_owned()),
+                tool_call: None,
+            },
+            index: None,
+        });
+        observer.on_streaming_token(crate::acp::StreamingTokenEvent {
+            event_type: "tool_call_input_delta".to_owned(),
+            delta: crate::acp::TokenDelta {
+                text: None,
+                tool_call: Some(crate::acp::ToolCallDelta {
+                    name: None,
+                    args: Some("{\"query\":\"rust\"}".to_owned()),
+                    id: None,
+                }),
+            },
+            index: Some(0),
+        });
+        observer.on_phase(ConversationTurnPhaseEvent::requesting_followup_provider(
+            2,
+            ExecutionLane::Fast,
+            1,
+            5,
+            Some(128),
+        ));
+
+        let batches = captured_batches
+            .lock()
+            .expect("captured batches lock should not be poisoned");
+        let last_batch = batches.last().expect("follow-up request batch");
+
+        assert!(
+            !last_batch.iter().any(|line| line.contains("draft preview")),
+            "follow-up provider requests should reset the previous draft preview: {last_batch:#?}"
+        );
+        assert!(
+            !last_batch.iter().any(|line| line.contains("tool activity")),
+            "follow-up provider requests should not reuse prior tool activity lines: {last_batch:#?}"
+        );
+        assert!(
+            !last_batch
+                .iter()
+                .any(|line| line.contains("Draft response")),
+            "follow-up provider requests should not carry the previous request preview text: {last_batch:#?}"
+        );
+    }
+
+    #[test]
+    fn cli_chat_live_surface_observer_waits_for_tools_phase_before_rendering_tool_activity() {
+        let captured_batches = Arc::new(StdMutex::new(Vec::<Vec<String>>::new()));
+        let render_sink: CliChatLiveSurfaceSink = {
+            let captured_batches = Arc::clone(&captured_batches);
+            Arc::new(move |lines| {
+                let mut batches = captured_batches
+                    .lock()
+                    .expect("captured batches lock should not be poisoned");
+                batches.push(lines);
+            })
+        };
+        let observer = CliChatLiveSurfaceObserver::new(72, render_sink);
+
+        observer.on_phase(ConversationTurnPhaseEvent::requesting_provider(
+            1,
+            3,
+            Some(96),
+        ));
+
+        let batch_count_before_tool_delta = captured_batches
+            .lock()
+            .expect("captured batches lock should not be poisoned")
+            .len();
+
+        observer.on_streaming_token(crate::acp::StreamingTokenEvent {
+            event_type: "tool_call_start".to_owned(),
+            delta: crate::acp::TokenDelta {
+                text: None,
+                tool_call: Some(crate::acp::ToolCallDelta {
+                    name: Some("search".to_owned()),
+                    args: None,
+                    id: Some("call_123".to_owned()),
+                }),
+            },
+            index: Some(0),
+        });
+
+        let batch_count_after_tool_delta = captured_batches
+            .lock()
+            .expect("captured batches lock should not be poisoned")
+            .len();
+        assert_eq!(
+            batch_count_after_tool_delta, batch_count_before_tool_delta,
+            "tool-call deltas should wait for the tools phase before re-rendering"
+        );
+
+        observer.on_phase(ConversationTurnPhaseEvent::running_tools(
+            1,
+            ExecutionLane::Fast,
+            1,
+        ));
+
+        let batches = captured_batches
+            .lock()
+            .expect("captured batches lock should not be poisoned");
+        let last_batch = batches.last().expect("running-tools batch");
+
+        assert!(
+            last_batch.iter().any(|line| line.contains("tool activity")),
+            "the tools phase should render the accumulated tool activity: {last_batch:#?}"
+        );
+        assert!(
+            last_batch
+                .iter()
+                .any(|line| line.contains("[running] search (id=call_123)")),
+            "the tools phase should surface the streamed tool metadata: {last_batch:#?}"
         );
     }
 
@@ -2640,6 +5889,157 @@ mod tests {
         let error = is_turn_checkpoint_repair_command("/turn_checkpoint_repair now")
             .expect_err("extra args should be rejected");
         assert!(error.contains("usage"));
+    }
+
+    #[test]
+    fn is_cli_chat_status_command_accepts_exact_match_and_rejects_extra_args() {
+        assert!(is_cli_chat_status_command("/status").expect("parse"));
+        assert!(!is_cli_chat_status_command("/history").expect("parse"));
+
+        let error =
+            is_cli_chat_status_command("/status now").expect_err("extra args should be rejected");
+        assert_eq!(error, "usage: /status");
+    }
+
+    #[test]
+    fn is_manual_compaction_command_accepts_exact_match_and_rejects_extra_args() {
+        assert!(is_manual_compaction_command("/compact").expect("parse"));
+        assert!(!is_manual_compaction_command("/history").expect("parse"));
+
+        let error = is_manual_compaction_command("/compact now")
+            .expect_err("extra args should be rejected");
+        assert_eq!(error, "usage: /compact");
+    }
+
+    #[test]
+    fn help_and_history_commands_reject_extra_args() {
+        let help_error =
+            parse_exact_chat_command("/help now", &[CLI_CHAT_HELP_COMMAND], "usage: /help")
+                .expect_err("help should reject extra args");
+        assert_eq!(help_error, "usage: /help");
+
+        let history_error = parse_exact_chat_command(
+            "/history now",
+            &[CLI_CHAT_HISTORY_COMMAND],
+            "usage: /history",
+        )
+        .expect_err("history should reject extra args");
+        assert_eq!(history_error, "usage: /history");
+    }
+
+    #[test]
+    fn classify_chat_command_match_result_treats_usage_as_non_fatal() {
+        let usage_result =
+            classify_chat_command_match_result(Err("usage: /help".to_owned())).expect("classify");
+        assert_eq!(
+            usage_result,
+            ChatCommandMatchResult::UsageError("usage: /help".to_owned())
+        );
+
+        let matched_result =
+            classify_chat_command_match_result(Ok(true)).expect("classify matched");
+        assert_eq!(matched_result, ChatCommandMatchResult::Matched);
+
+        let not_matched_result =
+            classify_chat_command_match_result(Ok(false)).expect("classify non-match");
+        assert_eq!(not_matched_result, ChatCommandMatchResult::NotMatched);
+    }
+
+    #[test]
+    fn maybe_render_nonfatal_usage_error_accepts_embedded_usage_text() {
+        let error = "invalid fast lane summary limit `nope`; usage: /fast_lane_summary [limit]";
+        let usage_lines =
+            maybe_render_nonfatal_usage_error(error).expect("usage should render non-fatally");
+
+        assert!(
+            usage_lines
+                .iter()
+                .any(|line| line.contains("/fast_lane_summary [limit]")),
+            "embedded usage text should still render the usage card: {usage_lines:#?}"
+        );
+    }
+
+    #[test]
+    fn manual_compaction_status_from_report_maps_failed_open() {
+        let report = ContextCompactionReport {
+            status: TurnCheckpointProgressStatus::FailedOpen,
+            estimated_tokens_before: Some(420),
+            estimated_tokens_after: Some(420),
+        };
+
+        let status =
+            manual_compaction_status_from_report(&report).expect("failed_open should map cleanly");
+
+        assert_eq!(status, ManualCompactionStatus::FailedOpen);
+    }
+
+    #[cfg(feature = "memory-sqlite")]
+    #[tokio::test]
+    async fn manual_compaction_result_applies_and_surfaces_continuity_checkpoint() {
+        let mut config = test_config();
+        let sqlite_path = unique_chat_sqlite_path("chat-manual-compaction");
+        cleanup_chat_test_memory(&sqlite_path);
+        config.memory.sqlite_path = sqlite_path.display().to_string();
+        config.memory.sliding_window = 32;
+        config.conversation.compact_enabled = false;
+        config.conversation.compact_preserve_recent_turns = 2;
+
+        let memory_config = MemoryRuntimeConfig::from_memory_config(&config.memory);
+        let kernel_ctx = test_kernel_context_with_memory("chat-manual-compaction", &memory_config);
+        let session_id = "chat-manual-compaction";
+
+        for (role, content) in [
+            ("user", "ask 1"),
+            ("assistant", "reply 1"),
+            ("user", "ask 2"),
+            ("assistant", "reply 2"),
+            ("user", "ask 3"),
+            ("assistant", "reply 3"),
+            ("user", "recent ask"),
+            ("assistant", "recent reply"),
+        ] {
+            crate::memory::append_turn_direct(session_id, role, content, &memory_config)
+                .expect("seed turns should succeed");
+        }
+
+        let binding = ConversationRuntimeBinding::kernel(&kernel_ctx);
+        let turn_coordinator = ConversationTurnCoordinator::new();
+        let result = load_manual_compaction_result(&config, session_id, &turn_coordinator, binding)
+            .await
+            .expect("manual compaction should succeed");
+
+        assert_eq!(result.status, ManualCompactionStatus::Applied);
+        assert_eq!(result.before_turns, 8);
+        assert_eq!(result.after_turns, 3);
+        assert!(
+            result.estimated_tokens_before.is_some(),
+            "manual compaction should surface a before-token estimate"
+        );
+        assert!(
+            result.estimated_tokens_after.is_some(),
+            "manual compaction should surface an after-token estimate"
+        );
+        assert!(
+            result
+                .summary_headline
+                .as_deref()
+                .is_some_and(|headline| headline.contains("Compacted 6 earlier turns"))
+        );
+        assert!(
+            result.detail.contains("Runtime Self Context"),
+            "manual compaction detail should reuse the continuity boundary note"
+        );
+
+        let turns = crate::memory::window_direct(session_id, 32, &memory_config)
+            .expect("window load should succeed");
+        assert!(
+            turns[0]
+                .content
+                .contains("Does not replace Runtime Self Context"),
+            "manual compaction should persist the continuity-aware checkpoint"
+        );
+
+        cleanup_chat_test_memory(&sqlite_path);
     }
 
     fn test_turn_checkpoint_diagnostics(

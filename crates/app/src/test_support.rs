@@ -19,6 +19,12 @@ fn env_lock() -> &'static Mutex<()> {
     ENV_LOCK.get_or_init(|| Mutex::new(()))
 }
 
+#[cfg(test)]
+fn subprocess_lock() -> &'static Mutex<()> {
+    static SUBPROCESS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    SUBPROCESS_LOCK.get_or_init(|| Mutex::new(()))
+}
+
 pub struct ScopedEnv {
     originals: Vec<(&'static str, Option<OsString>)>,
     _guard: MutexGuard<'static, ()>,
@@ -77,6 +83,19 @@ static TEST_TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub(crate) fn unique_temp_dir(prefix: &str) -> PathBuf {
     let id = TEST_TEMP_DIR_COUNTER.fetch_add(1, Ordering::SeqCst);
     std::env::temp_dir().join(format!("{prefix}-{}-{id}", std::process::id()))
+}
+
+#[cfg(test)]
+pub(crate) fn acquire_subprocess_test_guard() -> MutexGuard<'static, ()> {
+    subprocess_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+pub(crate) fn durable_memory_flush_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 #[cfg(all(test, unix))]

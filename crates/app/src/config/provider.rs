@@ -1,11 +1,34 @@
 use std::{collections::BTreeMap, env, path::PathBuf};
 
+use loongclaw_contracts::SecretRef;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::shared::{
     ConfigValidationIssue, EnvPointerValidationHint, default_loongclaw_home, expand_path,
-    parse_explicit_env_reference, validate_env_pointer_field,
+    validate_env_pointer_field, validate_secret_ref_env_pointer_field,
 };
+use crate::secrets::{
+    SecretLookup, has_configured_secret_ref, resolve_secret_lookup, secret_ref_env_name,
+};
+
+pub(crate) const GITHUB_COPILOT_EDITOR_VERSION: &str = "vscode/1.85.1";
+pub(crate) const GITHUB_COPILOT_EDITOR_PLUGIN_VERSION: &str = "copilot/1.155.0";
+pub(crate) const GITHUB_COPILOT_INTEGRATION_ID: &str = "vscode-chat";
+pub(crate) const GITHUB_COPILOT_USER_AGENT: &str = "GithubCopilot/1.155.0";
+pub(crate) const GITHUB_COPILOT_OAUTH_TOKEN_ENV: &str = "GITHUB_COPILOT_OAUTH_TOKEN";
+pub(crate) const ANTHROPIC_DEFAULT_HEADERS: [(&str, &str); 1] =
+    [("anthropic-version", "2023-06-01")];
+pub(crate) const OPENCODE_API_KEY_ENV: &str = "OPENCODE_API_KEY";
+pub(crate) const OPENCODE_ZEN_BASE_URL: &str = "https://opencode.ai/zen/v1";
+pub(crate) const OPENCODE_GO_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
+pub(crate) const GITHUB_COPILOT_DEFAULT_HEADERS: [(&str, &str); 3] = [
+    ("Editor-Version", GITHUB_COPILOT_EDITOR_VERSION),
+    (
+        "Editor-Plugin-Version",
+        GITHUB_COPILOT_EDITOR_PLUGIN_VERSION,
+    ),
+    ("Copilot-Integration-Id", GITHUB_COPILOT_INTEGRATION_ID),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderProfile {
@@ -24,6 +47,43 @@ pub struct ProviderProfile {
     pub default_oauth_access_token_env: Option<&'static str>,
     pub oauth_access_token_env_aliases: &'static [&'static str],
     pub feature_family: ProviderFeatureFamily,
+}
+
+impl ProviderProfile {
+    pub fn alternative_auth_configuration_hint(self) -> Option<&'static str> {
+        let kind = self.kind;
+        if kind == ProviderKind::Bedrock {
+            return Some(
+                "configure AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY with BEDROCK_AWS_REGION, AWS_REGION, or AWS_DEFAULT_REGION for SigV4",
+            );
+        }
+        if kind == ProviderKind::Custom {
+            return Some("add `Authorization` / `X-API-Key` in `provider.headers`");
+        }
+        None
+    }
+
+    pub fn auth_guidance_hint(self) -> Option<String> {
+        let feature_family = self.feature_family;
+        if feature_family != ProviderFeatureFamily::Volcengine {
+            return None;
+        }
+
+        let provider_label = self.auth_guidance_provider_label();
+        let env_name = self.default_api_key_env.unwrap_or("PROVIDER_API_KEY");
+        let hint = format!(
+            "LoongClaw's {provider_label} OpenAI-compatible path uses `provider.api_key` / `{env_name}` and sends `Authorization: Bearer <{env_name}>`; AK/SK request signing is not used on this path"
+        );
+        Some(hint)
+    }
+
+    fn auth_guidance_provider_label(self) -> &'static str {
+        let kind = self.kind;
+        if matches!(kind, ProviderKind::Byteplus | ProviderKind::ByteplusCoding) {
+            return "BytePlus";
+        }
+        "Volcengine"
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +107,17 @@ impl ProviderProtocolFamily {
 pub enum ProviderAuthScheme {
     Bearer,
     XApiKey,
+    XGoogApiKey,
+}
+
+impl ProviderAuthScheme {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Bearer => "bearer",
+            Self::XApiKey => "x_api_key",
+            Self::XGoogApiKey => "x_goog_api_key",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +126,64 @@ pub enum ProviderFeatureFamily {
     Anthropic,
     Bedrock,
     Volcengine,
+}
+
+impl ProviderFeatureFamily {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAiCompatible => "openai_compatible",
+            Self::Anthropic => "anthropic",
+            Self::Bedrock => "bedrock",
+            Self::Volcengine => "volcengine",
+        }
+    }
+
+    pub fn support_facts(self) -> ProviderFeatureSupportFacts {
+        let gate_name = self.feature_gate_name();
+        let enabled_in_build = self.is_enabled_in_build();
+        let disabled_message = self.disabled_message();
+
+        ProviderFeatureSupportFacts {
+            family: self,
+            gate_name,
+            enabled_in_build,
+            disabled_message,
+        }
+    }
+
+    pub fn feature_gate_name(self) -> &'static str {
+        match self {
+            Self::Anthropic => "provider-anthropic",
+            Self::Bedrock => "provider-bedrock",
+            Self::Volcengine => "provider-volcengine",
+            Self::OpenAiCompatible => "provider-openai",
+        }
+    }
+
+    pub fn disabled_message(self) -> String {
+        let subject = self.disabled_message_subject();
+        let feature_name = self.feature_gate_name();
+        let message = format!("{subject} is disabled (enable feature `{feature_name}`)");
+        message
+    }
+
+    pub fn is_enabled_in_build(self) -> bool {
+        match self {
+            Self::Anthropic => cfg!(feature = "provider-anthropic"),
+            Self::Bedrock => cfg!(feature = "provider-bedrock"),
+            Self::Volcengine => cfg!(feature = "provider-volcengine"),
+            Self::OpenAiCompatible => cfg!(feature = "provider-openai"),
+        }
+    }
+
+    fn disabled_message_subject(self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic provider family",
+            Self::Bedrock => "bedrock provider family",
+            Self::Volcengine => "volcengine provider family",
+            Self::OpenAiCompatible => "openai-compatible provider family",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -114,12 +243,151 @@ pub struct ProviderTransportPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct ProviderEffectiveUrlValues {
+    resolved_base_url: String,
+    endpoint: String,
+    models_endpoint: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProviderUrlValidationProfile {
+    kind: ProviderKind,
+    extra_canonical_url_fingerprints: &'static [&'static str],
+    required_path_fragments: &'static [&'static str],
+    forbidden_path_fragments: &'static [&'static str],
+    forbidden_path_exceptions: &'static [&'static str],
+    route_expectation: &'static str,
+    path_validation_hint: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderFeatureSupportFacts {
+    pub family: ProviderFeatureFamily,
+    pub gate_name: &'static str,
+    pub enabled_in_build: bool,
+    pub disabled_message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderAuthSupportFacts {
+    pub hint_env_names: Vec<String>,
+    pub requires_explicit_configuration: bool,
+    pub guidance_hint: Option<String>,
+    pub alternative_configuration_hint: Option<String>,
+    pub missing_configuration_message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderRegionEndpointSupportFacts {
+    pub note: Option<String>,
+    pub catalog_failure_hint: Option<String>,
+    pub request_failure_hint: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderSupportFacts {
+    pub feature: ProviderFeatureSupportFacts,
+    pub auth: ProviderAuthSupportFacts,
+    pub region_endpoint: ProviderRegionEndpointSupportFacts,
+}
+
+pub const PROVIDER_DESCRIPTOR_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ProviderDescriptorSchema {
+    pub version: u32,
+    pub surface: &'static str,
+    pub purpose: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ProviderDescriptorHeader {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ProviderDescriptorFeature {
+    pub family: String,
+    pub gate_name: String,
+    pub enabled_in_build: bool,
+    pub disabled_message: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ProviderDescriptorAuth {
+    pub scheme: String,
+    pub auth_optional: bool,
+    pub model_probe_auth_optional: bool,
+    pub default_api_key_env: Option<String>,
+    pub api_key_env_aliases: Vec<String>,
+    pub default_oauth_access_token_env: Option<String>,
+    pub oauth_access_token_env_aliases: Vec<String>,
+    pub hint_env_names: Vec<String>,
+    pub requires_explicit_configuration: bool,
+    pub guidance_hint: Option<String>,
+    pub alternative_configuration_hint: Option<String>,
+    pub missing_configuration_message: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ProviderDescriptorRegionVariant {
+    pub label: String,
+    pub base_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ProviderDescriptorRegionEndpoint {
+    pub family_label: Option<String>,
+    pub variants: Vec<ProviderDescriptorRegionVariant>,
+    pub note: Option<String>,
+    pub catalog_failure_hint: Option<String>,
+    pub request_failure_hint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ProviderDescriptorDocument {
+    pub schema: ProviderDescriptorSchema,
+    pub kind: String,
+    pub display_name: String,
+    pub aliases: Vec<String>,
+    pub protocol_family: String,
+    pub default_headers: Vec<ProviderDescriptorHeader>,
+    pub default_user_agent: Option<String>,
+    pub configuration_hint: Option<String>,
+    pub default_model: Option<String>,
+    pub recommended_onboarding_model: Option<String>,
+    pub feature: ProviderDescriptorFeature,
+    pub auth: ProviderDescriptorAuth,
+    pub region_endpoint: ProviderDescriptorRegionEndpoint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelCatalogProbeRecovery {
     ExplicitModel(String),
     ConfiguredPreferredModels(Vec<String>),
     RequiresExplicitModel {
         recommended_onboarding_model: Option<&'static str>,
     },
+}
+
+/// Information about a provider's region endpoint variants.
+/// Used to allow users to select between different regional endpoints (e.g., CN vs Global).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderRegionEndpointInfo {
+    /// Display name for the provider family (e.g., "MiniMax", "Moonshot Kimi").
+    pub family_label: &'static str,
+    /// Region variants ordered with the default endpoint first.
+    pub variants: Vec<RegionVariant>,
+}
+
+/// A region endpoint variant with label and base URL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegionVariant {
+    /// Label for the region (e.g., "CN", "Global").
+    pub label: &'static str,
+    /// Base URL for the region endpoint.
+    pub base_url: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -366,7 +634,8 @@ pub enum ProviderKind {
         alias = "cloudflare_ai",
         alias = "cloudflare-ai",
         alias = "cloudflare_ai_gateway",
-        alias = "cloudflare-ai-gateway"
+        alias = "cloudflare-ai-gateway",
+        alias = "cloudflare"
     )]
     CloudflareAiGateway,
     #[serde(alias = "cohere_compatible")]
@@ -387,7 +656,9 @@ pub enum ProviderKind {
     KimiCoding,
     #[serde(alias = "groq_compatible")]
     Groq,
-    #[serde(alias = "fireworks_compatible")]
+    #[serde(rename = "github-copilot", alias = "github_copilot", alias = "copilot")]
+    GithubCopilot,
+    #[serde(alias = "fireworks_compatible", alias = "fireworks-ai")]
     Fireworks,
     #[serde(alias = "mistral_compatible")]
     Mistral,
@@ -395,7 +666,12 @@ pub enum ProviderKind {
     Minimax,
     #[serde(alias = "novita_compatible")]
     Novita,
-    #[serde(alias = "nvidia_compatible", alias = "nvidia_nim")]
+    #[serde(
+        alias = "nvidia_compatible",
+        alias = "nvidia_nim",
+        alias = "nvidia-nim",
+        alias = "build.nvidia.com"
+    )]
     Nvidia,
     #[serde(alias = "llama.cpp", alias = "llama_cpp")]
     Llamacpp,
@@ -406,6 +682,10 @@ pub enum ProviderKind {
     #[default]
     #[serde(alias = "openai_compatible")]
     Openai,
+    #[serde(alias = "opencode", alias = "opencode-zen")]
+    OpencodeZen,
+    #[serde(alias = "opencode-go", alias = "opencode_go")]
+    OpencodeGo,
     #[serde(alias = "openrouter_compatible")]
     Openrouter,
     #[serde(alias = "perplexity_compatible")]
@@ -424,7 +704,13 @@ pub enum ProviderKind {
     Siliconflow,
     #[serde(alias = "stepfun_compatible")]
     Stepfun,
-    #[serde(alias = "together_compatible", alias = "together_ai")]
+    #[serde(alias = "stepfun_step_plan", alias = "step_plan")]
+    StepPlan,
+    #[serde(
+        alias = "together_compatible",
+        alias = "together_ai",
+        alias = "together-ai"
+    )]
     Together,
     #[serde(alias = "venice_compatible")]
     Venice,
@@ -432,18 +718,32 @@ pub enum ProviderKind {
         alias = "vercel_ai",
         alias = "vercel-ai",
         alias = "vercel_ai_gateway",
-        alias = "vercel-ai-gateway"
+        alias = "vercel-ai-gateway",
+        alias = "vercel"
     )]
     VercelAiGateway,
-    #[serde(alias = "volcengine_custom", alias = "volcengine_compatible")]
+    #[serde(
+        alias = "volcengine_custom",
+        alias = "volcengine_compatible",
+        alias = "doubao",
+        alias = "ark"
+    )]
     Volcengine,
     #[serde(alias = "volcengine_coding_compatible")]
     VolcengineCoding,
-    #[serde(alias = "xai_compatible")]
+    #[serde(alias = "xai_compatible", alias = "grok")]
     Xai,
-    #[serde(alias = "zai_compatible")]
+    #[serde(
+        alias = "xiaomi_compatible",
+        alias = "xiaomi_mimo",
+        alias = "xiaomi-mimo",
+        alias = "mimo",
+        alias = "mimo_compatible"
+    )]
+    Xiaomi,
+    #[serde(alias = "zai_compatible", alias = "z.ai")]
     Zai,
-    #[serde(alias = "zhipu_compatible")]
+    #[serde(alias = "zhipu_compatible", alias = "glm", alias = "bigmodel")]
     Zhipu,
     #[serde(alias = "deepseek_compatible")]
     Deepseek,
@@ -511,13 +811,13 @@ pub struct ProviderConfig {
     #[serde(skip_serializing, default)]
     pub models_endpoint_explicit: bool,
     #[serde(default)]
-    pub api_key: Option<String>,
+    pub api_key: Option<SecretRef>,
     #[serde(default)]
     pub api_key_env: Option<String>,
     #[serde(skip_serializing, default)]
     pub api_key_env_explicit: bool,
     #[serde(default)]
-    pub oauth_access_token: Option<String>,
+    pub oauth_access_token: Option<SecretRef>,
     #[serde(default)]
     pub oauth_access_token_env: Option<String>,
     #[serde(skip_serializing, default)]
@@ -670,11 +970,11 @@ impl<'de> Deserialize<'de> for ProviderConfig {
             #[serde(default)]
             models_endpoint: Option<String>,
             #[serde(default)]
-            api_key: Option<String>,
+            api_key: Option<SecretRef>,
             #[serde(default)]
             api_key_env: Option<String>,
             #[serde(default)]
-            oauth_access_token: Option<String>,
+            oauth_access_token: Option<SecretRef>,
             #[serde(default)]
             oauth_access_token_env: Option<String>,
             #[serde(default)]
@@ -750,16 +1050,8 @@ impl<'de> Deserialize<'de> for ProviderConfig {
         let chat_completions_path = raw
             .chat_completions_path
             .unwrap_or_else(default_openai_chat_path);
-        let api_key_env_explicit = raw
-            .api_key_env
-            .as_deref()
-            .map(|value| is_explicit_api_key_env_name(raw.kind, value))
-            .unwrap_or(false);
-        let oauth_access_token_env_explicit = raw
-            .oauth_access_token_env
-            .as_deref()
-            .map(|value| is_explicit_oauth_access_token_env_name(raw.kind, value))
-            .unwrap_or(false);
+        let api_key_env_explicit = raw.api_key_env.is_some();
+        let oauth_access_token_env_explicit = raw.oauth_access_token_env.is_some();
 
         let mut config = Self {
             kind: raw.kind,
@@ -819,16 +1111,8 @@ impl ProviderConfig {
         self.base_url_explicit = is_explicit_base_url(self.kind, self.base_url.as_str());
         self.chat_completions_path_explicit =
             is_explicit_chat_completions_path(self.kind, self.chat_completions_path.as_str());
-        self.api_key_env_explicit = self
-            .api_key_env
-            .as_deref()
-            .map(|value| is_explicit_api_key_env_name(self.kind, value))
-            .unwrap_or(false);
-        self.oauth_access_token_env_explicit = self
-            .oauth_access_token_env
-            .as_deref()
-            .map(|value| is_explicit_oauth_access_token_env_name(self.kind, value))
-            .unwrap_or(false);
+        self.api_key_env_explicit = self.api_key_env.is_some();
+        self.oauth_access_token_env_explicit = self.oauth_access_token_env.is_some();
         self.refresh_endpoint_override_flags();
     }
 
@@ -856,19 +1140,67 @@ impl ProviderConfig {
     }
 
     pub fn set_api_key_env(&mut self, api_key_env: Option<String>) {
-        self.api_key_env_explicit = api_key_env
-            .as_deref()
-            .map(|value| is_explicit_api_key_env_name(self.kind, value))
-            .unwrap_or(false);
+        self.api_key_env_explicit = api_key_env.is_some();
         self.api_key_env = api_key_env;
     }
 
-    pub fn set_oauth_access_token_env(&mut self, oauth_access_token_env: Option<String>) {
-        self.oauth_access_token_env_explicit = oauth_access_token_env
+    pub fn set_api_key_env_binding(&mut self, api_key_env: Option<String>) {
+        let normalized = api_key_env
             .as_deref()
-            .map(|value| is_explicit_oauth_access_token_env_name(self.kind, value))
-            .unwrap_or(false);
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        self.api_key = normalized.map(|env| SecretRef::Env { env });
+        self.set_api_key_env(None);
+    }
+
+    pub fn clear_api_key_env_binding(&mut self) {
+        if secret_ref_env_name(self.api_key.as_ref()).is_some() {
+            self.api_key = None;
+        }
+        self.set_api_key_env(None);
+    }
+
+    pub fn set_oauth_access_token_env(&mut self, oauth_access_token_env: Option<String>) {
+        self.oauth_access_token_env_explicit = oauth_access_token_env.is_some();
         self.oauth_access_token_env = oauth_access_token_env;
+    }
+
+    pub fn set_oauth_access_token_env_binding(&mut self, oauth_access_token_env: Option<String>) {
+        let normalized = oauth_access_token_env
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        self.oauth_access_token = normalized.map(|env| SecretRef::Env { env });
+        self.set_oauth_access_token_env(None);
+    }
+
+    pub fn clear_oauth_access_token_env_binding(&mut self) {
+        if secret_ref_env_name(self.oauth_access_token.as_ref()).is_some() {
+            self.oauth_access_token = None;
+        }
+        self.set_oauth_access_token_env(None);
+    }
+
+    pub fn canonicalize_configured_auth_env_bindings(&mut self) {
+        let configured_api_key_env = self.configured_api_key_env_override();
+        let api_key_has_non_env_secret = has_configured_secret_ref(self.api_key.as_ref())
+            && secret_ref_env_name(self.api_key.as_ref()).is_none();
+        if api_key_has_non_env_secret {
+            self.set_api_key_env(None);
+        } else {
+            self.set_api_key_env_binding(configured_api_key_env);
+        }
+
+        let configured_oauth_env = self.configured_oauth_access_token_env_override();
+        let oauth_has_non_env_secret = has_configured_secret_ref(self.oauth_access_token.as_ref())
+            && secret_ref_env_name(self.oauth_access_token.as_ref()).is_none();
+        if oauth_has_non_env_secret {
+            self.set_oauth_access_token_env(None);
+        } else {
+            self.set_oauth_access_token_env_binding(configured_oauth_env);
+        }
     }
 
     pub fn fresh_for_kind(kind: ProviderKind) -> Self {
@@ -904,6 +1236,17 @@ impl ProviderConfig {
         ) {
             issues.push(*issue);
         }
+        if let Err(issue) = validate_secret_ref_env_pointer_field(
+            api_key_inline_field_path.as_str(),
+            self.api_key.as_ref(),
+            EnvPointerValidationHint {
+                inline_field_path: api_key_inline_field_path.as_str(),
+                example_env_name: api_key_example,
+                detect_telegram_token_shape: false,
+            },
+        ) {
+            issues.push(*issue);
+        }
         let oauth_env_field_path = format!("{field_prefix}.oauth_access_token_env");
         let oauth_inline_field_path = format!("{field_prefix}.oauth_access_token");
         let oauth_example = self
@@ -913,6 +1256,17 @@ impl ProviderConfig {
         if let Err(issue) = validate_env_pointer_field(
             oauth_env_field_path.as_str(),
             self.oauth_access_token_env.as_deref(),
+            EnvPointerValidationHint {
+                inline_field_path: oauth_inline_field_path.as_str(),
+                example_env_name: oauth_example,
+                detect_telegram_token_shape: false,
+            },
+        ) {
+            issues.push(*issue);
+        }
+        if let Err(issue) = validate_secret_ref_env_pointer_field(
+            oauth_inline_field_path.as_str(),
+            self.oauth_access_token.as_ref(),
             EnvPointerValidationHint {
                 inline_field_path: oauth_inline_field_path.as_str(),
                 example_env_name: oauth_example,
@@ -1021,18 +1375,18 @@ impl ProviderConfig {
                 }
                 self.api_key()
             }
-            ProviderAuthScheme::XApiKey => self.api_key(),
+            ProviderAuthScheme::XApiKey | ProviderAuthScheme::XGoogApiKey => self.api_key(),
         }
     }
 
     pub fn resolved_auth_env_name(&self) -> Option<String> {
         match self.kind.auth_scheme() {
             ProviderAuthScheme::Bearer => {
-                if self
-                    .oauth_access_token
-                    .as_deref()
-                    .is_some_and(|value| !value.trim().is_empty())
-                {
+                let oauth_env_name = secret_ref_env_name(self.oauth_access_token.as_ref());
+                if let Some(oauth_env_name) = oauth_env_name {
+                    return Some(oauth_env_name);
+                }
+                if has_configured_secret_ref(self.oauth_access_token.as_ref()) {
                     return None;
                 }
                 if let Some(env_name) =
@@ -1040,21 +1394,21 @@ impl ProviderConfig {
                 {
                     return Some(env_name);
                 }
-                if self
-                    .api_key
-                    .as_deref()
-                    .is_some_and(|value| !value.trim().is_empty())
-                {
+                let api_key_env_name = secret_ref_env_name(self.api_key.as_ref());
+                if let Some(api_key_env_name) = api_key_env_name {
+                    return Some(api_key_env_name);
+                }
+                if has_configured_secret_ref(self.api_key.as_ref()) {
                     return None;
                 }
                 first_non_empty_env_name(&self.api_key_env_names())
             }
-            ProviderAuthScheme::XApiKey => {
-                if self
-                    .api_key
-                    .as_deref()
-                    .is_some_and(|value| !value.trim().is_empty())
-                {
+            ProviderAuthScheme::XApiKey | ProviderAuthScheme::XGoogApiKey => {
+                let api_key_env_name = secret_ref_env_name(self.api_key.as_ref());
+                if let Some(api_key_env_name) = api_key_env_name {
+                    return Some(api_key_env_name);
+                }
+                if has_configured_secret_ref(self.api_key.as_ref()) {
                     return None;
                 }
                 first_non_empty_env_name(&self.api_key_env_names())
@@ -1064,71 +1418,204 @@ impl ProviderConfig {
 
     pub fn auth_hint_env_names(&self) -> Vec<String> {
         let mut env_names = Vec::new();
-        push_inline_env_reference(&mut env_names, self.oauth_access_token.as_deref());
-        push_inline_env_reference(&mut env_names, self.api_key.as_deref());
-        for env_name in self.credential_env_names() {
-            push_unique_env_key(&mut env_names, Some(env_name.as_str()));
+        match self.kind.auth_scheme() {
+            ProviderAuthScheme::Bearer => {
+                self.push_oauth_access_token_hint_env_names(&mut env_names);
+                self.push_api_key_hint_env_names(&mut env_names);
+            }
+            ProviderAuthScheme::XApiKey | ProviderAuthScheme::XGoogApiKey => {
+                self.push_api_key_hint_env_names(&mut env_names);
+            }
         }
         env_names
     }
 
-    pub fn requires_explicit_auth_configuration(&self) -> bool {
-        !self.auth_hint_env_names().is_empty()
-    }
+    pub fn support_facts(&self) -> ProviderSupportFacts {
+        let feature = self.kind.feature_family().support_facts();
+        let auth = self.build_auth_support_facts();
+        let region_endpoint = self.build_region_endpoint_support_facts();
 
-    pub fn auth_guidance_hint(&self) -> Option<String> {
-        if self.kind.feature_family() == ProviderFeatureFamily::Volcengine {
-            let provider_label = if matches!(
-                self.kind,
-                ProviderKind::Byteplus | ProviderKind::ByteplusCoding
-            ) {
-                "BytePlus"
-            } else {
-                "Volcengine"
-            };
-            let env_name = self
-                .kind
-                .default_api_key_env()
-                .unwrap_or("PROVIDER_API_KEY");
-            Some(format!(
-                "LoongClaw's {provider_label} OpenAI-compatible path uses `provider.api_key` / `{env_name}` and sends `Authorization: Bearer <{env_name}>`; AK/SK request signing is not used on this path"
-            ))
-        } else {
-            None
+        ProviderSupportFacts {
+            feature,
+            auth,
+            region_endpoint,
         }
     }
 
+    pub fn descriptor_document(&self) -> ProviderDescriptorDocument {
+        let profile = self.kind.profile();
+        let support_facts = self.support_facts();
+        let schema = ProviderDescriptorSchema {
+            version: PROVIDER_DESCRIPTOR_SCHEMA_VERSION,
+            surface: "provider_descriptor",
+            purpose: "internal_sdk_contract",
+        };
+        let kind = self.kind.as_str().to_owned();
+        let display_name = self.kind.display_name().to_owned();
+        let aliases = provider_descriptor_aliases(profile);
+        let protocol_family = self.kind.protocol_family().as_str().to_owned();
+        let default_headers = provider_descriptor_headers(profile);
+        let default_user_agent = self.kind.default_user_agent().map(str::to_owned);
+        let configuration_hint = self
+            .configuration_hint()
+            .or_else(|| self.kind.configuration_hint().map(str::to_owned));
+        let default_model = self.kind.default_model().map(str::to_owned);
+        let recommended_onboarding_model =
+            self.kind.recommended_onboarding_model().map(str::to_owned);
+        let feature = build_provider_descriptor_feature(&support_facts.feature);
+        let auth = self.build_provider_descriptor_auth(&support_facts.auth);
+        let region_endpoint =
+            self.build_provider_descriptor_region_endpoint(&support_facts.region_endpoint);
+
+        ProviderDescriptorDocument {
+            schema,
+            kind,
+            display_name,
+            aliases,
+            protocol_family,
+            default_headers,
+            default_user_agent,
+            configuration_hint,
+            default_model,
+            recommended_onboarding_model,
+            feature,
+            auth,
+            region_endpoint,
+        }
+    }
+
+    pub fn requires_explicit_auth_configuration(&self) -> bool {
+        let support_facts = self.support_facts();
+        support_facts.auth.requires_explicit_configuration
+    }
+
+    pub fn auth_guidance_hint(&self) -> Option<String> {
+        let support_facts = self.support_facts();
+        support_facts.auth.guidance_hint
+    }
+
     pub fn missing_auth_configuration_message(&self) -> String {
+        let support_facts = self.support_facts();
+        support_facts.auth.missing_configuration_message
+    }
+
+    fn build_auth_support_facts(&self) -> ProviderAuthSupportFacts {
         let env_names = self.auth_hint_env_names();
+        let requires_explicit_configuration = !env_names.is_empty();
+        let guidance_hint = self.build_auth_guidance_hint();
+        let alternative_configuration_hint = self.build_alternative_auth_configuration_hint();
+        let missing_configuration_message = self.build_missing_auth_configuration_message(
+            &env_names,
+            guidance_hint.as_deref(),
+            alternative_configuration_hint.as_deref(),
+        );
+
+        ProviderAuthSupportFacts {
+            hint_env_names: env_names,
+            requires_explicit_configuration,
+            guidance_hint,
+            alternative_configuration_hint,
+            missing_configuration_message,
+        }
+    }
+
+    fn build_provider_descriptor_auth(
+        &self,
+        auth_support: &ProviderAuthSupportFacts,
+    ) -> ProviderDescriptorAuth {
+        let scheme = self.kind.auth_scheme().as_str().to_owned();
+        let auth_optional = self.kind.auth_optional();
+        let model_probe_auth_optional = self.kind.model_probe_auth_optional();
+        let default_api_key_env = self.kind.default_api_key_env().map(str::to_owned);
+        let api_key_env_aliases = provider_descriptor_env_aliases(self.kind.api_key_env_aliases());
+        let default_oauth_access_token_env = self
+            .kind
+            .default_oauth_access_token_env()
+            .map(str::to_owned);
+        let oauth_access_token_env_aliases =
+            provider_descriptor_env_aliases(self.kind.oauth_access_token_env_aliases());
+        let hint_env_names = auth_support.hint_env_names.clone();
+        let requires_explicit_configuration = auth_support.requires_explicit_configuration;
+        let guidance_hint = auth_support.guidance_hint.clone();
+        let alternative_configuration_hint = auth_support.alternative_configuration_hint.clone();
+        let missing_configuration_message = auth_support.missing_configuration_message.clone();
+
+        ProviderDescriptorAuth {
+            scheme,
+            auth_optional,
+            model_probe_auth_optional,
+            default_api_key_env,
+            api_key_env_aliases,
+            default_oauth_access_token_env,
+            oauth_access_token_env_aliases,
+            hint_env_names,
+            requires_explicit_configuration,
+            guidance_hint,
+            alternative_configuration_hint,
+            missing_configuration_message,
+        }
+    }
+
+    fn build_missing_auth_configuration_message(
+        &self,
+        env_names: &[String],
+        guidance_hint: Option<&str>,
+        alternative_configuration_hint: Option<&str>,
+    ) -> String {
         let mut configuration_paths = vec!["configure provider credentials".to_owned()];
         if !env_names.is_empty() {
             configuration_paths.push(format!("set {} in env", env_names.join(", ")));
         }
-        if let Some(hint) = self.alternative_auth_configuration_hint() {
-            configuration_paths.push(hint);
+        if let Some(hint) = alternative_configuration_hint {
+            configuration_paths.push(hint.to_owned());
         }
-        let mut message = format!(
-            "provider credentials are missing; {}",
-            join_guidance_options(&configuration_paths)
-        );
-        if let Some(hint) = self.auth_guidance_hint() {
+        let mut message = "provider credentials are missing".to_owned();
+        if let Some(detail) = self.missing_auth_runtime_detail() {
+            message.push_str("; ");
+            message.push_str(detail.as_str());
+        }
+        message.push_str("; ");
+        message.push_str(join_guidance_options(&configuration_paths).as_str());
+        if let Some(hint) = guidance_hint {
             message.push(' ');
-            message.push_str(hint.as_str());
+            message.push_str(hint);
         }
         message
     }
 
-    fn alternative_auth_configuration_hint(&self) -> Option<String> {
-        if self.kind == ProviderKind::Bedrock {
-            Some(
-                "configure AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY with AWS_REGION or AWS_DEFAULT_REGION for SigV4"
-                    .to_owned(),
-            )
-        } else if self.kind == ProviderKind::Custom {
-            Some("add `Authorization` / `X-API-Key` in `provider.headers`".to_owned())
-        } else {
-            None
+    fn build_auth_guidance_hint(&self) -> Option<String> {
+        let profile = self.kind.profile();
+        profile.auth_guidance_hint()
+    }
+
+    fn push_oauth_access_token_hint_env_names(&self, env_names: &mut Vec<String>) {
+        push_secret_ref_env_name(env_names, self.oauth_access_token.as_ref());
+        if has_configured_secret_ref(self.oauth_access_token.as_ref()) {
+            return;
         }
+
+        let oauth_env_names = self.oauth_access_token_env_names();
+        for oauth_env_name in oauth_env_names {
+            push_unique_env_key(env_names, Some(oauth_env_name.as_str()));
+        }
+    }
+
+    fn push_api_key_hint_env_names(&self, env_names: &mut Vec<String>) {
+        push_secret_ref_env_name(env_names, self.api_key.as_ref());
+        if has_configured_secret_ref(self.api_key.as_ref()) {
+            return;
+        }
+
+        let api_key_env_names = self.api_key_env_names();
+        for api_key_env_name in api_key_env_names {
+            push_unique_env_key(env_names, Some(api_key_env_name.as_str()));
+        }
+    }
+
+    fn build_alternative_auth_configuration_hint(&self) -> Option<String> {
+        let profile = self.kind.profile();
+        let hint = profile.alternative_auth_configuration_hint();
+        hint.map(str::to_owned)
     }
 
     pub fn transport_policy(&self) -> ProviderTransportPolicy {
@@ -1430,15 +1917,11 @@ impl ProviderConfig {
     }
 
     pub fn oauth_access_token(&self) -> Option<String> {
-        if let Some(raw) = self.oauth_access_token.as_deref() {
-            let value = raw.trim();
-            if !value.is_empty() {
-                return match resolve_inline_secret(value) {
-                    InlineSecretResolution::Resolved(secret) => Some(secret),
-                    InlineSecretResolution::ExplicitEnvMissing => None,
-                    InlineSecretResolution::NotInlineEnvReference => Some(value.to_owned()),
-                };
-            }
+        let secret_lookup = resolve_secret_lookup(self.oauth_access_token.as_ref());
+        match secret_lookup {
+            SecretLookup::Value(value) => return Some(value),
+            SecretLookup::Missing => return None,
+            SecretLookup::Absent => {}
         }
 
         first_non_empty_env_value(&self.oauth_access_token_env_names())
@@ -1497,15 +1980,11 @@ impl ProviderConfig {
     }
 
     pub fn api_key_candidates(&self) -> Vec<String> {
-        if let Some(raw) = self.api_key.as_deref() {
-            let value = raw.trim();
-            if !value.is_empty() {
-                return match resolve_inline_secret(value) {
-                    InlineSecretResolution::Resolved(secret) => split_secret_candidates(&secret),
-                    InlineSecretResolution::ExplicitEnvMissing => Vec::new(),
-                    InlineSecretResolution::NotInlineEnvReference => split_secret_candidates(value),
-                };
-            }
+        let secret_lookup = resolve_secret_lookup(self.api_key.as_ref());
+        match secret_lookup {
+            SecretLookup::Value(value) => return split_secret_candidates(value.as_str()),
+            SecretLookup::Missing => return Vec::new(),
+            SecretLookup::Absent => {}
         }
 
         let mut env_keys = Vec::new();
@@ -1558,35 +2037,18 @@ impl ProviderConfig {
     }
 
     pub fn configuration_hint(&self) -> Option<String> {
-        if self.kind == ProviderKind::Byteplus && self.uses_byteplus_coding_plan_path() {
-            return Some(
-                "byteplus uses the standard ModelArk path and should not target `/api/coding` or `/api/coding/v3`; switch to `kind = \"byteplus_coding\"` for the dedicated OpenAI-compatible Coding Plan endpoint"
-                    .to_owned(),
-            );
+        let effective_urls = self.effective_url_values();
+        let cross_routing_hint = self.cross_routing_configuration_hint(&effective_urls);
+        if let Some(hint) = cross_routing_hint {
+            return Some(hint);
         }
-        if self.kind == ProviderKind::Volcengine && self.uses_volcengine_coding_plan_path() {
-            return Some(
-                "volcengine uses the standard Ark API path under `/api/v3` and should not target `/api/coding` or `/api/coding/v3`; switch to `kind = \"volcengine_coding\"` for the dedicated OpenAI-compatible Coding Plan endpoint"
-                    .to_owned(),
-            );
+
+        let path_validation_hint = self.path_validation_configuration_hint(&effective_urls);
+        if let Some(hint) = path_validation_hint {
+            return Some(hint);
         }
-        if self.kind == ProviderKind::ByteplusCoding
-            && (self.uses_generic_byteplus_modelark_v3_path()
-                || self.uses_ark_coding_anthropic_path())
-        {
-            return Some(
-                "byteplus_coding must use the dedicated BytePlus Coding path under `/api/coding/v3`; do not point it at the unsupported Anthropic-compatible `/api/coding` or generic `/api/v3` ModelArk endpoints because that bypasses Coding Plan quota and can incur standard model charges"
-                    .to_owned(),
-            );
-        }
-        if self.kind == ProviderKind::VolcengineCoding
-            && (self.uses_generic_volcengine_modelark_v3_path()
-                || self.uses_ark_coding_anthropic_path())
-        {
-            return Some(
-                "volcengine_coding must use the dedicated Volcengine Coding Plan path under `/api/coding/v3`; do not point it at the Anthropic-compatible `/api/coding` or generic `/api/v3` Ark endpoints because that bypasses Coding Plan quota and can incur standard charges"
-                    .to_owned(),
-            );
+        if let Some(hint) = self.opencode_configuration_hint() {
+            return Some(hint);
         }
         if self.has_unresolved_custom_base_url() {
             let template = self.kind.profile().base_url;
@@ -1601,108 +2063,175 @@ impl ProviderConfig {
         None
     }
 
+    fn effective_url_values(&self) -> ProviderEffectiveUrlValues {
+        let resolved_base_url = self.resolved_base_url();
+        let endpoint = self.endpoint();
+        let models_endpoint = self.models_endpoint();
+
+        ProviderEffectiveUrlValues {
+            resolved_base_url,
+            endpoint,
+            models_endpoint,
+        }
+    }
+
+    fn cross_routing_configuration_hint(
+        &self,
+        effective_urls: &ProviderEffectiveUrlValues,
+    ) -> Option<String> {
+        let current_profile = self.kind.url_validation_profile()?;
+        let sources = effective_urls.sources();
+
+        for (source_name, source_value, allow_host_only_base_match) in sources {
+            let current_match = current_profile
+                .matching_canonical_fingerprint(source_value, allow_host_only_base_match);
+            let candidate_match = find_cross_routed_validation_profile(
+                self.kind,
+                source_value,
+                allow_host_only_base_match,
+            );
+            let Some((candidate_profile, candidate_fingerprint)) = candidate_match else {
+                continue;
+            };
+            if current_match.is_some() {
+                continue;
+            }
+
+            let candidate_kind_id = candidate_profile.kind.as_str();
+            let current_kind_id = self.kind.as_str();
+            let route_expectation = current_profile.route_expectation;
+            let hint = format!(
+                "{current_kind_id} is pointing at the canonical `{candidate_kind_id}` {source_name} `{candidate_fingerprint}`; switch to `kind = \"{candidate_kind_id}\"` if that is intentional, or restore {route_expectation}"
+            );
+            return Some(hint);
+        }
+
+        None
+    }
+
+    fn path_validation_configuration_hint(
+        &self,
+        effective_urls: &ProviderEffectiveUrlValues,
+    ) -> Option<String> {
+        let validation_profile = self.kind.url_validation_profile()?;
+        let sources = effective_urls.sources();
+        let requires_path_validation = !validation_profile.required_path_fragments.is_empty();
+        if requires_path_validation {
+            for (_, value, _) in sources {
+                let path_match = validation_profile.matches_required_path_fragment(value);
+                if !path_match {
+                    return Some(validation_profile.path_validation_hint.to_owned());
+                }
+            }
+        }
+
+        for (_, value, _) in sources {
+            let path_match = validation_profile.matches_forbidden_path_fragment(value);
+            if path_match {
+                return Some(validation_profile.path_validation_hint.to_owned());
+            }
+        }
+
+        None
+    }
+
+    fn opencode_configuration_hint(&self) -> Option<String> {
+        let explicit_model = self.explicit_model();
+        let configured_base_url = self.base_url.trim().to_ascii_lowercase();
+        let resolved_base_url = self.resolved_base_url().to_ascii_lowercase();
+
+        if self.kind == ProviderKind::OpencodeZen {
+            if explicit_model.as_deref().is_some_and(|model| {
+                model
+                    .trim()
+                    .to_ascii_lowercase()
+                    .starts_with("opencode-go/")
+            }) {
+                return Some(
+                    "opencode_zen expects Zen model ids; switch to `kind = \"opencode_go\"` for `opencode-go/*` models or remove the copied OpenCode prefix and keep the matching provider kind"
+                        .to_owned(),
+                );
+            }
+            if configured_base_url.contains("/zen/go/") || resolved_base_url.contains("/zen/go/") {
+                return Some(
+                    "opencode_zen should point at the Zen root (`https://opencode.ai/zen/v1`), not the Go path; switch to `kind = \"opencode_go\"` or reset `provider.base_url`"
+                        .to_owned(),
+                );
+            }
+        }
+
+        if self.kind == ProviderKind::OpencodeGo {
+            if explicit_model
+                .as_deref()
+                .is_some_and(|model| model.trim().to_ascii_lowercase().starts_with("opencode/"))
+            {
+                return Some(
+                    "opencode_go expects Go model ids; switch to `kind = \"opencode_zen\"` for `opencode/*` models or remove the copied OpenCode prefix and keep the matching provider kind"
+                        .to_owned(),
+                );
+            }
+            let points_at_zen_root = configured_base_url.ends_with("/zen/v1")
+                || (resolved_base_url.ends_with("/zen/v1")
+                    && !resolved_base_url.contains("/zen/go/"));
+            if points_at_zen_root {
+                return Some(
+                    "opencode_go should point at the Go root (`https://opencode.ai/zen/go/v1`), not the Zen root; switch to `kind = \"opencode_zen\"` or reset `provider.base_url`"
+                        .to_owned(),
+                );
+            }
+        }
+
+        None
+    }
+
+    fn build_region_endpoint_support_facts(&self) -> ProviderRegionEndpointSupportFacts {
+        let guide = self.kind.region_endpoint_guide();
+        let note = guide.map(|value| value.note(self));
+        let catalog_failure_hint = guide.map(|value| value.failure_hint(self));
+        let request_failure_hint = guide.map(|value| value.request_failure_hint(self));
+
+        ProviderRegionEndpointSupportFacts {
+            note,
+            catalog_failure_hint,
+            request_failure_hint,
+        }
+    }
+
+    fn build_provider_descriptor_region_endpoint(
+        &self,
+        region_endpoint_support: &ProviderRegionEndpointSupportFacts,
+    ) -> ProviderDescriptorRegionEndpoint {
+        let region_endpoint_info = self.kind.region_endpoint_info();
+        let family_label = region_endpoint_info
+            .as_ref()
+            .map(|info| info.family_label.to_owned());
+        let variants = provider_descriptor_region_variants(region_endpoint_info);
+        let note = region_endpoint_support.note.clone();
+        let catalog_failure_hint = region_endpoint_support.catalog_failure_hint.clone();
+        let request_failure_hint = region_endpoint_support.request_failure_hint.clone();
+
+        ProviderDescriptorRegionEndpoint {
+            family_label,
+            variants,
+            note,
+            catalog_failure_hint,
+            request_failure_hint,
+        }
+    }
+
     pub fn region_endpoint_note(&self) -> Option<String> {
-        Some(self.kind.region_endpoint_guide()?.note(self))
+        let support_facts = self.support_facts();
+        support_facts.region_endpoint.note
     }
 
     pub fn region_endpoint_failure_hint(&self) -> Option<String> {
-        Some(self.kind.region_endpoint_guide()?.failure_hint(self))
+        let support_facts = self.support_facts();
+        support_facts.region_endpoint.catalog_failure_hint
     }
 
     pub fn request_region_endpoint_failure_hint(&self) -> Option<String> {
-        Some(
-            self.kind
-                .region_endpoint_guide()?
-                .request_failure_hint(self),
-        )
-    }
-
-    fn uses_byteplus_coding_plan_path(&self) -> bool {
-        if self.kind != ProviderKind::Byteplus {
-            return false;
-        }
-
-        let resolved_base_url = self.resolved_base_url();
-        let endpoint = self.endpoint();
-        let models_endpoint = self.models_endpoint();
-        [
-            resolved_base_url.as_str(),
-            endpoint.as_str(),
-            models_endpoint.as_str(),
-        ]
-        .into_iter()
-        .any(is_ark_coding_plan_path)
-    }
-
-    fn uses_generic_byteplus_modelark_v3_path(&self) -> bool {
-        if self.kind != ProviderKind::ByteplusCoding {
-            return false;
-        }
-
-        let resolved_base_url = self.resolved_base_url();
-        let endpoint = self.endpoint();
-        let models_endpoint = self.models_endpoint();
-        [
-            resolved_base_url.as_str(),
-            endpoint.as_str(),
-            models_endpoint.as_str(),
-        ]
-        .into_iter()
-        .any(is_generic_ark_modelark_v3_path)
-    }
-
-    fn uses_volcengine_coding_plan_path(&self) -> bool {
-        if self.kind != ProviderKind::Volcengine {
-            return false;
-        }
-
-        let resolved_base_url = self.resolved_base_url();
-        let endpoint = self.endpoint();
-        let models_endpoint = self.models_endpoint();
-        [
-            resolved_base_url.as_str(),
-            endpoint.as_str(),
-            models_endpoint.as_str(),
-        ]
-        .into_iter()
-        .any(is_ark_coding_plan_path)
-    }
-
-    fn uses_generic_volcengine_modelark_v3_path(&self) -> bool {
-        if self.kind != ProviderKind::VolcengineCoding {
-            return false;
-        }
-
-        let resolved_base_url = self.resolved_base_url();
-        let endpoint = self.endpoint();
-        let models_endpoint = self.models_endpoint();
-        [
-            resolved_base_url.as_str(),
-            endpoint.as_str(),
-            models_endpoint.as_str(),
-        ]
-        .into_iter()
-        .any(is_generic_ark_modelark_v3_path)
-    }
-
-    fn uses_ark_coding_anthropic_path(&self) -> bool {
-        if !matches!(
-            self.kind,
-            ProviderKind::ByteplusCoding | ProviderKind::VolcengineCoding
-        ) {
-            return false;
-        }
-
-        let resolved_base_url = self.resolved_base_url();
-        let endpoint = self.endpoint();
-        let models_endpoint = self.models_endpoint();
-        [
-            resolved_base_url.as_str(),
-            endpoint.as_str(),
-            models_endpoint.as_str(),
-        ]
-        .into_iter()
-        .any(is_ark_coding_anthropic_path)
+        let support_facts = self.support_facts();
+        support_facts.region_endpoint.request_failure_hint
     }
 
     pub fn model_selection_fallback_hint(&self) -> Option<String> {
@@ -1723,10 +2252,8 @@ impl ProviderConfig {
         push_unique_env_key(&mut env_keys, configured_oauth_env);
         if configured_oauth_env.is_none()
             && self.configured_api_key_env_name().is_none()
-            && self
-                .api_key
-                .as_deref()
-                .is_none_or(|value| value.trim().is_empty())
+            && !has_configured_secret_ref(self.api_key.as_ref())
+            && !has_configured_secret_ref(self.oauth_access_token.as_ref())
         {
             push_unique_env_key(&mut env_keys, self.kind.default_oauth_access_token_env());
             for alias in self.kind.oauth_access_token_env_aliases() {
@@ -1764,13 +2291,77 @@ impl ProviderConfig {
         Some(env_name)
     }
 
+    fn missing_auth_source_runtime_detail(
+        &self,
+        label: &str,
+        secret_ref: Option<&SecretRef>,
+        configured_env_name: Option<&str>,
+    ) -> Option<String> {
+        match resolve_secret_lookup(secret_ref) {
+            SecretLookup::Value(_) => return None,
+            SecretLookup::Missing => {
+                if let Some(env_name) = secret_ref_env_name(secret_ref) {
+                    return Some(format!(
+                        "configured provider {label} env `{env_name}` is unset, empty, or not visible to the current process"
+                    ));
+                }
+                if has_configured_secret_ref(secret_ref) {
+                    return Some(format!(
+                        "configured provider {label} secret reference could not be resolved at runtime"
+                    ));
+                }
+            }
+            SecretLookup::Absent => {}
+        }
+
+        let env_name = configured_env_name?;
+        match env::var(env_name) {
+            Ok(value) if !value.trim().is_empty() => None,
+            _ => Some(format!(
+                "configured provider {label} env `{env_name}` is unset, empty, or not visible to the current process"
+            )),
+        }
+    }
+
     pub fn configured_api_key_env_override(&self) -> Option<String> {
+        let explicit_secret_env = secret_ref_env_name(self.api_key.as_ref());
+        if let Some(explicit_secret_env) = explicit_secret_env {
+            return Some(explicit_secret_env);
+        }
         self.configured_api_key_env_name().map(str::to_owned)
     }
 
     pub fn configured_oauth_access_token_env_override(&self) -> Option<String> {
+        let explicit_secret_env = secret_ref_env_name(self.oauth_access_token.as_ref());
+        if let Some(explicit_secret_env) = explicit_secret_env {
+            return Some(explicit_secret_env);
+        }
         self.configured_oauth_access_token_env_name()
             .map(str::to_owned)
+    }
+
+    fn missing_auth_runtime_detail(&self) -> Option<String> {
+        match self.kind.auth_scheme() {
+            ProviderAuthScheme::Bearer => self
+                .missing_auth_source_runtime_detail(
+                    "oauth access token",
+                    self.oauth_access_token.as_ref(),
+                    self.configured_oauth_access_token_env_name(),
+                )
+                .or_else(|| {
+                    self.missing_auth_source_runtime_detail(
+                        "api key",
+                        self.api_key.as_ref(),
+                        self.configured_api_key_env_name(),
+                    )
+                }),
+            ProviderAuthScheme::XApiKey | ProviderAuthScheme::XGoogApiKey => self
+                .missing_auth_source_runtime_detail(
+                    "api key",
+                    self.api_key.as_ref(),
+                    self.configured_api_key_env_name(),
+                ),
+        }
     }
 
     pub fn normalized_for_persistence(&self) -> Self {
@@ -1786,15 +2377,37 @@ impl ProviderConfig {
                 default_provider_base_url().as_str(),
             ),
         );
+        let api_key_has_explicit_env_reference =
+            self.api_key_env_explicit || secret_ref_env_name(self.api_key.as_ref()).is_some();
+        let oauth_has_explicit_env_reference = self.oauth_access_token_env_explicit
+            || secret_ref_env_name(self.oauth_access_token.as_ref()).is_some();
 
         let mut normalized = self.clone();
         normalized.base_url = base_url;
         normalized.chat_completions_path = chat_completions_path;
         normalized.endpoint = self.normalized_endpoint_for_persistence();
         normalized.models_endpoint = self.normalized_models_endpoint_for_persistence();
+        normalized.api_key = self.normalized_api_key_for_persistence();
         normalized.api_key_env = self.normalized_api_key_env_for_persistence();
+        normalized.oauth_access_token = self.normalized_oauth_access_token_for_persistence();
         normalized.oauth_access_token_env =
             self.normalized_oauth_access_token_env_for_persistence();
+        if api_key_has_explicit_env_reference {
+            canonicalize_secret_env_reference_for_persistence(
+                &mut normalized.api_key,
+                &mut normalized.api_key_env,
+            );
+        } else {
+            normalized.api_key_env = None;
+        }
+        if oauth_has_explicit_env_reference {
+            canonicalize_secret_env_reference_for_persistence(
+                &mut normalized.oauth_access_token,
+                &mut normalized.oauth_access_token_env,
+            );
+        } else {
+            normalized.oauth_access_token_env = None;
+        }
         normalized
     }
 
@@ -1812,7 +2425,15 @@ impl ProviderConfig {
         None
     }
 
+    fn normalized_api_key_for_persistence(&self) -> Option<SecretRef> {
+        normalize_secret_ref_for_persistence(self.api_key.as_ref(), self.api_key_env.as_deref())
+    }
+
     fn normalized_api_key_env_for_persistence(&self) -> Option<String> {
+        let explicit_secret_env = secret_ref_env_name(self.api_key.as_ref());
+        if let Some(explicit_secret_env) = explicit_secret_env {
+            return Some(explicit_secret_env);
+        }
         let configured = non_empty(self.api_key_env.as_deref()).map(str::to_owned);
         if self.api_key_env_explicit {
             return configured;
@@ -1823,7 +2444,18 @@ impl ProviderConfig {
         self.kind.default_api_key_env().map(str::to_owned)
     }
 
+    fn normalized_oauth_access_token_for_persistence(&self) -> Option<SecretRef> {
+        normalize_secret_ref_for_persistence(
+            self.oauth_access_token.as_ref(),
+            self.oauth_access_token_env.as_deref(),
+        )
+    }
+
     fn normalized_oauth_access_token_env_for_persistence(&self) -> Option<String> {
+        let explicit_secret_env = secret_ref_env_name(self.oauth_access_token.as_ref());
+        if let Some(explicit_secret_env) = explicit_secret_env {
+            return Some(explicit_secret_env);
+        }
         let configured = non_empty(self.oauth_access_token_env.as_deref()).map(str::to_owned);
         if self.oauth_access_token_env_explicit {
             return configured;
@@ -1857,13 +2489,6 @@ fn contains_template_placeholder(value: &str) -> bool {
     value.contains('<') && value.contains('>')
 }
 
-fn is_explicit_api_key_env_name(kind: ProviderKind, env_name: &str) -> bool {
-    let Some(env_name) = non_empty(Some(env_name)) else {
-        return false;
-    };
-    !is_current_provider_api_key_env_name(kind, env_name)
-}
-
 fn is_explicit_base_url(kind: ProviderKind, base_url: &str) -> bool {
     let Some(base_url) = non_empty(Some(base_url)) else {
         return false;
@@ -1892,28 +2517,12 @@ fn is_explicit_models_endpoint(provider: &ProviderConfig, endpoint: &str) -> boo
     !is_same_base_url(endpoint, provider.derived_models_endpoint().as_str())
 }
 
-fn is_explicit_oauth_access_token_env_name(kind: ProviderKind, env_name: &str) -> bool {
-    let Some(env_name) = non_empty(Some(env_name)) else {
-        return false;
-    };
-    !is_current_provider_oauth_access_token_env_name(kind, env_name)
-}
-
 fn is_current_provider_base_url(kind: ProviderKind, base_url: &str) -> bool {
     is_same_base_url(base_url, kind.profile().base_url)
 }
 
 fn is_current_provider_chat_completions_path(kind: ProviderKind, path: &str) -> bool {
     is_same_chat_path(path, kind.profile().chat_completions_path)
-}
-
-fn is_current_provider_api_key_env_name(kind: ProviderKind, env_name: &str) -> bool {
-    kind.default_api_key_env() == Some(env_name) || kind.api_key_env_aliases().contains(&env_name)
-}
-
-fn is_current_provider_oauth_access_token_env_name(kind: ProviderKind, env_name: &str) -> bool {
-    kind.default_oauth_access_token_env() == Some(env_name)
-        || kind.oauth_access_token_env_aliases().contains(&env_name)
 }
 
 fn is_provider_managed_api_key_env_name(env_name: &str) -> bool {
@@ -1957,23 +2566,82 @@ fn maybe_normalize_custom_chat_path(kind: ProviderKind, base_url: &str, path: &s
     normalized
 }
 
-fn is_ark_coding_plan_path(value: &str) -> bool {
-    value.trim().to_ascii_lowercase().contains("/api/coding")
+impl ProviderEffectiveUrlValues {
+    fn sources(&self) -> [(&'static str, &str, bool); 3] {
+        [
+            ("endpoint", self.endpoint.as_str(), false),
+            ("models endpoint", self.models_endpoint.as_str(), false),
+            ("base url", self.resolved_base_url.as_str(), true),
+        ]
+    }
 }
 
-fn is_ark_coding_anthropic_path(value: &str) -> bool {
-    let normalized = value.trim().to_ascii_lowercase();
-    normalized.contains("/api/coding") && !normalized.contains("/api/coding/v3")
-}
+impl ProviderUrlValidationProfile {
+    fn matching_canonical_fingerprint(
+        self,
+        value: &str,
+        allow_host_only_base_match: bool,
+    ) -> Option<&'static str> {
+        let profile = self.kind.profile();
+        let base_fingerprint = profile.base_url;
+        let base_match = matches_base_url_validation_fingerprint(
+            value,
+            base_fingerprint,
+            allow_host_only_base_match,
+        );
+        if base_match {
+            return Some(base_fingerprint);
+        }
 
-fn is_generic_ark_modelark_v3_path(value: &str) -> bool {
-    let normalized = value.trim().to_ascii_lowercase();
-    normalized.contains("/api/v3") && !normalized.contains("/api/coding/v3")
+        for fingerprint in self.extra_canonical_url_fingerprints {
+            let fingerprint_match = matches_url_validation_fingerprint(value, fingerprint);
+            if fingerprint_match {
+                return Some(fingerprint);
+            }
+        }
+
+        None
+    }
+
+    fn matches_required_path_fragment(self, value: &str) -> bool {
+        for fragment in self.required_path_fragments {
+            let fragment_match = url_contains_validation_fragment(value, fragment);
+            if fragment_match {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn matches_forbidden_path_fragment(self, value: &str) -> bool {
+        for fragment in self.forbidden_path_exceptions {
+            let exception_match = url_contains_validation_fragment(value, fragment);
+            if exception_match {
+                return false;
+            }
+        }
+
+        for fragment in self.forbidden_path_fragments {
+            let fragment_match = url_contains_validation_fragment(value, fragment);
+            if fragment_match {
+                return true;
+            }
+        }
+
+        false
+    }
 }
 
 impl ProviderKind {
     pub fn all_sorted() -> &'static [ProviderKind] {
         &PROVIDER_KIND_ORDER
+    }
+
+    fn url_validation_profile(self) -> Option<&'static ProviderUrlValidationProfile> {
+        PROVIDER_URL_VALIDATION_PROFILES
+            .iter()
+            .find(|profile| profile.kind == self)
     }
 
     pub fn as_str(self) -> &'static str {
@@ -1993,6 +2661,7 @@ impl ProviderKind {
             ProviderKind::Deepseek => "DeepSeek",
             ProviderKind::Fireworks => "Fireworks",
             ProviderKind::Gemini => "Gemini",
+            ProviderKind::GithubCopilot => "GitHub Copilot",
             ProviderKind::Groq => "Groq",
             ProviderKind::Kimi => "Kimi",
             ProviderKind::KimiCoding => "Kimi Coding",
@@ -2004,6 +2673,8 @@ impl ProviderKind {
             ProviderKind::LmStudio => "LM Studio",
             ProviderKind::Ollama => "Ollama",
             ProviderKind::Openai => "OpenAI",
+            ProviderKind::OpencodeZen => "OpenCode Zen",
+            ProviderKind::OpencodeGo => "OpenCode Go",
             ProviderKind::Openrouter => "OpenRouter",
             ProviderKind::Perplexity => "Perplexity",
             ProviderKind::Qianfan => "Qianfan",
@@ -2013,6 +2684,7 @@ impl ProviderKind {
             ProviderKind::Sglang => "SGLang",
             ProviderKind::Siliconflow => "SiliconFlow",
             ProviderKind::Stepfun => "StepFun",
+            ProviderKind::StepPlan => "Step Plan",
             ProviderKind::Together => "Together",
             ProviderKind::Venice => "Venice",
             ProviderKind::VercelAiGateway => "Vercel AI Gateway",
@@ -2020,6 +2692,7 @@ impl ProviderKind {
             ProviderKind::Volcengine => "Volcengine",
             ProviderKind::VolcengineCoding => "Volcengine Coding",
             ProviderKind::Xai => "xAI",
+            ProviderKind::Xiaomi => "Xiaomi",
             ProviderKind::Zai => "Z.ai",
             ProviderKind::Zhipu => "Zhipu",
         }
@@ -2043,6 +2716,7 @@ impl ProviderKind {
             deepseek,
             fireworks,
             gemini,
+            github_copilot,
             groq,
             kimi,
             kimi_coding,
@@ -2054,6 +2728,8 @@ impl ProviderKind {
             nvidia,
             ollama,
             openai,
+            opencode_go,
+            opencode_zen,
             openrouter,
             perplexity,
             qianfan,
@@ -2062,6 +2738,7 @@ impl ProviderKind {
             sglang,
             siliconflow,
             stepfun,
+            step_plan,
             together,
             venice,
             vercel_ai_gateway,
@@ -2069,6 +2746,7 @@ impl ProviderKind {
             volcengine,
             volcengine_coding,
             xai,
+            xiaomi,
             zai,
             zhipu,
         ] = &PROVIDER_PROFILES;
@@ -2086,6 +2764,7 @@ impl ProviderKind {
             ProviderKind::Deepseek => deepseek,
             ProviderKind::Fireworks => fireworks,
             ProviderKind::Gemini => gemini,
+            ProviderKind::GithubCopilot => github_copilot,
             ProviderKind::Groq => groq,
             ProviderKind::Kimi => kimi,
             ProviderKind::KimiCoding => kimi_coding,
@@ -2097,6 +2776,8 @@ impl ProviderKind {
             ProviderKind::Nvidia => nvidia,
             ProviderKind::Ollama => ollama,
             ProviderKind::Openai => openai,
+            ProviderKind::OpencodeZen => opencode_zen,
+            ProviderKind::OpencodeGo => opencode_go,
             ProviderKind::Openrouter => openrouter,
             ProviderKind::Perplexity => perplexity,
             ProviderKind::Qianfan => qianfan,
@@ -2105,6 +2786,7 @@ impl ProviderKind {
             ProviderKind::Sglang => sglang,
             ProviderKind::Siliconflow => siliconflow,
             ProviderKind::Stepfun => stepfun,
+            ProviderKind::StepPlan => step_plan,
             ProviderKind::Together => together,
             ProviderKind::Venice => venice,
             ProviderKind::VercelAiGateway => vercel_ai_gateway,
@@ -2112,6 +2794,7 @@ impl ProviderKind {
             ProviderKind::Volcengine => volcengine,
             ProviderKind::VolcengineCoding => volcengine_coding,
             ProviderKind::Xai => xai,
+            ProviderKind::Xiaomi => xiaomi,
             ProviderKind::Zai => zai,
             ProviderKind::Zhipu => zhipu,
         }
@@ -2206,7 +2889,7 @@ impl ProviderKind {
     pub fn configuration_hint(self) -> Option<&'static str> {
         if self == ProviderKind::Bedrock {
             Some(
-                "set `AWS_REGION`/`AWS_DEFAULT_REGION` or replace `<region>` in `provider.base_url` with your Bedrock runtime region",
+                "set `BEDROCK_AWS_REGION`/`AWS_REGION`/`AWS_DEFAULT_REGION` or replace `<region>` in `provider.base_url` with your Bedrock runtime region",
             )
         } else if self == ProviderKind::CloudflareAiGateway {
             Some(
@@ -2268,6 +2951,17 @@ impl ProviderKind {
                     base_url: "https://api.z.ai",
                 },
             }),
+            ProviderKind::Stepfun | ProviderKind::StepPlan => Some(ProviderRegionEndpointGuide {
+                family_label: "Stepfun",
+                default_variant: ProviderRegionEndpointVariant {
+                    label: "CN",
+                    base_url: profile.base_url,
+                },
+                alternate_variant: ProviderRegionEndpointVariant {
+                    label: "Global",
+                    base_url: "https://api.stepfun.ai",
+                },
+            }),
             ProviderKind::Anthropic
             | ProviderKind::Bedrock
             | ProviderKind::Byteplus
@@ -2280,6 +2974,7 @@ impl ProviderKind {
             | ProviderKind::Fireworks
             | ProviderKind::Gemini
             | ProviderKind::Groq
+            | ProviderKind::GithubCopilot
             | ProviderKind::KimiCoding
             | ProviderKind::Llamacpp
             | ProviderKind::LmStudio
@@ -2288,6 +2983,8 @@ impl ProviderKind {
             | ProviderKind::Nvidia
             | ProviderKind::Ollama
             | ProviderKind::Openai
+            | ProviderKind::OpencodeZen
+            | ProviderKind::OpencodeGo
             | ProviderKind::Openrouter
             | ProviderKind::Perplexity
             | ProviderKind::Qianfan
@@ -2296,14 +2993,14 @@ impl ProviderKind {
             | ProviderKind::Sambanova
             | ProviderKind::Sglang
             | ProviderKind::Siliconflow
-            | ProviderKind::Stepfun
             | ProviderKind::Together
             | ProviderKind::Venice
             | ProviderKind::VercelAiGateway
             | ProviderKind::Vllm
             | ProviderKind::Volcengine
             | ProviderKind::VolcengineCoding
-            | ProviderKind::Xai => None,
+            | ProviderKind::Xai
+            | ProviderKind::Xiaomi => None,
         }
     }
 
@@ -2319,11 +3016,238 @@ impl ProviderKind {
         if matches!(self, ProviderKind::Deepseek) {
             Some("deepseek-chat")
         } else if matches!(self, ProviderKind::Minimax) {
-            Some("MiniMax-M2.5")
+            Some("MiniMax-M2.7")
+        } else if matches!(self, ProviderKind::Xiaomi) {
+            Some("mimo-v2-pro")
         } else {
             None
         }
     }
+
+    pub fn region_endpoint_info(self) -> Option<ProviderRegionEndpointInfo> {
+        let guide = self.region_endpoint_guide()?;
+        let family_label = if matches!(self, ProviderKind::Zai | ProviderKind::Zhipu) {
+            "Z.ai"
+        } else {
+            guide.family_label
+        };
+        let variants = vec![
+            RegionVariant {
+                label: guide.default_variant.label,
+                base_url: guide.default_variant.base_url,
+            },
+            RegionVariant {
+                label: guide.alternate_variant.label,
+                base_url: guide.alternate_variant.base_url,
+            },
+        ];
+        Some(ProviderRegionEndpointInfo {
+            family_label,
+            variants,
+        })
+    }
+}
+
+const NON_CODING_ARK_FORBIDDEN_PATH_FRAGMENTS: [&str; 1] = ["/api/coding"];
+const CODING_ARK_REQUIRED_PATH_FRAGMENTS: [&str; 1] = ["/api/coding/v3"];
+const CODING_ARK_FORBIDDEN_PATH_FRAGMENTS: [&str; 2] = ["/api/v3", "/api/coding"];
+const CODING_ARK_FORBIDDEN_PATH_EXCEPTIONS: [&str; 1] = ["/api/coding/v3"];
+const VOLCENGINE_STANDARD_CANONICAL_URL_FINGERPRINTS: [&str; 1] =
+    ["https://ark.cn-beijing.volces.com/api/v3"];
+
+const PROVIDER_URL_VALIDATION_PROFILES: [ProviderUrlValidationProfile; 4] = [
+    ProviderUrlValidationProfile {
+        kind: ProviderKind::Byteplus,
+        extra_canonical_url_fingerprints: &[],
+        required_path_fragments: &[],
+        forbidden_path_fragments: &NON_CODING_ARK_FORBIDDEN_PATH_FRAGMENTS,
+        forbidden_path_exceptions: &[],
+        route_expectation: "the standard BytePlus ModelArk route under `/api/v3`",
+        path_validation_hint: "byteplus uses the standard ModelArk path and should not target `/api/coding` or `/api/coding/v3`; switch to `kind = \"byteplus_coding\"` for the dedicated OpenAI-compatible Coding Plan endpoint",
+    },
+    ProviderUrlValidationProfile {
+        kind: ProviderKind::ByteplusCoding,
+        extra_canonical_url_fingerprints: &[],
+        required_path_fragments: &CODING_ARK_REQUIRED_PATH_FRAGMENTS,
+        forbidden_path_fragments: &CODING_ARK_FORBIDDEN_PATH_FRAGMENTS,
+        forbidden_path_exceptions: &CODING_ARK_FORBIDDEN_PATH_EXCEPTIONS,
+        route_expectation: "the dedicated BytePlus Coding path under `/api/coding/v3`",
+        path_validation_hint: "byteplus_coding must use the dedicated BytePlus Coding path under `/api/coding/v3`; do not point it at the unsupported Anthropic-compatible `/api/coding` or generic `/api/v3` ModelArk endpoints because that bypasses Coding Plan quota and can incur standard model charges",
+    },
+    ProviderUrlValidationProfile {
+        kind: ProviderKind::Volcengine,
+        extra_canonical_url_fingerprints: &VOLCENGINE_STANDARD_CANONICAL_URL_FINGERPRINTS,
+        required_path_fragments: &[],
+        forbidden_path_fragments: &NON_CODING_ARK_FORBIDDEN_PATH_FRAGMENTS,
+        forbidden_path_exceptions: &[],
+        route_expectation: "the standard Volcengine Ark route under `/api/v3`",
+        path_validation_hint: "volcengine uses the standard Ark API path under `/api/v3` and should not target `/api/coding` or `/api/coding/v3`; switch to `kind = \"volcengine_coding\"` for the dedicated OpenAI-compatible Coding Plan endpoint",
+    },
+    ProviderUrlValidationProfile {
+        kind: ProviderKind::VolcengineCoding,
+        extra_canonical_url_fingerprints: &[],
+        required_path_fragments: &CODING_ARK_REQUIRED_PATH_FRAGMENTS,
+        forbidden_path_fragments: &CODING_ARK_FORBIDDEN_PATH_FRAGMENTS,
+        forbidden_path_exceptions: &CODING_ARK_FORBIDDEN_PATH_EXCEPTIONS,
+        route_expectation: "the dedicated Volcengine Coding Plan path under `/api/coding/v3`",
+        path_validation_hint: "volcengine_coding must use the dedicated Volcengine Coding Plan path under `/api/coding/v3`; do not point it at the Anthropic-compatible `/api/coding` or generic `/api/v3` Ark endpoints because that bypasses Coding Plan quota and can incur standard charges",
+    },
+];
+
+fn find_cross_routed_validation_profile(
+    current_kind: ProviderKind,
+    source_value: &str,
+    allow_host_only_base_match: bool,
+) -> Option<(&'static ProviderUrlValidationProfile, &'static str)> {
+    let mut best_match: Option<(&'static ProviderUrlValidationProfile, &'static str)> = None;
+
+    for profile in &PROVIDER_URL_VALIDATION_PROFILES {
+        let candidate_kind = profile.kind;
+        if candidate_kind == current_kind {
+            continue;
+        }
+
+        let matching_fingerprint =
+            profile.matching_canonical_fingerprint(source_value, allow_host_only_base_match);
+        if let Some(fingerprint) = matching_fingerprint {
+            let mut should_replace = true;
+            if let Some((_, best_fingerprint)) = best_match {
+                should_replace = fingerprint.len() > best_fingerprint.len();
+            }
+            if should_replace {
+                best_match = Some((profile, fingerprint));
+            }
+        }
+    }
+
+    best_match
+}
+
+fn matches_url_validation_fingerprint(value: &str, fingerprint: &str) -> bool {
+    let normalized_value = normalize_url_validation_value(value);
+    let normalized_fingerprint = normalize_url_validation_value(fingerprint);
+
+    matches_region_endpoint_url(normalized_value.as_str(), normalized_fingerprint.as_str())
+}
+
+fn matches_base_url_validation_fingerprint(
+    value: &str,
+    fingerprint: &str,
+    allow_host_only_base_match: bool,
+) -> bool {
+    let fingerprint_has_non_root_path = url_has_non_root_path(fingerprint);
+    if fingerprint_has_non_root_path {
+        return matches_url_validation_fingerprint(value, fingerprint);
+    }
+    if !allow_host_only_base_match {
+        return false;
+    }
+    is_same_base_url(value, fingerprint)
+}
+
+fn url_contains_validation_fragment(value: &str, fragment: &str) -> bool {
+    let normalized_value = normalize_url_validation_value(value);
+    let normalized_fragment = normalize_url_validation_value(fragment);
+
+    normalized_value.contains(normalized_fragment.as_str())
+}
+
+fn url_has_non_root_path(value: &str) -> bool {
+    let trimmed = value.trim();
+    let after_scheme = trimmed
+        .split_once("://")
+        .map(|(_, remainder)| remainder)
+        .unwrap_or(trimmed);
+    let Some((_, path_with_query)) = after_scheme.split_once('/') else {
+        return false;
+    };
+    let raw_path = format!("/{path_with_query}");
+    let path = raw_path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(raw_path.as_str());
+    let normalized_path = path.trim_end_matches('/');
+
+    !normalized_path.is_empty()
+}
+
+fn normalize_url_validation_value(value: &str) -> String {
+    let trimmed = value.trim();
+    let trimmed = trimmed.trim_end_matches('/');
+
+    trimmed.to_ascii_lowercase()
+}
+
+fn provider_descriptor_aliases(profile: &ProviderProfile) -> Vec<String> {
+    let mut aliases = Vec::new();
+
+    for alias in profile.aliases {
+        let alias = (*alias).to_owned();
+        aliases.push(alias);
+    }
+
+    aliases
+}
+
+fn provider_descriptor_headers(profile: &ProviderProfile) -> Vec<ProviderDescriptorHeader> {
+    let mut headers = Vec::new();
+
+    for (name, value) in profile.default_headers {
+        let header = ProviderDescriptorHeader {
+            name: (*name).to_owned(),
+            value: (*value).to_owned(),
+        };
+        headers.push(header);
+    }
+
+    headers
+}
+
+fn provider_descriptor_env_aliases(raw_aliases: &[&str]) -> Vec<String> {
+    let mut aliases = Vec::new();
+
+    for raw_alias in raw_aliases {
+        let alias = (*raw_alias).to_owned();
+        aliases.push(alias);
+    }
+
+    aliases
+}
+
+fn build_provider_descriptor_feature(
+    feature_support: &ProviderFeatureSupportFacts,
+) -> ProviderDescriptorFeature {
+    let family = feature_support.family.as_str().to_owned();
+    let gate_name = feature_support.gate_name.to_owned();
+    let enabled_in_build = feature_support.enabled_in_build;
+    let disabled_message = feature_support.disabled_message.clone();
+
+    ProviderDescriptorFeature {
+        family,
+        gate_name,
+        enabled_in_build,
+        disabled_message,
+    }
+}
+
+fn provider_descriptor_region_variants(
+    region_endpoint_info: Option<ProviderRegionEndpointInfo>,
+) -> Vec<ProviderDescriptorRegionVariant> {
+    let mut variants = Vec::new();
+
+    let Some(region_endpoint_info) = region_endpoint_info else {
+        return variants;
+    };
+
+    for variant in region_endpoint_info.variants {
+        let descriptor_variant = ProviderDescriptorRegionVariant {
+            label: variant.label.to_owned(),
+            base_url: variant.base_url.to_owned(),
+        };
+        variants.push(descriptor_variant);
+    }
+
+    variants
 }
 
 pub fn parse_provider_kind_id(raw: &str) -> Option<ProviderKind> {
@@ -2344,7 +3268,7 @@ pub fn parse_provider_kind_id(raw: &str) -> Option<ProviderKind> {
     None
 }
 
-const PROVIDER_KIND_ORDER: [ProviderKind; 40] = [
+const PROVIDER_KIND_ORDER: [ProviderKind; 45] = [
     ProviderKind::Anthropic,
     ProviderKind::BailianCoding,
     ProviderKind::Bedrock,
@@ -2357,6 +3281,7 @@ const PROVIDER_KIND_ORDER: [ProviderKind; 40] = [
     ProviderKind::Deepseek,
     ProviderKind::Fireworks,
     ProviderKind::Gemini,
+    ProviderKind::GithubCopilot,
     ProviderKind::Groq,
     ProviderKind::Kimi,
     ProviderKind::KimiCoding,
@@ -2368,6 +3293,8 @@ const PROVIDER_KIND_ORDER: [ProviderKind; 40] = [
     ProviderKind::Nvidia,
     ProviderKind::Ollama,
     ProviderKind::Openai,
+    ProviderKind::OpencodeGo,
+    ProviderKind::OpencodeZen,
     ProviderKind::Openrouter,
     ProviderKind::Perplexity,
     ProviderKind::Qianfan,
@@ -2376,6 +3303,7 @@ const PROVIDER_KIND_ORDER: [ProviderKind; 40] = [
     ProviderKind::Sglang,
     ProviderKind::Siliconflow,
     ProviderKind::Stepfun,
+    ProviderKind::StepPlan,
     ProviderKind::Together,
     ProviderKind::Venice,
     ProviderKind::VercelAiGateway,
@@ -2383,11 +3311,12 @@ const PROVIDER_KIND_ORDER: [ProviderKind; 40] = [
     ProviderKind::Volcengine,
     ProviderKind::VolcengineCoding,
     ProviderKind::Xai,
+    ProviderKind::Xiaomi,
     ProviderKind::Zai,
     ProviderKind::Zhipu,
 ];
 
-const PROVIDER_PROFILES: [ProviderProfile; 40] = [
+const PROVIDER_PROFILES: [ProviderProfile; 45] = [
     ProviderProfile {
         kind: ProviderKind::Anthropic,
         id: "anthropic",
@@ -2397,7 +3326,7 @@ const PROVIDER_PROFILES: [ProviderProfile; 40] = [
         models_path: Some("/v1/models"),
         protocol_family: ProviderProtocolFamily::AnthropicMessages,
         auth_scheme: ProviderAuthScheme::XApiKey,
-        default_headers: &[("anthropic-version", "2023-06-01")],
+        default_headers: &ANTHROPIC_DEFAULT_HEADERS,
         default_api_key_env: Some("ANTHROPIC_API_KEY"),
         api_key_env_aliases: &[],
         default_user_agent: None,
@@ -2603,6 +3532,23 @@ const PROVIDER_PROFILES: [ProviderProfile; 40] = [
         feature_family: ProviderFeatureFamily::OpenAiCompatible,
     },
     ProviderProfile {
+        kind: ProviderKind::GithubCopilot,
+        id: "github-copilot",
+        aliases: &["github_copilot", "copilot"],
+        base_url: "https://api.githubcopilot.com",
+        chat_completions_path: "/chat/completions",
+        models_path: None,
+        protocol_family: ProviderProtocolFamily::OpenAiChatCompletions,
+        auth_scheme: ProviderAuthScheme::Bearer,
+        default_headers: &GITHUB_COPILOT_DEFAULT_HEADERS,
+        default_api_key_env: None,
+        api_key_env_aliases: &[],
+        default_user_agent: Some(GITHUB_COPILOT_USER_AGENT),
+        default_oauth_access_token_env: Some(GITHUB_COPILOT_OAUTH_TOKEN_ENV),
+        oauth_access_token_env_aliases: &[],
+        feature_family: ProviderFeatureFamily::OpenAiCompatible,
+    },
+    ProviderProfile {
         kind: ProviderKind::Groq,
         id: "groq",
         aliases: &["groq_compatible"],
@@ -2795,6 +3741,40 @@ const PROVIDER_PROFILES: [ProviderProfile; 40] = [
         feature_family: ProviderFeatureFamily::OpenAiCompatible,
     },
     ProviderProfile {
+        kind: ProviderKind::OpencodeGo,
+        id: "opencode_go",
+        aliases: &["opencode-go"],
+        base_url: OPENCODE_GO_BASE_URL,
+        chat_completions_path: "/chat/completions",
+        models_path: Some("/models"),
+        protocol_family: ProviderProtocolFamily::OpenAiChatCompletions,
+        auth_scheme: ProviderAuthScheme::Bearer,
+        default_headers: &[],
+        default_api_key_env: Some(OPENCODE_API_KEY_ENV),
+        api_key_env_aliases: &[],
+        default_user_agent: None,
+        default_oauth_access_token_env: None,
+        oauth_access_token_env_aliases: &[],
+        feature_family: ProviderFeatureFamily::OpenAiCompatible,
+    },
+    ProviderProfile {
+        kind: ProviderKind::OpencodeZen,
+        id: "opencode_zen",
+        aliases: &["opencode", "opencode-zen"],
+        base_url: OPENCODE_ZEN_BASE_URL,
+        chat_completions_path: "/chat/completions",
+        models_path: Some("/models"),
+        protocol_family: ProviderProtocolFamily::OpenAiChatCompletions,
+        auth_scheme: ProviderAuthScheme::Bearer,
+        default_headers: &[],
+        default_api_key_env: Some(OPENCODE_API_KEY_ENV),
+        api_key_env_aliases: &[],
+        default_user_agent: None,
+        default_oauth_access_token_env: None,
+        oauth_access_token_env_aliases: &[],
+        feature_family: ProviderFeatureFamily::OpenAiCompatible,
+    },
+    ProviderProfile {
         kind: ProviderKind::Openrouter,
         id: "openrouter",
         aliases: &["openrouter_compatible"],
@@ -2931,6 +3911,23 @@ const PROVIDER_PROFILES: [ProviderProfile; 40] = [
         feature_family: ProviderFeatureFamily::OpenAiCompatible,
     },
     ProviderProfile {
+        kind: ProviderKind::StepPlan,
+        id: "step_plan",
+        aliases: &["stepfun_step_plan"],
+        base_url: "https://api.stepfun.com",
+        chat_completions_path: "/step_plan/v1/chat/completions",
+        models_path: Some("/step_plan/v1/models"),
+        protocol_family: ProviderProtocolFamily::OpenAiChatCompletions,
+        auth_scheme: ProviderAuthScheme::Bearer,
+        default_headers: &[],
+        default_api_key_env: Some("STEP_API_KEY"),
+        api_key_env_aliases: &[],
+        default_user_agent: None,
+        default_oauth_access_token_env: None,
+        oauth_access_token_env_aliases: &[],
+        feature_family: ProviderFeatureFamily::OpenAiCompatible,
+    },
+    ProviderProfile {
         kind: ProviderKind::Together,
         id: "together",
         aliases: &["together_compatible", "together_ai", "together-ai"],
@@ -3049,6 +4046,29 @@ const PROVIDER_PROFILES: [ProviderProfile; 40] = [
         default_headers: &[],
         default_api_key_env: Some("XAI_API_KEY"),
         api_key_env_aliases: &[],
+        default_user_agent: None,
+        default_oauth_access_token_env: None,
+        oauth_access_token_env_aliases: &[],
+        feature_family: ProviderFeatureFamily::OpenAiCompatible,
+    },
+    ProviderProfile {
+        kind: ProviderKind::Xiaomi,
+        id: "xiaomi",
+        aliases: &[
+            "xiaomi_compatible",
+            "xiaomi_mimo",
+            "xiaomi-mimo",
+            "mimo",
+            "mimo_compatible",
+        ],
+        base_url: "https://api.xiaomimimo.com",
+        chat_completions_path: "/v1/chat/completions",
+        models_path: Some("/v1/models"),
+        protocol_family: ProviderProtocolFamily::OpenAiChatCompletions,
+        auth_scheme: ProviderAuthScheme::Bearer,
+        default_headers: &[],
+        default_api_key_env: Some("XIAOMI_API_KEY"),
+        api_key_env_aliases: &["MIMO_API_KEY", "XIAOMIMIMO_API_KEY"],
         default_user_agent: None,
         default_oauth_access_token_env: None,
         oauth_access_token_env_aliases: &[],
@@ -3238,11 +4258,12 @@ fn push_unique_env_key(keys: &mut Vec<String>, maybe_key: Option<&str>) {
     keys.push(trimmed.to_owned());
 }
 
-fn push_inline_env_reference(keys: &mut Vec<String>, maybe_secret: Option<&str>) {
-    let Some(secret) = non_empty(maybe_secret) else {
+fn push_secret_ref_env_name(keys: &mut Vec<String>, maybe_secret: Option<&SecretRef>) {
+    let env_name = secret_ref_env_name(maybe_secret);
+    let Some(env_name) = env_name else {
         return;
     };
-    push_unique_env_key(keys, parse_explicit_env_reference(secret));
+    push_unique_env_key(keys, Some(env_name.as_str()));
 }
 
 fn join_guidance_options(options: &[String]) -> String {
@@ -3289,28 +4310,52 @@ fn clamp_usize_at_least_one(value: usize, max: usize) -> usize {
     value.clamp(1, max)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum InlineSecretResolution {
-    Resolved(String),
-    ExplicitEnvMissing,
-    NotInlineEnvReference,
+fn normalize_secret_ref_for_persistence(
+    secret_ref: Option<&SecretRef>,
+    env_name: Option<&str>,
+) -> Option<SecretRef> {
+    let secret_ref = secret_ref.filter(|value| value.is_configured());
+    let explicit_secret_env = secret_ref_env_name(secret_ref);
+    let Some(explicit_secret_env) = explicit_secret_env.as_deref() else {
+        return secret_ref.cloned();
+    };
+
+    let configured_env_name = non_empty(env_name);
+    match configured_env_name {
+        None => None,
+        Some(configured_env_name) if configured_env_name == explicit_secret_env => None,
+        Some(_) => secret_ref.cloned(),
+    }
 }
 
-fn resolve_inline_secret(raw: &str) -> InlineSecretResolution {
-    let Some(env_key) = parse_explicit_env_reference(raw) else {
-        return InlineSecretResolution::NotInlineEnvReference;
-    };
-    match env::var(env_key) {
-        Ok(value) => {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                InlineSecretResolution::ExplicitEnvMissing
-            } else {
-                InlineSecretResolution::Resolved(trimmed.to_owned())
-            }
-        }
-        Err(_) => InlineSecretResolution::ExplicitEnvMissing,
+fn canonicalize_secret_env_reference_for_persistence(
+    secret_ref: &mut Option<SecretRef>,
+    env_name: &mut Option<String>,
+) {
+    if let Some(explicit_env_name) = secret_ref_env_name(secret_ref.as_ref()) {
+        *secret_ref = Some(SecretRef::Env {
+            env: explicit_env_name,
+        });
+        *env_name = None;
+        return;
     }
+
+    if secret_ref.as_ref().is_some_and(SecretRef::is_configured) {
+        *env_name = None;
+        return;
+    }
+
+    let normalized_env_name = env_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    if let Some(normalized_env_name) = normalized_env_name {
+        *secret_ref = Some(SecretRef::Env {
+            env: normalized_env_name,
+        });
+    }
+    *env_name = None;
 }
 
 fn split_secret_candidates(raw: &str) -> Vec<String> {
@@ -3439,13 +4484,639 @@ fn derive_responses_path(chat_path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Value, json};
+    use std::collections::{BTreeMap, BTreeSet};
+
     use crate::test_support::ScopedEnv;
+    use loongclaw_contracts::SecretRef;
+
+    fn encode_provider_descriptor(descriptor: &ProviderDescriptorDocument) -> Value {
+        serde_json::to_value(descriptor).expect("serialize provider descriptor document")
+    }
 
     #[test]
     fn provider_profile_lookup_matches_kind() {
         for kind in ProviderKind::all_sorted() {
             assert_eq!(kind.profile().kind, *kind);
         }
+    }
+
+    #[test]
+    fn provider_profile_aliases_are_unique_and_do_not_shadow_ids() {
+        let mut provider_ids = BTreeSet::new();
+        for kind in ProviderKind::all_sorted() {
+            let profile = kind.profile();
+            let provider_id = profile.id;
+            let inserted = provider_ids.insert(provider_id);
+            assert!(inserted, "duplicate provider id detected: {provider_id}");
+        }
+
+        let mut alias_owners = BTreeMap::new();
+        for kind in ProviderKind::all_sorted() {
+            let profile = kind.profile();
+            let provider_id = profile.id;
+            for alias in profile.aliases {
+                let normalized_alias = alias.trim();
+                assert!(
+                    !normalized_alias.is_empty(),
+                    "provider `{provider_id}` contains an empty alias"
+                );
+                assert_ne!(
+                    normalized_alias, provider_id,
+                    "provider `{provider_id}` repeats its canonical id as an alias"
+                );
+                assert!(
+                    !provider_ids.contains(normalized_alias),
+                    "provider alias `{normalized_alias}` collides with a canonical provider id"
+                );
+
+                let previous_owner = alias_owners.insert(normalized_alias.to_owned(), provider_id);
+                assert!(
+                    previous_owner.is_none(),
+                    "provider alias `{normalized_alias}` is shared by `{}` and `{provider_id}`",
+                    previous_owner.unwrap_or_default()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn provider_profile_aliases_round_trip_through_provider_kind_deserialization() {
+        for kind in ProviderKind::all_sorted() {
+            let profile = kind.profile();
+            let canonical_id = format!("\"{}\"", profile.id);
+            let parsed_canonical = serde_json::from_str::<ProviderKind>(canonical_id.as_str())
+                .expect("canonical provider id should deserialize");
+            assert_eq!(
+                parsed_canonical, *kind,
+                "canonical provider id should deserialize to its matching provider kind"
+            );
+
+            for alias in profile.aliases {
+                let raw_alias = format!("\"{alias}\"");
+                let parsed_alias = serde_json::from_str::<ProviderKind>(raw_alias.as_str())
+                    .expect("provider alias should deserialize");
+                assert_eq!(
+                    parsed_alias, *kind,
+                    "provider alias `{alias}` should deserialize to the same provider kind as parse_provider_kind_id"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn provider_kind_serializes_github_copilot_using_canonical_hyphenated_id() {
+        let raw = serde_json::to_string(&ProviderKind::GithubCopilot)
+            .expect("provider kind should serialize");
+
+        assert_eq!(raw, "\"github-copilot\"");
+    }
+
+    #[test]
+    fn provider_feature_family_gate_messages_are_stable() {
+        let anthropic_message = ProviderFeatureFamily::Anthropic.disabled_message();
+        let bedrock_message = ProviderFeatureFamily::Bedrock.disabled_message();
+        let volcengine_message = ProviderFeatureFamily::Volcengine.disabled_message();
+        let openai_message = ProviderFeatureFamily::OpenAiCompatible.disabled_message();
+
+        assert_eq!(
+            anthropic_message,
+            "anthropic provider family is disabled (enable feature `provider-anthropic`)"
+        );
+        assert_eq!(
+            bedrock_message,
+            "bedrock provider family is disabled (enable feature `provider-bedrock`)"
+        );
+        assert_eq!(
+            volcengine_message,
+            "volcengine provider family is disabled (enable feature `provider-volcengine`)"
+        );
+        assert_eq!(
+            openai_message,
+            "openai-compatible provider family is disabled (enable feature `provider-openai`)"
+        );
+    }
+
+    #[test]
+    fn provider_profile_static_auth_hints_are_stable() {
+        let byteplus_hint = ProviderKind::ByteplusCoding
+            .profile()
+            .auth_guidance_hint()
+            .expect("byteplus coding should expose auth guidance");
+        let volcengine_hint = ProviderKind::Volcengine
+            .profile()
+            .auth_guidance_hint()
+            .expect("volcengine should expose auth guidance");
+        let bedrock_hint = ProviderKind::Bedrock
+            .profile()
+            .alternative_auth_configuration_hint()
+            .expect("bedrock should expose a SigV4 fallback hint");
+        let custom_hint = ProviderKind::Custom
+            .profile()
+            .alternative_auth_configuration_hint()
+            .expect("custom provider should expose header guidance");
+
+        assert!(byteplus_hint.contains("BytePlus"));
+        assert!(byteplus_hint.contains("BYTEPLUS_API_KEY"));
+        assert!(byteplus_hint.contains("Authorization: Bearer <BYTEPLUS_API_KEY>"));
+
+        assert!(volcengine_hint.contains("Volcengine"));
+        assert!(volcengine_hint.contains("ARK_API_KEY"));
+        assert!(volcengine_hint.contains("AK/SK request signing is not used"));
+
+        assert!(bedrock_hint.contains("AWS_ACCESS_KEY_ID"));
+        assert!(bedrock_hint.contains("AWS_SECRET_ACCESS_KEY"));
+        assert!(bedrock_hint.contains("BEDROCK_AWS_REGION"));
+        assert!(bedrock_hint.contains("AWS_REGION"));
+
+        assert!(custom_hint.contains("Authorization"));
+        assert!(custom_hint.contains("X-API-Key"));
+        assert!(custom_hint.contains("provider.headers"));
+    }
+
+    #[test]
+    fn provider_configuration_hint_prefers_canonical_cross_routing_guidance() {
+        let cases = [
+            (
+                ProviderKind::Byteplus,
+                "https://ark.cn-beijing.volces.com/api/coding/v3",
+                "kind = \"volcengine_coding\"",
+            ),
+            (
+                ProviderKind::ByteplusCoding,
+                "https://ark.cn-beijing.volces.com",
+                "kind = \"volcengine\"",
+            ),
+        ];
+
+        for (kind, base_url, expected_kind_hint) in cases {
+            let provider = ProviderConfig {
+                kind,
+                base_url: base_url.to_owned(),
+                base_url_explicit: true,
+                ..ProviderConfig::default()
+            };
+            let hint = provider
+                .configuration_hint()
+                .expect("cross-routed provider configs should surface a hint");
+
+            assert!(
+                hint.contains(expected_kind_hint),
+                "expected cross-routing hint for {kind:?} with {base_url}: {hint}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_configuration_hint_requires_coding_path_even_for_proxy_hosts() {
+        let cases = [ProviderKind::ByteplusCoding, ProviderKind::VolcengineCoding];
+
+        for kind in cases {
+            let provider = ProviderConfig {
+                kind,
+                base_url: "https://proxy.example.com/openai/v1".to_owned(),
+                base_url_explicit: true,
+                ..ProviderConfig::default()
+            };
+            let hint = provider
+                .configuration_hint()
+                .expect("coding providers should reject proxy urls that drop the coding path");
+
+            assert!(
+                hint.contains("/api/coding/v3"),
+                "expected coding-path guidance for {kind:?}: {hint}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_configuration_hint_rejects_non_coding_profiles_on_coding_proxy_paths() {
+        let cases = [
+            (ProviderKind::Byteplus, "kind = \"byteplus_coding\""),
+            (ProviderKind::Volcengine, "kind = \"volcengine_coding\""),
+        ];
+
+        for (kind, expected_kind_hint) in cases {
+            let provider = ProviderConfig {
+                kind,
+                base_url: "https://proxy.example.com/api/coding/v3".to_owned(),
+                base_url_explicit: true,
+                ..ProviderConfig::default()
+            };
+            let hint = provider
+                .configuration_hint()
+                .expect("non-coding profiles should reject coding proxy paths");
+
+            assert!(
+                hint.contains(expected_kind_hint),
+                "expected non-coding guidance for {kind:?}: {hint}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_configuration_hint_allows_proxy_coding_routes_that_keep_the_required_path() {
+        let cases = [ProviderKind::ByteplusCoding, ProviderKind::VolcengineCoding];
+
+        for kind in cases {
+            let provider = ProviderConfig {
+                kind,
+                base_url: "https://proxy.example.com/api/coding/v3".to_owned(),
+                base_url_explicit: true,
+                ..ProviderConfig::default()
+            };
+            let hint = provider.configuration_hint();
+
+            assert!(
+                hint.is_none(),
+                "proxy coding routes should stay valid for {kind:?}: {hint:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_configuration_hint_checks_explicit_endpoints_before_current_base_url() {
+        let provider = ProviderConfig {
+            kind: ProviderKind::ByteplusCoding,
+            base_url: "https://ark.ap-southeast.bytepluses.com/api/coding/v3".to_owned(),
+            base_url_explicit: true,
+            endpoint: Some("https://ark.cn-beijing.volces.com/api/v3/chat/completions".to_owned()),
+            endpoint_explicit: true,
+            ..ProviderConfig::default()
+        };
+        let hint = provider
+            .configuration_hint()
+            .expect("explicit cross-routed endpoints should surface a hint");
+
+        assert!(hint.contains("kind = \"volcengine\""));
+    }
+
+    #[test]
+    fn provider_configuration_hint_requires_coding_path_for_explicit_endpoint_overrides() {
+        let cases = [ProviderKind::ByteplusCoding, ProviderKind::VolcengineCoding];
+
+        for kind in cases {
+            let provider = ProviderConfig {
+                kind,
+                endpoint: Some("https://proxy.example.com/openai/v1/chat/completions".to_owned()),
+                endpoint_explicit: true,
+                ..ProviderConfig::default()
+            };
+            let hint = provider
+                .configuration_hint()
+                .expect("explicit endpoint overrides should keep the coding path");
+
+            assert!(
+                hint.contains("/api/coding/v3"),
+                "expected coding-path guidance for {kind:?}: {hint}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_configuration_hint_requires_coding_path_for_explicit_models_endpoints() {
+        let cases = [ProviderKind::ByteplusCoding, ProviderKind::VolcengineCoding];
+
+        for kind in cases {
+            let provider = ProviderConfig {
+                kind,
+                models_endpoint: Some("https://proxy.example.com/openai/v1/models".to_owned()),
+                models_endpoint_explicit: true,
+                ..ProviderConfig::default()
+            };
+            let hint = provider
+                .configuration_hint()
+                .expect("explicit models endpoints should keep the coding path");
+
+            assert!(
+                hint.contains("/api/coding/v3"),
+                "expected coding-path guidance for {kind:?}: {hint}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_configuration_hint_ignores_non_canonical_host_only_proxy_paths() {
+        let provider = ProviderConfig {
+            kind: ProviderKind::Byteplus,
+            base_url: "https://ark.cn-beijing.volces.com/custom/proxy".to_owned(),
+            base_url_explicit: true,
+            ..ProviderConfig::default()
+        };
+        let hint = provider.configuration_hint();
+
+        assert!(
+            hint.is_none(),
+            "non-canonical host-only proxy paths should not claim a canonical cross-route: {hint:?}"
+        );
+    }
+
+    #[test]
+    fn provider_feature_support_facts_are_stable() {
+        let facts = ProviderFeatureFamily::Volcengine.support_facts();
+
+        assert_eq!(facts.family, ProviderFeatureFamily::Volcengine);
+        assert_eq!(facts.gate_name, "provider-volcengine");
+        assert_eq!(
+            facts.enabled_in_build,
+            ProviderFeatureFamily::Volcengine.is_enabled_in_build()
+        );
+        assert_eq!(
+            facts.disabled_message,
+            "volcengine provider family is disabled (enable feature `provider-volcengine`)"
+        );
+    }
+
+    #[test]
+    fn provider_support_facts_preserve_auth_guidance_and_missing_auth_message() {
+        let provider = ProviderConfig {
+            kind: ProviderKind::ByteplusCoding,
+            ..ProviderConfig::default()
+        };
+
+        let support_facts = provider.support_facts();
+        let auth_support = support_facts.auth;
+        let guidance_hint = auth_support
+            .guidance_hint
+            .expect("byteplus coding should expose auth guidance");
+
+        assert!(auth_support.requires_explicit_configuration);
+        assert!(
+            auth_support
+                .hint_env_names
+                .contains(&"BYTEPLUS_API_KEY".to_owned())
+        );
+        assert!(guidance_hint.contains("BytePlus"));
+        assert!(guidance_hint.contains("BYTEPLUS_API_KEY"));
+        assert!(guidance_hint.contains("Authorization: Bearer <BYTEPLUS_API_KEY>"));
+        assert!(
+            auth_support
+                .missing_configuration_message
+                .contains("BYTEPLUS_API_KEY")
+        );
+        assert!(
+            auth_support
+                .missing_configuration_message
+                .contains("BytePlus")
+        );
+    }
+
+    #[test]
+    fn auth_hint_env_names_respect_explicit_api_key_env_binding_precedence() {
+        let provider = ProviderConfig {
+            kind: ProviderKind::Openai,
+            api_key: Some(SecretRef::Env {
+                env: "TEAM_OPENAI_KEY".to_owned(),
+            }),
+            ..ProviderConfig::default()
+        };
+
+        let env_names = provider.auth_hint_env_names();
+
+        assert_eq!(env_names, vec!["TEAM_OPENAI_KEY".to_owned()]);
+    }
+
+    #[test]
+    fn auth_hint_env_names_keep_api_key_fallback_after_explicit_oauth_env_binding() {
+        let provider = ProviderConfig {
+            kind: ProviderKind::Openai,
+            oauth_access_token: Some(SecretRef::Env {
+                env: "TEAM_OPENAI_OAUTH".to_owned(),
+            }),
+            ..ProviderConfig::default()
+        };
+
+        let env_names = provider.auth_hint_env_names();
+
+        assert_eq!(
+            env_names,
+            vec!["TEAM_OPENAI_OAUTH".to_owned(), "OPENAI_API_KEY".to_owned(),]
+        );
+    }
+
+    #[test]
+    fn provider_support_facts_preserve_region_endpoint_hints() {
+        let provider = ProviderConfig {
+            kind: ProviderKind::Minimax,
+            ..ProviderConfig::default()
+        };
+
+        let support_facts = provider.support_facts();
+        let region_endpoint_support = support_facts.region_endpoint;
+        let note = region_endpoint_support
+            .note
+            .expect("minimax should expose a region endpoint note");
+        let catalog_failure_hint = region_endpoint_support
+            .catalog_failure_hint
+            .expect("minimax should expose a catalog failure hint");
+        let request_failure_hint = region_endpoint_support
+            .request_failure_hint
+            .expect("minimax should expose a request failure hint");
+
+        assert!(note.contains("MiniMax region endpoint"));
+        assert!(note.contains("https://api.minimaxi.com"));
+        assert!(note.contains("https://api.minimax.io"));
+        assert!(catalog_failure_hint.contains("https://api.minimaxi.com"));
+        assert!(catalog_failure_hint.contains("https://api.minimax.io"));
+        assert!(request_failure_hint.contains("https://api.minimaxi.com"));
+        assert!(request_failure_hint.contains("https://api.minimax.io"));
+    }
+
+    #[test]
+    fn step_plan_provider_support_facts_expose_region_endpoint_variants() {
+        let provider = ProviderConfig {
+            kind: ProviderKind::StepPlan,
+            ..ProviderConfig::default()
+        };
+
+        let support_facts = provider.support_facts();
+        let region_endpoint_support = support_facts.region_endpoint;
+        let note = region_endpoint_support
+            .note
+            .expect("step plan should expose a region endpoint note");
+        let catalog_failure_hint = region_endpoint_support
+            .catalog_failure_hint
+            .expect("step plan should expose a catalog failure hint");
+        let request_failure_hint = region_endpoint_support
+            .request_failure_hint
+            .expect("step plan should expose a request failure hint");
+
+        assert!(note.contains("Stepfun"));
+        assert!(note.contains("https://api.stepfun.com"));
+        assert!(note.contains("https://api.stepfun.ai"));
+        assert!(catalog_failure_hint.contains("https://api.stepfun.com"));
+        assert!(catalog_failure_hint.contains("https://api.stepfun.ai"));
+        assert!(request_failure_hint.contains("https://api.stepfun.com"));
+        assert!(request_failure_hint.contains("https://api.stepfun.ai"));
+    }
+
+    #[test]
+    fn provider_descriptor_document_preserves_x_api_key_contract_facts() {
+        let provider = ProviderConfig {
+            kind: ProviderKind::Anthropic,
+            ..ProviderConfig::default()
+        };
+
+        let descriptor = provider.descriptor_document();
+        let encoded = encode_provider_descriptor(&descriptor);
+        let hint_env_names = encoded["auth"]["hint_env_names"]
+            .as_array()
+            .expect("hint env names should be an array");
+
+        assert_eq!(
+            encoded["schema"]["version"],
+            json!(PROVIDER_DESCRIPTOR_SCHEMA_VERSION)
+        );
+        assert_eq!(encoded["schema"]["surface"], json!("provider_descriptor"));
+        assert_eq!(encoded["schema"]["purpose"], json!("internal_sdk_contract"));
+        assert_eq!(encoded["kind"], json!("anthropic"));
+        assert_eq!(encoded["display_name"], json!("Anthropic"));
+        assert_eq!(encoded["protocol_family"], json!("anthropic_messages"));
+        assert_eq!(encoded["feature"]["family"], json!("anthropic"));
+        assert_eq!(encoded["auth"]["scheme"], json!("x_api_key"));
+        assert_eq!(
+            encoded["auth"]["default_api_key_env"],
+            json!("ANTHROPIC_API_KEY")
+        );
+        assert_eq!(
+            encoded["auth"]["requires_explicit_configuration"],
+            json!(true)
+        );
+        assert!(
+            hint_env_names.contains(&json!("ANTHROPIC_API_KEY")),
+            "anthropic descriptor should surface the canonical x-api-key env hint"
+        );
+        assert_eq!(
+            encoded["default_headers"][0]["name"],
+            json!("anthropic-version")
+        );
+    }
+
+    #[test]
+    fn provider_descriptor_document_marks_auth_optional_profiles_without_required_envs() {
+        let provider = ProviderConfig {
+            kind: ProviderKind::Ollama,
+            ..ProviderConfig::default()
+        };
+
+        let descriptor = provider.descriptor_document();
+        let encoded = encode_provider_descriptor(&descriptor);
+
+        assert_eq!(encoded["kind"], json!("ollama"));
+        assert_eq!(encoded["auth"]["scheme"], json!("bearer"));
+        assert_eq!(encoded["auth"]["auth_optional"], json!(true));
+        assert_eq!(encoded["auth"]["model_probe_auth_optional"], json!(true));
+        assert_eq!(
+            encoded["auth"]["requires_explicit_configuration"],
+            json!(false)
+        );
+        assert_eq!(encoded["auth"]["hint_env_names"], json!([]));
+        assert_eq!(encoded["region_endpoint"]["variants"], json!([]));
+    }
+
+    #[test]
+    fn provider_descriptor_document_prefers_dynamic_configuration_hint() {
+        let provider = ProviderConfig {
+            kind: ProviderKind::Custom,
+            ..ProviderConfig::default()
+        };
+
+        let descriptor = provider.descriptor_document();
+        let encoded = encode_provider_descriptor(&descriptor);
+        let configuration_hint = encoded["configuration_hint"]
+            .as_str()
+            .expect("custom descriptor should expose a configuration hint");
+
+        assert!(configuration_hint.contains("tenant-scoped base_url configuration"));
+        assert!(configuration_hint.contains("current template"));
+        assert!(configuration_hint.contains("https://<openai-compatible-host>/v1"));
+    }
+
+    #[test]
+    fn provider_descriptor_document_preserves_region_endpoint_variants_and_hints() {
+        let provider = ProviderConfig {
+            kind: ProviderKind::Minimax,
+            ..ProviderConfig::default()
+        };
+
+        let descriptor = provider.descriptor_document();
+        let encoded = encode_provider_descriptor(&descriptor);
+        let note = encoded["region_endpoint"]["note"]
+            .as_str()
+            .expect("minimax descriptor should expose a region note");
+        let catalog_failure_hint = encoded["region_endpoint"]["catalog_failure_hint"]
+            .as_str()
+            .expect("minimax descriptor should expose a catalog failure hint");
+        let request_failure_hint = encoded["region_endpoint"]["request_failure_hint"]
+            .as_str()
+            .expect("minimax descriptor should expose a request failure hint");
+
+        assert_eq!(encoded["region_endpoint"]["family_label"], json!("MiniMax"));
+        assert_eq!(
+            encoded["region_endpoint"]["variants"][0]["label"],
+            json!("CN")
+        );
+        assert_eq!(
+            encoded["region_endpoint"]["variants"][0]["base_url"],
+            json!("https://api.minimaxi.com")
+        );
+        assert_eq!(
+            encoded["region_endpoint"]["variants"][1]["label"],
+            json!("Global")
+        );
+        assert_eq!(
+            encoded["region_endpoint"]["variants"][1]["base_url"],
+            json!("https://api.minimax.io")
+        );
+        assert!(note.contains("MiniMax region endpoint"));
+        assert!(catalog_failure_hint.contains("https://api.minimaxi.com"));
+        assert!(catalog_failure_hint.contains("https://api.minimax.io"));
+        assert!(request_failure_hint.contains("https://api.minimaxi.com"));
+        assert!(request_failure_hint.contains("https://api.minimax.io"));
+    }
+
+    #[test]
+    fn step_plan_descriptor_document_preserves_region_endpoint_variants_and_hints() {
+        let provider = ProviderConfig {
+            kind: ProviderKind::StepPlan,
+            ..ProviderConfig::default()
+        };
+
+        let descriptor = provider.descriptor_document();
+        let encoded = encode_provider_descriptor(&descriptor);
+        let note = encoded["region_endpoint"]["note"]
+            .as_str()
+            .expect("step plan descriptor should expose a region note");
+        let catalog_failure_hint = encoded["region_endpoint"]["catalog_failure_hint"]
+            .as_str()
+            .expect("step plan descriptor should expose a catalog failure hint");
+        let request_failure_hint = encoded["region_endpoint"]["request_failure_hint"]
+            .as_str()
+            .expect("step plan descriptor should expose a request failure hint");
+
+        assert_eq!(encoded["region_endpoint"]["family_label"], json!("Stepfun"));
+        assert_eq!(
+            encoded["region_endpoint"]["variants"][0]["label"],
+            json!("CN")
+        );
+        assert_eq!(
+            encoded["region_endpoint"]["variants"][0]["base_url"],
+            json!("https://api.stepfun.com")
+        );
+        assert_eq!(
+            encoded["region_endpoint"]["variants"][1]["label"],
+            json!("Global")
+        );
+        assert_eq!(
+            encoded["region_endpoint"]["variants"][1]["base_url"],
+            json!("https://api.stepfun.ai")
+        );
+        assert!(note.contains("https://api.stepfun.com"));
+        assert!(note.contains("https://api.stepfun.ai"));
+        assert!(catalog_failure_hint.contains("https://api.stepfun.com"));
+        assert!(catalog_failure_hint.contains("https://api.stepfun.ai"));
+        assert!(request_failure_hint.contains("https://api.stepfun.com"));
+        assert!(request_failure_hint.contains("https://api.stepfun.ai"));
     }
 
     #[test]
@@ -3471,7 +5142,7 @@ mod tests {
 
         let config = ProviderConfig {
             kind: ProviderKind::Openai,
-            api_key: Some("${OPENAI_API_KEY}".to_owned()),
+            api_key: Some(SecretRef::Inline("${OPENAI_API_KEY}".to_owned())),
             ..ProviderConfig::default()
         };
 
@@ -3485,6 +5156,114 @@ mod tests {
             config.authorization_header().as_deref(),
             Some("Bearer api-key-wins")
         );
+    }
+
+    #[test]
+    fn explicit_api_key_env_field_beats_default_oauth_fallback() {
+        let mut env = ScopedEnv::new();
+        env.set("OPENAI_API_KEY", "api-key-wins");
+        env.set("OPENAI_CODEX_OAUTH_TOKEN", "oauth-fallback-should-not-win");
+
+        let config: ProviderConfig = toml::from_str(
+            r#"
+kind = "openai"
+api_key_env = "OPENAI_API_KEY"
+"#,
+        )
+        .expect("deserialize provider config");
+
+        assert_eq!(config.oauth_access_token(), None);
+        assert_eq!(config.api_key().as_deref(), Some("api-key-wins"));
+        assert_eq!(
+            config.resolved_auth_secret().as_deref(),
+            Some("api-key-wins")
+        );
+        assert_eq!(
+            config.authorization_header().as_deref(),
+            Some("Bearer api-key-wins")
+        );
+    }
+
+    #[test]
+    fn normalized_for_persistence_canonicalizes_legacy_api_key_env_binding() {
+        let mut config = ProviderConfig::fresh_for_kind(ProviderKind::Openai);
+        config.set_api_key_env(Some("OPENAI_API_KEY".to_owned()));
+
+        let normalized = config.normalized_for_persistence();
+
+        assert_eq!(
+            normalized.api_key,
+            Some(SecretRef::Env {
+                env: "OPENAI_API_KEY".to_owned(),
+            })
+        );
+        assert_eq!(normalized.api_key_env, None);
+        assert_eq!(normalized.oauth_access_token, None);
+        assert_eq!(normalized.oauth_access_token_env, None);
+    }
+
+    #[test]
+    fn normalized_for_persistence_keeps_secret_ref_env_binding_canonical() {
+        let mut config = ProviderConfig::fresh_for_kind(ProviderKind::Openai);
+        config.api_key = Some(SecretRef::Env {
+            env: "OPENAI_API_KEY".to_owned(),
+        });
+
+        let normalized = config.normalized_for_persistence();
+
+        assert_eq!(
+            normalized.api_key,
+            Some(SecretRef::Env {
+                env: "OPENAI_API_KEY".to_owned(),
+            })
+        );
+        assert_eq!(normalized.api_key_env, None);
+    }
+
+    #[test]
+    fn normalized_for_persistence_keeps_implicit_provider_auth_defaults_unset() {
+        let config = ProviderConfig::fresh_for_kind(ProviderKind::Openai);
+
+        let normalized = config.normalized_for_persistence();
+
+        assert_eq!(normalized.api_key, None);
+        assert_eq!(normalized.api_key_env, None);
+        assert_eq!(normalized.oauth_access_token, None);
+        assert_eq!(normalized.oauth_access_token_env, None);
+    }
+
+    #[test]
+    fn canonicalize_configured_auth_env_bindings_rewrites_inline_env_templates() {
+        let mut config = ProviderConfig::fresh_for_kind(ProviderKind::Openai);
+        config.set_api_key_env(Some("OPENAI_API_KEY".to_owned()));
+        config.api_key = Some(SecretRef::Inline("${OPENAI_API_KEY}".to_owned()));
+
+        config.canonicalize_configured_auth_env_bindings();
+
+        assert_eq!(
+            config.api_key,
+            Some(SecretRef::Env {
+                env: "OPENAI_API_KEY".to_owned(),
+            })
+        );
+        assert_eq!(config.api_key_env, None);
+    }
+
+    #[test]
+    fn canonicalize_configured_auth_env_bindings_treats_blank_inline_secret_as_absent() {
+        let mut config = ProviderConfig::fresh_for_kind(ProviderKind::Openai);
+        config.set_api_key_env(Some("OPENAI_API_KEY".to_owned()));
+        config.api_key = Some(SecretRef::Inline("   ".to_owned()));
+
+        config.canonicalize_configured_auth_env_bindings();
+
+        assert_eq!(
+            config.api_key,
+            Some(SecretRef::Env {
+                env: "OPENAI_API_KEY".to_owned(),
+            })
+        );
+        assert_eq!(config.api_key_env, None);
     }
 
     #[test]
@@ -3520,7 +5299,11 @@ mod tests {
         );
         assert_eq!(
             ProviderKind::Minimax.recommended_onboarding_model(),
-            Some("MiniMax-M2.5")
+            Some("MiniMax-M2.7")
+        );
+        assert_eq!(
+            ProviderKind::Xiaomi.recommended_onboarding_model(),
+            Some("mimo-v2-pro")
         );
         assert_eq!(
             ProviderKind::KimiCoding.recommended_onboarding_model(),

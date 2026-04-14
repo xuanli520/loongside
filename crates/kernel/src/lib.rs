@@ -26,12 +26,15 @@ pub use architecture::{
     ArchitecturePathReport,
 };
 pub use audit::{
-    AuditEvent, AuditEventKind, AuditSink, ExecutionPlane, FanoutAuditSink, InMemoryAuditSink,
-    JsonlAuditSink, NoopAuditSink, PlaneTier, probe_jsonl_audit_journal_runtime_ready,
+    AuditEvent, AuditEventKind, AuditRepairOutcome, AuditRepairReport, AuditSink,
+    AuditVerificationReport, ExecutionPlane, FanoutAuditSink, InMemoryAuditSink, JsonlAuditSink,
+    NoopAuditSink, PlaneTier, probe_jsonl_audit_journal_runtime_ready, repair_jsonl_audit_journal,
+    verify_jsonl_audit_journal,
 };
 pub use awareness::{CodebaseAwarenessConfig, CodebaseAwarenessEngine, CodebaseAwarenessSnapshot};
 pub use bootstrap::{
     BootstrapPolicy, BootstrapReport, BootstrapTask, BootstrapTaskStatus, PluginBootstrapExecutor,
+    plugin_bridge_is_high_risk_auto_apply,
 };
 pub use clock::{Clock, FixedClock, SystemClock};
 pub use connector::{
@@ -57,11 +60,20 @@ pub use memory::{
 };
 pub use pack::VerticalPackManifest;
 pub use plugin::{
-    PluginAbsorbReport, PluginDescriptor, PluginManifest, PluginScanReport, PluginScanner,
+    CURRENT_PLUGIN_HOST_API, CURRENT_PLUGIN_MANIFEST_API_VERSION, PACKAGE_MANIFEST_FILE_NAME,
+    PluginAbsorbReport, PluginCompatibility, PluginCompatibilityMode, PluginCompatibilityShim,
+    PluginContractDialect, PluginDescriptor, PluginDiagnosticCode, PluginDiagnosticFinding,
+    PluginDiagnosticPhase, PluginDiagnosticSeverity, PluginManifest, PluginScanReport,
+    PluginScanner, PluginSetup, PluginSetupMode, PluginSlotClaim, PluginSlotMode, PluginSourceKind,
+    PluginTrustTier, format_plugin_provenance_summary, plugin_provenance_summary_for_descriptor,
 };
 pub use plugin_ir::{
-    BridgeSupportMatrix, PluginActivationCandidate, PluginActivationPlan, PluginActivationStatus,
-    PluginBridgeKind, PluginIR, PluginRuntimeProfile, PluginTranslationReport, PluginTranslator,
+    BridgeSupportMatrix, PluginActivationCandidate, PluginActivationInventoryEntry,
+    PluginActivationPlan, PluginActivationStatus, PluginBridgeKind, PluginChannelBridgeContract,
+    PluginChannelBridgeReadiness, PluginCompatibilityShimSupport, PluginIR, PluginRuntimeProfile,
+    PluginRuntimeScaffoldDefaults, PluginSetupReadiness, PluginSetupReadinessContext,
+    PluginTranslationReport, PluginTranslator, evaluate_plugin_setup_requirements,
+    plugin_runtime_scaffold_defaults,
 };
 pub use policy::{PolicyContext, PolicyDecision, PolicyEngine, PolicyRequest, StaticPolicyEngine};
 pub use policy_ext::{PolicyExtension, PolicyExtensionChain, PolicyExtensionContext};
@@ -71,11 +83,20 @@ pub use runtime::{
 };
 pub use task_supervisor::TaskSupervisor;
 pub use tool::{
-    CoreToolAdapter, ToolCoreOutcome, ToolCoreRequest, ToolExtensionAdapter, ToolExtensionOutcome,
-    ToolExtensionRequest, ToolPlane, ToolTier,
+    CoreToolAdapter, ToolConcurrencyClass, ToolCoreOutcome, ToolCoreRequest, ToolExtensionAdapter,
+    ToolExtensionOutcome, ToolExtensionRequest, ToolPlane, ToolTier,
 };
 
 pub mod test_support;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[test]
+fn unknown_concurrency_class_requires_serial_execution() {
+    assert!(!ToolConcurrencyClass::ReadOnly.requires_serial_execution());
+    assert!(ToolConcurrencyClass::Mutating.requires_serial_execution());
+    assert!(ToolConcurrencyClass::Unknown.requires_serial_execution());
+    assert_eq!(ToolConcurrencyClass::Unknown.as_str(), "unknown");
+}

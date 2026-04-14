@@ -57,13 +57,13 @@ write_fixture_release_doc() {
 ## Artifacts
 | Asset | Size (bytes) | SHA256 | Download |
 |---|---:|---|---|
-| \`loongclaw-${tag}-x86_64-unknown-linux-gnu.tar.gz\` | 1 | \`deadbeef\` | [link](https://github.com/loongclaw-ai/loongclaw/releases/download/${tag}/linux.tar.gz) |
+| \`loong-${tag}-x86_64-unknown-linux-gnu.tar.gz\` | 1 | \`deadbeef\` | [link](https://github.com/eastreams/loong/releases/download/${tag}/linux.tar.gz) |
 
 ## Verification
 | Check | Result | Evidence |
 |---|---|---|
-| Release workflow completed successfully | PASS | [workflow run](https://github.com/loongclaw-ai/loongclaw/actions/runs/${workflow_run_id}) |
-| GitHub release is not draft | PASS | [release page](https://github.com/loongclaw-ai/loongclaw/releases/tag/${tag}) |
+| Release workflow completed successfully | PASS | [workflow run](https://github.com/eastreams/loong/actions/runs/${workflow_run_id}) |
+| GitHub release is not draft | PASS | [release page](https://github.com/eastreams/loong/releases/tag/${tag}) |
 
 ## Refactor Budget
 - Hotspot metric paid down: none
@@ -78,8 +78,8 @@ write_fixture_release_doc() {
 
 ## Detail Links
 - [Changelog entry](../../CHANGELOG.md)
-- [Release workflow run](https://github.com/loongclaw-ai/loongclaw/actions/runs/${workflow_run_id})
-- [GitHub release page](https://github.com/loongclaw-ai/loongclaw/releases/tag/${tag})
+- [Release workflow run](https://github.com/eastreams/loong/actions/runs/${workflow_run_id})
+- [GitHub release page](https://github.com/eastreams/loong/releases/tag/${tag})
 - [Release workflow definition](../../.github/workflows/release.yml)
 - Trace directory: \`${trace_path}\`
 - Local debug log: \`.docs/releases/${tag}-debug.md\`
@@ -91,15 +91,24 @@ make_fixture_repo() {
   fixture="$(mktemp -d)"
   mkdir -p \
     "$fixture/scripts" \
+    "$fixture/docs/design-docs" \
     "$fixture/docs/releases" \
+    "$fixture/docs/releases/support" \
+    "$fixture/crates/contracts/src" \
     "$fixture/.github/ISSUE_TEMPLATE" \
     "$fixture/.github/workflows"
 
   cp "$REPO_ROOT/scripts/check-docs.sh" "$fixture/scripts/check-docs.sh"
+  cp "$REPO_ROOT/scripts/check_governance_docs_consistency.sh" \
+    "$fixture/scripts/check_governance_docs_consistency.sh"
   cp "$REPO_ROOT/scripts/release_artifact_lib.sh" "$fixture/scripts/release_artifact_lib.sh"
   chmod +x "$fixture/scripts/check-docs.sh"
+  chmod +x "$fixture/scripts/check_governance_docs_consistency.sh"
   cp "$REPO_ROOT/docs/releases/README.md" "$fixture/docs/releases/README.md"
-  cp "$REPO_ROOT/docs/releases/TEMPLATE.md" "$fixture/docs/releases/TEMPLATE.md"
+  cp "$REPO_ROOT/docs/releases/support/README.md" "$fixture/docs/releases/support/README.md"
+  cp "$REPO_ROOT/docs/releases/support/TEMPLATE.md" "$fixture/docs/releases/support/TEMPLATE.md"
+  cp "$REPO_ROOT/crates/contracts/src/audit_types.rs" \
+    "$fixture/crates/contracts/src/audit_types.rs"
   cp "$REPO_ROOT/.github/ISSUE_TEMPLATE/config.yml" "$fixture/.github/ISSUE_TEMPLATE/config.yml"
   cp "$REPO_ROOT/.github/workflows/release.yml" "$fixture/.github/workflows/release.yml"
 
@@ -140,6 +149,50 @@ EOF
 EOF
   cp "$fixture/AGENTS.md" "$fixture/CLAUDE.md"
 
+  cat >"$fixture/docs/ROADMAP.md" <<'EOF'
+# Loong Roadmap
+
+- kernel-level request-policy gate for tool calls through `PolicyEngine::authorize(...)`
+  plus `PolicyExtensionChain`, with explicit deny/approval-required outcomes before
+  tool dispatch (Rule of Two)
+EOF
+
+  cat >"$fixture/docs/SECURITY.md" <<'EOF'
+# Security
+
+CapabilityToken → PolicyEngine.authorize(...) → PolicyExtensionChain → Execution → Audit
+
+- 10 event kinds with atomic sequencing
+EOF
+
+  cat >"$fixture/docs/QUALITY_SCORE.md" <<'EOF'
+# Quality Score
+
+| Domain | Grade | Last Reviewed | Gaps |
+|--------|-------|---------------|------|
+| Kernel Security (L1) | B+ | 2026-04-03 | Core tool paths now route through policy extensions; remaining gaps are non-uniform L1 coverage for connector/ACP/runtime-only analytics and explicit `Direct` compatibility lanes |
+| Observability (L4) | C+ | 2026-04-03 | Durable JSONL/fanout audit exists; remaining gaps are tamper-evident verification, query baseline, and richer export lanes |
+EOF
+
+  cat >"$fixture/docs/design-docs/index.md" <<'EOF'
+# Design Documents Index
+
+| ID | Decision | Implementation Status |
+|----|----------|---------------------|
+| D-003 | Append-only event log as single source of truth | Partial — audit events exist, JSONL/fanout retention exists, no tamper-evident verification or query baseline yet |
+EOF
+
+  cat >"$fixture/docs/design-docs/layered-kernel-design.md" <<'EOF'
+# Layered Kernel Design
+
+- Tool plane core/extension execution must route deterministic request-policy approval through the
+  kernel authorization stack before dispatch: token/capability validation in `PolicyEngine::authorize`
+  plus tool-specific tightening in `PolicyExtensionChain` (Rule of Two: model intent plus
+  deterministic policy decision).
+- The deprecated `PolicyEngine::check_tool_call` hook remains compatibility-only and must not be
+  treated as the live request-policy seam.
+EOF
+
   printf '%s\n' "$fixture"
 }
 
@@ -148,15 +201,24 @@ make_prerelease_fixture_repo() {
   fixture="$(mktemp -d)"
   mkdir -p \
     "$fixture/scripts" \
+    "$fixture/docs/design-docs" \
     "$fixture/docs/releases" \
+    "$fixture/docs/releases/support" \
+    "$fixture/crates/contracts/src" \
     "$fixture/.github/ISSUE_TEMPLATE" \
     "$fixture/.github/workflows"
 
   cp "$REPO_ROOT/scripts/check-docs.sh" "$fixture/scripts/check-docs.sh"
+  cp "$REPO_ROOT/scripts/check_governance_docs_consistency.sh" \
+    "$fixture/scripts/check_governance_docs_consistency.sh"
   cp "$REPO_ROOT/scripts/release_artifact_lib.sh" "$fixture/scripts/release_artifact_lib.sh"
   chmod +x "$fixture/scripts/check-docs.sh"
+  chmod +x "$fixture/scripts/check_governance_docs_consistency.sh"
   cp "$REPO_ROOT/docs/releases/README.md" "$fixture/docs/releases/README.md"
-  cp "$REPO_ROOT/docs/releases/TEMPLATE.md" "$fixture/docs/releases/TEMPLATE.md"
+  cp "$REPO_ROOT/docs/releases/support/README.md" "$fixture/docs/releases/support/README.md"
+  cp "$REPO_ROOT/docs/releases/support/TEMPLATE.md" "$fixture/docs/releases/support/TEMPLATE.md"
+  cp "$REPO_ROOT/crates/contracts/src/audit_types.rs" \
+    "$fixture/crates/contracts/src/audit_types.rs"
   cp "$REPO_ROOT/.github/ISSUE_TEMPLATE/config.yml" "$fixture/.github/ISSUE_TEMPLATE/config.yml"
   cp "$REPO_ROOT/.github/workflows/release.yml" "$fixture/.github/workflows/release.yml"
 
@@ -190,13 +252,13 @@ EOF
 ## Artifacts
 | Asset | Size (bytes) | SHA256 | Download |
 |---|---:|---|---|
-| `loongclaw-v0.1.0-alpha.1-x86_64-unknown-linux-gnu.tar.gz` | 1 | `deadbeef` | [link](https://github.com/loongclaw-ai/loongclaw/releases/download/v0.1.0-alpha.1/linux.tar.gz) |
+| `loong-v0.1.0-alpha.1-x86_64-unknown-linux-gnu.tar.gz` | 1 | `deadbeef` | [link](https://github.com/eastreams/loong/releases/download/v0.1.0-alpha.1/linux.tar.gz) |
 
 ## Verification
 | Check | Result | Evidence |
 |---|---|---|
-| Release workflow completed successfully | PASS | [workflow run](https://github.com/loongclaw-ai/loongclaw/actions/runs/1) |
-| GitHub release is not draft | PASS | [release page](https://github.com/loongclaw-ai/loongclaw/releases/tag/v0.1.0-alpha.1) |
+| Release workflow completed successfully | PASS | [workflow run](https://github.com/eastreams/loong/actions/runs/1) |
+| GitHub release is not draft | PASS | [release page](https://github.com/eastreams/loong/releases/tag/v0.1.0-alpha.1) |
 
 ## Refactor Budget
 - Hotspot metric paid down: none
@@ -211,8 +273,8 @@ EOF
 
 ## Detail Links
 - [Changelog entry](../../CHANGELOG.md)
-- [Release workflow run](https://github.com/loongclaw-ai/loongclaw/actions/runs/1)
-- [GitHub release page](https://github.com/loongclaw-ai/loongclaw/releases/tag/v0.1.0-alpha.1)
+- [Release workflow run](https://github.com/eastreams/loong/actions/runs/1)
+- [GitHub release page](https://github.com/eastreams/loong/releases/tag/v0.1.0-alpha.1)
 - Trace directory: `.docs/traces/20260317T000000Z-post-release-v0.1.0-alpha.1-prealpha01`
 - Local debug log: `.docs/releases/v0.1.0-alpha.1-debug.md`
 EOF
@@ -221,6 +283,50 @@ EOF
 # Mirror
 EOF
   cp "$fixture/AGENTS.md" "$fixture/CLAUDE.md"
+
+  cat >"$fixture/docs/ROADMAP.md" <<'EOF'
+# Loong Roadmap
+
+- kernel-level request-policy gate for tool calls through `PolicyEngine::authorize(...)`
+  plus `PolicyExtensionChain`, with explicit deny/approval-required outcomes before
+  tool dispatch (Rule of Two)
+EOF
+
+  cat >"$fixture/docs/SECURITY.md" <<'EOF'
+# Security
+
+CapabilityToken → PolicyEngine.authorize(...) → PolicyExtensionChain → Execution → Audit
+
+- 10 event kinds with atomic sequencing
+EOF
+
+  cat >"$fixture/docs/QUALITY_SCORE.md" <<'EOF'
+# Quality Score
+
+| Domain | Grade | Last Reviewed | Gaps |
+|--------|-------|---------------|------|
+| Kernel Security (L1) | B+ | 2026-04-03 | Core tool paths now route through policy extensions; remaining gaps are non-uniform L1 coverage for connector/ACP/runtime-only analytics and explicit `Direct` compatibility lanes |
+| Observability (L4) | C+ | 2026-04-03 | Durable JSONL/fanout audit exists; remaining gaps are tamper-evident verification, query baseline, and richer export lanes |
+EOF
+
+  cat >"$fixture/docs/design-docs/index.md" <<'EOF'
+# Design Documents Index
+
+| ID | Decision | Implementation Status |
+|----|----------|---------------------|
+| D-003 | Append-only event log as single source of truth | Partial — audit events exist, JSONL/fanout retention exists, no tamper-evident verification or query baseline yet |
+EOF
+
+  cat >"$fixture/docs/design-docs/layered-kernel-design.md" <<'EOF'
+# Layered Kernel Design
+
+- Tool plane core/extension execution must route deterministic request-policy approval through the
+  kernel authorization stack before dispatch: token/capability validation in `PolicyEngine::authorize`
+  plus tool-specific tightening in `PolicyExtensionChain` (Rule of Two: model intent plus
+  deterministic policy decision).
+- The deprecated `PolicyEngine::check_tool_call` hook remains compatibility-only and must not be
+  treated as the live request-policy seam.
+EOF
 
   printf '%s\n' "$fixture"
 }

@@ -3,10 +3,12 @@ use std::collections::BTreeSet;
 use serde_json::{Map, Value};
 
 use crate::CliResult;
+use crate::channel::feishu::api::FeishuUserPrincipal;
 use crate::channel::{
     ChannelDeliveryResource, ChannelOutboundTarget, ChannelPlatform, ChannelSession,
+    feishu::feishu_allowlist_allows_chat,
 };
-use crate::feishu::FeishuUserPrincipal;
+use crate::crypto::timing_safe_eq;
 
 use super::crypto::decrypt_payload_if_needed;
 use super::types::{
@@ -178,7 +180,7 @@ pub(in crate::channel::feishu) fn parse_feishu_inbound_payload(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "feishu message event missing message.chat_id".to_owned())?;
-    if !allowed_chat_ids.contains(chat_id) {
+    if !feishu_allowlist_allows_chat(allowed_chat_ids, chat_id) {
         return Ok(FeishuWebhookAction::Ignore);
     }
 
@@ -208,7 +210,8 @@ pub(in crate::channel::feishu) fn parse_feishu_inbound_payload(
         .map(str::to_owned)
         .unwrap_or_else(|| format!("message:{message_id}"));
 
-    let mut reply_target = ChannelOutboundTarget::feishu_message_reply(message_id.to_owned());
+    let mut reply_target = ChannelOutboundTarget::feishu_message_reply(message_id.to_owned())
+        .with_feishu_reply_chat_id(chat_id.to_owned());
     if thread_id.is_some() {
         reply_target = reply_target.with_feishu_reply_in_thread(true);
     }
@@ -295,7 +298,7 @@ fn verify_feishu_token(payload: &Value, verification_token: Option<&str>) -> Cli
     if incoming.is_empty() {
         return Err("unauthorized: feishu payload missing token".to_owned());
     }
-    if incoming != expected_token {
+    if !timing_safe_eq(incoming.as_bytes(), expected_token.as_bytes()) {
         return Err("unauthorized: feishu verification token mismatch".to_owned());
     }
     Ok(())
@@ -444,7 +447,7 @@ fn is_allowed_feishu_card_callback_chat(
     else {
         return false;
     };
-    allowed_chat_ids.contains(open_chat_id)
+    feishu_allowlist_allows_chat(allowed_chat_ids, open_chat_id)
 }
 
 fn parse_feishu_card_callback_action(

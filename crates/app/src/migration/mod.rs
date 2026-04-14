@@ -9,7 +9,7 @@ use std::{
 
 use crate::{
     CliResult,
-    config::{LoongClawConfig, MemoryProfile},
+    config::{LoongClawConfig, MemoryProfile, active_cli_command_name},
     prompt::DEFAULT_PROMPT_PACK_ID,
 };
 use serde_json::Value;
@@ -621,9 +621,10 @@ fn external_skill_probe_roots(input_path: &Path) -> Vec<PathBuf> {
 
 fn external_skill_warning(artifact: &ExternalSkillArtifact) -> String {
     format!(
-        "detected external skills artifact `{}` ({}); LoongClaw imports prompt/profile content but does not auto-install the runtime, so use the explicit external skills lifecycle (`fetch` -> `install` -> `list` -> `invoke`) when you want the skill available in chat",
+        "detected external skills artifact `{}` ({}); LoongClaw imports prompt/profile content by default, and installable local skills can be bridged into the managed runtime with `{} migrate --mode apply_selected --apply-external-skills-plan` or the explicit external skills lifecycle (`fetch` -> `install` -> `list` -> `invoke`)",
         artifact.path.display(),
-        artifact.kind.as_id()
+        artifact.kind.as_id(),
+        active_cli_command_name()
     )
 }
 
@@ -918,7 +919,7 @@ fn external_skill_artifact_label(artifact: &ExternalSkillArtifact) -> String {
         .to_owned()
 }
 
-fn merge_profile_note_addendum(existing: Option<&str>, addendum: &str) -> Option<String> {
+pub fn merge_profile_note_addendum(existing: Option<&str>, addendum: &str) -> Option<String> {
     let trimmed_addendum = addendum.trim();
     if trimmed_addendum.is_empty() {
         return None;
@@ -1297,6 +1298,8 @@ mod tests {
             kind: ExternalSkillArtifactKind::SkillsDir,
             path: PathBuf::from("/tmp/demo/skills"),
         });
+        assert!(warning.contains("apply_selected"));
+        assert!(warning.contains("apply-external-skills-plan"));
         assert!(warning.contains("fetch"));
         assert!(warning.contains("install"));
         assert!(warning.contains("invoke"));

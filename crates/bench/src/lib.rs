@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant as StdInstant, SystemTime, UNIX_EPOCH},
 };
 
-use kernel::{ChannelConfig, ConnectorCommand, ProviderConfig};
+use kernel::{BridgeSupportMatrix, ChannelConfig, ConnectorCommand, ProviderConfig};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -22,9 +22,10 @@ use loongclaw_spec::programmatic::{
     acquire_programmatic_circuit_slot, record_programmatic_circuit_outcome,
 };
 use loongclaw_spec::{
-    BridgeRuntimePolicy, CliResult, NativeToolExecutor, ProgrammaticCircuitBreakerPolicy,
-    ProgrammaticCircuitRuntimeState, RunnerSpec, execute_spec_with_native_tool_executor,
-    execute_wasm_component_bridge, spec_requires_native_tool_executor,
+    BridgeRuntimePolicy, CliResult, ConnectorCircuitBreakerPolicy, NativeToolExecutor,
+    ProgrammaticCircuitBreakerPolicy, ProgrammaticCircuitRuntimeState, RunnerSpec,
+    execute_spec_with_native_tool_executor, execute_wasm_component_bridge,
+    spec_requires_native_tool_executor,
 };
 
 const DEFAULT_PRESSURE_ITERATIONS: usize = 12;
@@ -377,10 +378,31 @@ struct MemoryContextBenchmarkReport {
     window_shrink_catch_up_turn_entries: usize,
     window_shrink_catch_up_summary_chars: usize,
     window_shrink_catch_up_payload_chars: usize,
+    prompt_efficiency_signals: MemoryContextPromptEfficiencySignals,
     flattened_sample_ratios: MemoryContextRatioP95Summary,
     aggregated_p95_median_ms: MemoryContextAggregatedP95MedianMs,
     aggregated_ratios: MemoryContextRatioP95Summary,
     gate: MemoryContextBenchmarkGateSummary,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct MemoryContextPromptEfficiencySignals {
+    window_only: MemoryContextPromptEfficiencySignal,
+    summary_window_cover: MemoryContextPromptEfficiencySignal,
+    summary_rebuild: MemoryContextPromptEfficiencySignal,
+    summary_rebuild_budget_change: MemoryContextPromptEfficiencySignal,
+    summary_metadata_realign: MemoryContextPromptEfficiencySignal,
+    summary_steady_state: MemoryContextPromptEfficiencySignal,
+    window_shrink_catch_up: MemoryContextPromptEfficiencySignal,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct MemoryContextPromptEfficiencySignal {
+    entry_count: usize,
+    turn_entries: usize,
+    estimated_session_local_recall_chars: usize,
+    estimated_non_recall_context_chars: usize,
+    estimated_session_local_recall_share_ratio: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -770,6 +792,53 @@ pub struct MemoryContextShape {
     pub payload_chars: usize,
 }
 
+fn memory_context_prompt_efficiency_signal(
+    shape: MemoryContextShape,
+) -> MemoryContextPromptEfficiencySignal {
+    let estimated_session_local_recall_chars = shape.summary_chars;
+    let estimated_non_recall_context_chars = shape
+        .payload_chars
+        .saturating_sub(estimated_session_local_recall_chars);
+    let estimated_session_local_recall_share_ratio =
+        compute_ratio_f64(estimated_session_local_recall_chars, shape.payload_chars);
+
+    MemoryContextPromptEfficiencySignal {
+        entry_count: shape.entry_count,
+        turn_entries: shape.turn_entries,
+        estimated_session_local_recall_chars,
+        estimated_non_recall_context_chars,
+        estimated_session_local_recall_share_ratio,
+    }
+}
+
+fn build_memory_context_prompt_efficiency_signals(
+    representative: &MemoryContextBenchmarkSuiteSamples,
+) -> MemoryContextPromptEfficiencySignals {
+    let window_only = memory_context_prompt_efficiency_signal(representative.window_only_shape);
+    let summary_window_cover =
+        memory_context_prompt_efficiency_signal(representative.summary_window_cover_shape);
+    let summary_rebuild =
+        memory_context_prompt_efficiency_signal(representative.summary_rebuild_shape);
+    let summary_rebuild_budget_change =
+        memory_context_prompt_efficiency_signal(representative.summary_rebuild_budget_change_shape);
+    let summary_metadata_realign =
+        memory_context_prompt_efficiency_signal(representative.summary_metadata_realign_shape);
+    let summary_steady_state =
+        memory_context_prompt_efficiency_signal(representative.summary_steady_state_shape);
+    let window_shrink_catch_up =
+        memory_context_prompt_efficiency_signal(representative.window_shrink_catch_up_shape);
+
+    MemoryContextPromptEfficiencySignals {
+        window_only,
+        summary_window_cover,
+        summary_rebuild,
+        summary_rebuild_budget_change,
+        summary_metadata_realign,
+        summary_steady_state,
+        window_shrink_catch_up,
+    }
+}
+
 #[doc(hidden)]
 pub type MemoryContextBenchmarkSuiteRunner = fn(
     temp_root_override: Option<&Path>,
@@ -782,6 +851,31 @@ pub type MemoryContextBenchmarkSuiteRunner = fn(
     hot_iterations: usize,
     warmup_iterations: usize,
 ) -> CliResult<MemoryContextBenchmarkSuiteSamples>;
+
+#[derive(Debug, Clone)]
+#[doc(hidden)]
+pub struct MemoryContextBenchmarkReportAugmentContext {
+    pub output_path: String,
+    pub benchmark_temp_root: PathBuf,
+    pub history_turns: usize,
+    pub sliding_window: usize,
+    pub window_shrink_source_window: usize,
+    pub summary_max_chars: usize,
+    pub words_per_turn: usize,
+    pub rebuild_iterations: usize,
+    pub hot_iterations: usize,
+    pub warmup_iterations: usize,
+    pub suite_repetitions: usize,
+    pub enforce_gate: bool,
+    pub min_steady_state_speedup_ratio: f64,
+}
+
+#[doc(hidden)]
+pub type MemoryContextBenchmarkReportAugmenter = fn(
+    report: &mut Value,
+    suite_runs: &[MemoryContextBenchmarkSuiteSamples],
+    context: &MemoryContextBenchmarkReportAugmentContext,
+) -> CliResult<()>;
 
 #[cfg(test)]
 #[derive(Debug, Clone)]
@@ -1041,6 +1135,7 @@ pub fn run_memory_context_benchmark_cli_with_suite_runner(
     enforce_gate: bool,
     min_steady_state_speedup_ratio: f64,
     suite_runner: MemoryContextBenchmarkSuiteRunner,
+    report_augmenter: Option<MemoryContextBenchmarkReportAugmenter>,
 ) -> CliResult<()> {
     if history_turns <= sliding_window {
         return Err("history_turns must exceed sliding_window to exercise summary mode".to_owned());
@@ -1109,8 +1204,31 @@ pub fn run_memory_context_benchmark_cli_with_suite_runner(
         enforce_gate,
         normalized_min_speedup_ratio,
     )?;
+    let report_augment_context = MemoryContextBenchmarkReportAugmentContext {
+        output_path: output_path.to_owned(),
+        benchmark_temp_root: temp_root.path.clone(),
+        history_turns,
+        sliding_window,
+        window_shrink_source_window,
+        summary_max_chars,
+        words_per_turn,
+        rebuild_iterations,
+        hot_iterations,
+        warmup_iterations,
+        suite_repetitions,
+        enforce_gate,
+        min_steady_state_speedup_ratio: normalized_min_speedup_ratio,
+    };
+    if let Some(report_augmenter) = report_augmenter {
+        let mut report_value = serde_json::to_value(&report).map_err(|error| {
+            format!("failed to serialize memory context benchmark report: {error}")
+        })?;
 
-    write_json_file(output_path, &report)?;
+        report_augmenter(&mut report_value, &suite_runs, &report_augment_context)?;
+        write_json_file(output_path, &report_value)?;
+    } else {
+        write_json_file(output_path, &report)?;
+    }
     println!("memory context benchmark report written to {output_path}");
     println!(
         "benchmark_temp_root={} source={}",
@@ -1668,6 +1786,7 @@ fn try_build_memory_context_benchmark_report(
         build_memory_context_cold_path_bootstrap_noise_attribution_report(suite_runs);
     let cold_path_load_noise_attribution =
         build_memory_context_cold_path_load_noise_attribution_report(suite_runs);
+    let prompt_efficiency_signals = build_memory_context_prompt_efficiency_signals(representative);
     let flattened_sample_ratios = MemoryContextRatioP95Summary {
         summary_window_cover_vs_window_only_ratio_p95,
         summary_window_cover_overhead_p95_ms,
@@ -1912,6 +2031,7 @@ fn try_build_memory_context_benchmark_report(
         window_shrink_catch_up_payload_chars: representative
             .window_shrink_catch_up_shape
             .payload_chars,
+        prompt_efficiency_signals,
         flattened_sample_ratios,
         aggregated_p95_median_ms,
         aggregated_ratios,
@@ -2935,6 +3055,17 @@ fn compute_summary_char_growth_ratio(
     }
 }
 
+fn compute_ratio_f64(numerator: usize, denominator: usize) -> Option<f64> {
+    if denominator == 0 {
+        return None;
+    }
+
+    let numerator = numerator as f64;
+    let denominator = denominator as f64;
+
+    Some(numerator / denominator)
+}
+
 fn compute_workload_adjusted_ratio(
     raw_ratio_p95: Option<f64>,
     summary_char_growth_ratio: Option<f64>,
@@ -3218,10 +3349,15 @@ fn run_wasm_bridge_sample(wasm_artifact: &Path) -> CliResult<WasmBridgeSample> {
         execute_process_stdio: false,
         execute_http_json: false,
         execute_wasm_component: true,
+        compatibility_matrix: BridgeSupportMatrix::default(),
         allowed_process_commands: BTreeSet::new(),
+        bridge_circuit_breaker: ConnectorCircuitBreakerPolicy::default(),
         wasm_allowed_path_prefixes: vec![artifact_parent.to_path_buf()],
+        wasm_guest_readable_config_keys: BTreeSet::new(),
         wasm_max_component_bytes: Some(8 * 1024 * 1024),
+        wasm_max_output_bytes: None,
         wasm_fuel_limit: Some(2_000_000),
+        wasm_timeout_ms: None,
         wasm_require_hash_pin: false,
         wasm_required_sha256_by_plugin: BTreeMap::new(),
         enforce_execution_success: true,
@@ -3878,7 +4014,7 @@ pub async fn run_spec_pressure_once(
     let requires_native_tool_executor = spec_requires_native_tool_executor(spec);
     if requires_native_tool_executor && native_tool_executor.is_none() {
         return Err(
-            "spec benchmark scenario requires a native tool executor; move this claw.migrate/claw_migrate run to daemon composition root".to_owned(),
+            "spec benchmark scenario requires a native tool executor; move this config.import/claw.migrate/claw_migrate run to daemon composition root".to_owned(),
         );
     }
     let report = execute_spec_with_native_tool_executor(spec, false, native_tool_executor).await;
@@ -3889,7 +4025,7 @@ pub async fn run_spec_pressure_once(
             .is_some_and(|reason| reason.contains("native tool executor"))
     {
         return Err(
-            "spec benchmark scenario requires a native tool executor that handles the requested native tool; move this claw.migrate/claw_migrate run to daemon composition root".to_owned(),
+            "spec benchmark scenario requires a native tool executor that handles the requested native tool; move this config.import/claw.migrate/claw_migrate run to daemon composition root".to_owned(),
         );
     }
     let blocked = report.operation_kind == "blocked" || report.blocked_reason.is_some();
@@ -4658,7 +4794,7 @@ fn schema_descriptor(value: &Value) -> Value {
 fn sha256_hex(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn normalize_ratio_tolerance(value: f64) -> f64 {
@@ -5322,6 +5458,135 @@ mod tests {
             warning.contains("summary_rebuild suite p95")
                 && warning.contains("target_load_ms/summary_catch_up_ms")
         }));
+    }
+
+    #[test]
+    fn memory_context_benchmark_report_emits_prompt_efficiency_signals() {
+        let window_only_shape = MemoryContextShape {
+            entry_count: 4,
+            turn_entries: 4,
+            summary_chars: 0,
+            payload_chars: 400,
+        };
+        let summary_window_cover_shape = MemoryContextShape {
+            entry_count: 5,
+            turn_entries: 4,
+            summary_chars: 80,
+            payload_chars: 480,
+        };
+        let summary_rebuild_shape = MemoryContextShape {
+            entry_count: 6,
+            turn_entries: 4,
+            summary_chars: 120,
+            payload_chars: 520,
+        };
+        let summary_steady_state_shape = MemoryContextShape {
+            entry_count: 6,
+            turn_entries: 4,
+            summary_chars: 100,
+            payload_chars: 420,
+        };
+        let window_shrink_catch_up_shape = MemoryContextShape {
+            entry_count: 5,
+            turn_entries: 3,
+            summary_chars: 90,
+            payload_chars: 390,
+        };
+        let suite_runs = vec![MemoryContextBenchmarkSuiteSamples {
+            seed_db_bytes: 1024,
+            window_only_samples: vec![1.0, 1.2],
+            summary_window_cover_samples: vec![1.05, 1.25],
+            summary_rebuild_samples: vec![2.0, 2.2],
+            summary_rebuild_budget_change_samples: vec![1.3, 1.4],
+            summary_metadata_realign_samples: vec![1.2, 1.25],
+            summary_steady_state_samples: vec![0.7, 0.75],
+            window_shrink_catch_up_samples: vec![0.9, 0.95],
+            window_only_append_pre_overflow_samples: vec![0.8, 0.82],
+            window_only_append_cold_overflow_samples: vec![0.85, 0.9],
+            summary_append_pre_overflow_samples: vec![1.1, 1.15],
+            summary_append_cold_overflow_samples: vec![1.4, 1.5],
+            summary_append_saturated_samples: vec![1.0, 1.05],
+            window_only_rss_deltas_kib: vec![0.0, 16.0],
+            summary_window_cover_rss_deltas_kib: vec![0.0, 16.0],
+            summary_rebuild_rss_deltas_kib: vec![32.0, 48.0],
+            summary_rebuild_budget_change_rss_deltas_kib: vec![16.0, 32.0],
+            summary_metadata_realign_rss_deltas_kib: vec![16.0, 16.0],
+            summary_steady_state_rss_deltas_kib: vec![0.0, 0.0],
+            window_shrink_catch_up_rss_deltas_kib: vec![16.0, 16.0],
+            window_only_append_pre_overflow_rss_deltas_kib: vec![16.0, 16.0],
+            window_only_append_cold_overflow_rss_deltas_kib: vec![16.0, 32.0],
+            summary_append_pre_overflow_rss_deltas_kib: vec![16.0, 32.0],
+            summary_append_cold_overflow_rss_deltas_kib: vec![32.0, 32.0],
+            summary_append_saturated_rss_deltas_kib: vec![16.0, 16.0],
+            summary_rebuild_phase_samples: MemoryContextColdPathPhaseSamples::default(),
+            summary_rebuild_budget_change_phase_samples: MemoryContextColdPathPhaseSamples::default(
+            ),
+            summary_metadata_realign_phase_samples: MemoryContextColdPathPhaseSamples::default(),
+            window_shrink_catch_up_phase_samples: MemoryContextColdPathPhaseSamples::default(),
+            window_only_shape,
+            summary_window_cover_shape,
+            summary_rebuild_shape,
+            summary_rebuild_budget_change_shape: summary_rebuild_shape,
+            summary_metadata_realign_shape: summary_rebuild_shape,
+            summary_steady_state_shape,
+            window_shrink_catch_up_shape,
+        }];
+
+        let report = build_memory_context_benchmark_report(
+            "target/benchmarks/memory-context-benchmark-report.json",
+            &ResolvedMemoryContextBenchmarkTempRoot {
+                path: PathBuf::from("target/benchmarks/tmp-local"),
+                source: MemoryContextBenchmarkTempRootSource::OutputParent,
+            },
+            24,
+            6,
+            12,
+            256,
+            12,
+            2,
+            4,
+            1,
+            &suite_runs,
+            1,
+            false,
+            1.10,
+        );
+
+        let window_only_signal = &report.prompt_efficiency_signals.window_only;
+        let steady_state_signal = &report.prompt_efficiency_signals.summary_steady_state;
+        let rebuild_signal = &report.prompt_efficiency_signals.summary_rebuild;
+        let budget_change_signal = &report
+            .prompt_efficiency_signals
+            .summary_rebuild_budget_change;
+        let metadata_realign_signal = &report.prompt_efficiency_signals.summary_metadata_realign;
+
+        assert_eq!(window_only_signal.estimated_session_local_recall_chars, 0);
+        assert_eq!(
+            steady_state_signal.estimated_session_local_recall_chars,
+            100
+        );
+        assert_eq!(steady_state_signal.estimated_non_recall_context_chars, 320);
+        assert_eq!(rebuild_signal.estimated_session_local_recall_chars, 120);
+        assert_eq!(
+            budget_change_signal.estimated_session_local_recall_chars,
+            120
+        );
+        assert_eq!(
+            metadata_realign_signal.estimated_session_local_recall_chars,
+            120
+        );
+        assert_eq!(
+            metadata_realign_signal.estimated_non_recall_context_chars,
+            400
+        );
+
+        let rebuild_share_ratio = rebuild_signal
+            .estimated_session_local_recall_share_ratio
+            .expect("rebuild recall share ratio");
+        let expected_rebuild_share_ratio = 120.0 / 520.0;
+        let delta = (rebuild_share_ratio - expected_rebuild_share_ratio).abs();
+
+        assert!(delta < 1e-9);
     }
 
     #[test]

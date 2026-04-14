@@ -262,6 +262,7 @@ pub struct AcpConversationTurnOptions<'a> {
     pub event_sink: Option<&'a dyn AcpTurnEventSink>,
     pub additional_bootstrap_mcp_servers: Option<&'a [String]>,
     pub working_directory: Option<&'a Path>,
+    pub metadata: Option<&'a BTreeMap<String, String>>,
     pub provenance: AcpTurnProvenance<'a>,
 }
 
@@ -272,6 +273,7 @@ impl Default for AcpConversationTurnOptions<'_> {
             event_sink: None,
             additional_bootstrap_mcp_servers: None,
             working_directory: None,
+            metadata: None,
             provenance: AcpTurnProvenance::default(),
         }
     }
@@ -313,6 +315,11 @@ impl<'a> AcpConversationTurnOptions<'a> {
 
     pub fn with_working_directory(mut self, working_directory: Option<&'a Path>) -> Self {
         self.working_directory = working_directory.filter(|path| !path.as_os_str().is_empty());
+        self
+    }
+
+    pub fn with_metadata(mut self, metadata: Option<&'a BTreeMap<String, String>>) -> Self {
+        self.metadata = metadata.filter(|metadata| !metadata.is_empty());
         self
     }
 
@@ -448,6 +455,26 @@ pub struct AcpTurnResult {
     pub usage: Option<Value>,
     pub events: Vec<Value>,
     pub stop_reason: Option<AcpTurnStopReason>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamingTokenEvent {
+    pub event_type: String,
+    pub delta: TokenDelta,
+    pub index: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenDelta {
+    pub text: Option<String>,
+    pub tool_call: Option<ToolCallDelta>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallDelta {
+    pub name: Option<String>,
+    pub args: Option<String>,
+    pub id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

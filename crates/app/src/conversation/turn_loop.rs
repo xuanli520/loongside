@@ -1,9 +1,11 @@
 use std::collections::VecDeque;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::Arc;
 
 use serde_json::{Value, json};
 
 use crate::CliResult;
+use crate::acp::{AcpTurnEventSink, JsonlAcpTurnEventSink};
 use crate::memory::runtime_config::MemoryRuntimeConfig;
 
 use super::super::config::LoongClawConfig;
@@ -15,12 +17,14 @@ use super::turn_budget::{TurnRoundBudget, TurnRoundBudgetDecision};
 use super::turn_engine::{
     DefaultAppToolDispatcher, ProviderTurn, ToolIntent, TurnEngine, TurnResult, TurnValidation,
 };
+use super::turn_observer::map_streaming_callback_data_to_token_event;
 use super::turn_shared::{
-    ProviderTurnRequestAction, ReplyPersistenceMode, ToolDrivenFollowupPayload,
-    ToolDrivenReplyBaseDecision, ToolDrivenReplyPhase, build_tool_driven_followup_tail,
+    ProviderTurnRequestAction, ReplyPersistenceMode, ToolDrivenFollowupLabel,
+    ToolDrivenFollowupPayload, ToolDrivenFollowupTextRef, ToolDrivenReplyBaseDecision,
+    ToolDrivenReplyPhase, build_tool_driven_followup_tail_with_request_summary,
     build_tool_loop_guard_tail, decide_provider_turn_request_action,
     reduce_followup_payload_for_model, request_completion_with_raw_fallback,
-    user_requested_raw_tool_output,
+    tool_loop_circuit_breaker_reply, user_requested_raw_tool_output,
 };
 
 #[derive(Default)]
@@ -33,12 +37,14 @@ struct TurnLoopSessionState {
     last_raw_reply: String,
     loop_supervisor: ToolLoopSupervisor,
     followup_payload_budget: FollowupPayloadBudget,
+    total_tool_calls: usize,
 }
 
 #[derive(Debug, Clone)]
 struct RoundKernelEvaluation {
     assistant_preface: String,
     had_tool_intents: bool,
+    tool_request_summary: Option<String>,
     turn_result: TurnResult,
     loop_verdict: Option<ToolLoopSupervisorVerdict>,
 }
@@ -71,6 +77,7 @@ enum RoundFollowup {
     Tool {
         assistant_preface: String,
         payload: ToolDrivenFollowupPayload,
+        tool_request_summary: Option<String>,
         loop_warning_reason: Option<String>,
     },
     Guard {
@@ -126,17 +133,43 @@ impl ConversationTurnLoop {
         );
 
         for round_index in 0..policy.max_rounds {
+            let use_streaming = crate::provider::supports_turn_streaming_events(config);
+            let on_token: crate::provider::StreamingTokenCallback = if use_streaming {
+                let sink = JsonlAcpTurnEventSink::stderr_with_prefix("");
+                Some(Arc::new(
+                    move |data: crate::provider::StreamingCallbackData| {
+                        let event = map_streaming_callback_data_to_token_event(data);
+                        let _ = sink.on_event(&serde_json::to_value(&event).unwrap_or_default());
+                    },
+                ))
+            } else {
+                None
+            };
             let turn = match decide_provider_turn_request_action(
-                runtime
-                    .request_turn(
-                        config,
-                        session_id,
-                        turn_id.as_str(),
-                        &session.messages,
-                        &tool_view,
-                        binding,
-                    )
-                    .await,
+                if use_streaming {
+                    runtime
+                        .request_turn_streaming(
+                            config,
+                            session_id,
+                            turn_id.as_str(),
+                            &session.messages,
+                            &tool_view,
+                            binding,
+                            on_token,
+                        )
+                        .await
+                } else {
+                    runtime
+                        .request_turn(
+                            config,
+                            session_id,
+                            turn_id.as_str(),
+                            &session.messages,
+                            &tool_view,
+                            binding,
+                        )
+                        .await
+                },
                 error_mode,
             ) {
                 ProviderTurnRequestAction::Continue { turn } => turn,
@@ -165,6 +198,28 @@ impl ConversationTurnLoop {
                 }
             };
 
+            // Global circuit breaker: prospective check before dispatching tools.
+            // Trips if adding this round's intents would exceed the per-turn limit,
+            // ensuring the configured max remains inclusive for executed tool calls.
+            let prospective_total = session
+                .total_tool_calls
+                .saturating_add(turn.tool_intents.len());
+            if let Some(reply) =
+                tool_loop_circuit_breaker_reply(prospective_total, policy.max_total_tool_calls)
+            {
+                return apply_turn_loop_terminal_action(
+                    runtime,
+                    session_id,
+                    user_input,
+                    TurnLoopTerminalAction::PersistReply {
+                        reply,
+                        persistence_mode: ReplyPersistenceMode::Success,
+                    },
+                    binding,
+                )
+                .await;
+            }
+
             let evaluation = evaluate_round_kernel(
                 config,
                 &policy,
@@ -175,6 +230,9 @@ impl ConversationTurnLoop {
                 &mut session.loop_supervisor,
             )
             .await;
+
+            session.total_tool_calls = prospective_total;
+
             let reply_phase = evaluation.reply_phase(session.raw_tool_output_requested);
             if let Some(raw_reply) = reply_phase.raw_reply() {
                 session.last_raw_reply = raw_reply.to_owned();
@@ -309,6 +367,7 @@ fn initialize_turn_loop_session(
             policy.max_followup_tool_payload_chars,
             policy.max_followup_tool_payload_chars_total,
         ),
+        total_tool_calls: 0,
     }
 }
 
@@ -338,12 +397,19 @@ async fn evaluate_round_kernel(
             .conversation
             .fast_lane_parallel_tool_execution_max_in_flight(),
     );
-    let turn_result = match engine.validate_turn_in_context(turn, session_context) {
-        Ok(TurnValidation::FinalText(text)) => TurnResult::FinalText(text),
-        Err(failure) => TurnResult::ToolDenied(failure),
+    let (turn_result, _turn_trace) = match engine.validate_turn_in_context(turn, session_context) {
+        Ok(TurnValidation::FinalText(text)) => (TurnResult::FinalText(text), None),
+        Err(failure) => (TurnResult::ToolDenied(failure), None),
         Ok(TurnValidation::ToolExecutionRequired) => {
             engine
-                .execute_turn_in_context(turn, session_context, app_dispatcher, binding, None)
+                .execute_turn_in_context_with_trace(
+                    turn,
+                    session_context,
+                    app_dispatcher,
+                    binding,
+                    None,
+                    None,
+                )
                 .await
         }
     };
@@ -367,6 +433,7 @@ async fn evaluate_round_kernel(
     RoundKernelEvaluation {
         assistant_preface: turn.assistant_text.clone(),
         had_tool_intents,
+        tool_request_summary: None,
         turn_result,
         loop_verdict,
     }
@@ -424,6 +491,7 @@ fn decide_round_kernel_action(
     let followup = RoundFollowup::Tool {
         assistant_preface: evaluation.assistant_preface,
         payload: tool_payload,
+        tool_request_summary: evaluation.tool_request_summary,
         loop_warning_reason,
     };
 
@@ -449,6 +517,7 @@ fn append_round_followup_messages(
         RoundFollowup::Tool {
             assistant_preface,
             payload,
+            tool_request_summary,
             loop_warning_reason,
         } => append_tool_driven_followup_messages(
             &mut session.messages,
@@ -457,6 +526,7 @@ fn append_round_followup_messages(
             user_input,
             &mut session.followup_payload_budget,
             loop_warning_reason.as_deref(),
+            tool_request_summary.as_deref(),
         ),
         RoundFollowup::Guard {
             assistant_preface,
@@ -473,7 +543,9 @@ fn append_round_followup_messages(
     }
 }
 
-fn round_tool_payload_context(payload: &ToolDrivenFollowupPayload) -> (&'static str, &str) {
+fn round_tool_payload_context(
+    payload: &ToolDrivenFollowupPayload,
+) -> ToolDrivenFollowupTextRef<'_> {
     payload.message_context()
 }
 
@@ -484,15 +556,17 @@ fn append_tool_driven_followup_messages(
     user_input: &str,
     followup_payload_budget: &mut FollowupPayloadBudget,
     loop_warning_reason: Option<&str>,
+    tool_request_summary: Option<&str>,
 ) {
-    messages.extend(build_tool_driven_followup_tail(
+    messages.extend(build_tool_driven_followup_tail_with_request_summary(
         assistant_preface,
         payload,
         user_input,
         loop_warning_reason,
+        tool_request_summary,
         |label, text| {
             let reduced = reduce_followup_payload_for_model(label, text);
-            followup_payload_budget.truncate_payload(label, reduced.as_ref())
+            followup_payload_budget.truncate_payload_text_label(label, reduced.as_ref())
         },
     ));
 }
@@ -502,7 +576,7 @@ fn append_repeated_tool_guard_followup_messages(
     assistant_preface: &str,
     reason: &str,
     user_input: &str,
-    latest_tool_context: Option<(&str, &str)>,
+    latest_tool_context: Option<ToolDrivenFollowupTextRef<'_>>,
     followup_payload_budget: &mut FollowupPayloadBudget,
 ) {
     messages.extend(build_tool_loop_guard_tail(
@@ -511,7 +585,7 @@ fn append_repeated_tool_guard_followup_messages(
         user_input,
         latest_tool_context,
         |label, text| {
-            let reduced = reduce_followup_payload_for_model(label, text);
+            let reduced = reduce_followup_payload_for_model(label.as_str(), text);
             followup_payload_budget.truncate_payload(label, reduced.as_ref())
         },
     ));
@@ -545,16 +619,23 @@ impl FollowupPayloadBudget {
         }
     }
 
-    fn truncate_payload(&mut self, label: &str, text: &str) -> String {
+    fn truncate_payload(&mut self, label: ToolDrivenFollowupLabel, text: &str) -> String {
+        let label_text = label.as_str();
+        self.truncate_payload_text_label(label_text, text)
+    }
+
+    fn truncate_payload_text_label(&mut self, label_text: &str, text: &str) -> String {
         let per_round_allowed = self
             .per_round_max_chars
             .min(self.remaining_total_chars.max(1));
         if self.remaining_total_chars == 0 {
             let removed = text.trim().chars().count();
-            return format!("[{label}_truncated] removed_chars={removed} budget_exhausted=true");
+            return format!(
+                "[{label_text}_truncated] removed_chars={removed} budget_exhausted=true"
+            );
         }
 
-        let bounded = truncate_followup_tool_payload(label, text, per_round_allowed);
+        let bounded = truncate_followup_tool_payload(label_text, text, per_round_allowed);
         let normalized = text.trim();
         let total_chars = normalized.chars().count();
         let consumed_chars = if total_chars <= per_round_allowed {
@@ -577,7 +658,9 @@ struct ToolRoundOutcome {
 
 fn tool_round_outcome(turn_result: &TurnResult) -> Option<ToolRoundOutcome> {
     match turn_result {
-        TurnResult::FinalText(text) => Some(ToolRoundOutcome {
+        TurnResult::FinalText(text)
+        | TurnResult::StreamingText(text)
+        | TurnResult::StreamingDone(text) => Some(ToolRoundOutcome {
             fingerprint: text_fingerprint("tool_final_text", text),
             failed: false,
         }),
@@ -644,6 +727,8 @@ struct TurnLoopPolicy {
     max_same_tool_failure_rounds: usize,
     max_followup_tool_payload_chars: usize,
     max_followup_tool_payload_chars_total: usize,
+    max_total_tool_calls: usize,
+    max_consecutive_same_tool: usize,
 }
 
 impl TurnLoopPolicy {
@@ -659,6 +744,8 @@ impl TurnLoopPolicy {
             max_followup_tool_payload_chars_total: turn_loop
                 .max_followup_tool_payload_chars_total
                 .max(1),
+            max_total_tool_calls: turn_loop.max_total_tool_calls.max(1),
+            max_consecutive_same_tool: turn_loop.max_consecutive_same_tool.max(1),
         }
     }
 }
@@ -669,6 +756,8 @@ struct ToolLoopSupervisor {
     last_pattern_streak: usize,
     warned_reason_key: Option<String>,
     recent_rounds: VecDeque<ToolLoopObservation>,
+    consecutive_same_tool: usize,
+    last_tool_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -702,6 +791,51 @@ impl ToolLoopSupervisor {
         outcome_fingerprint: &str,
         failed: bool,
     ) -> ToolLoopSupervisorVerdict {
+        // Consecutive same-tool-name detection (tool-name only, not full signature).
+        // Fires at exactly max_consecutive_same_tool occurrences (>= threshold).
+        if self.last_tool_name.as_deref() == Some(tool_name_signature) {
+            self.consecutive_same_tool += 1;
+        } else {
+            self.last_tool_name = Some(tool_name_signature.to_owned());
+            self.consecutive_same_tool = 1;
+        }
+        if self.consecutive_same_tool >= policy.max_consecutive_same_tool {
+            let reason = LoopDetectionReason {
+                key: format!("consecutive_same_tool:{tool_name_signature}"),
+                text: format!(
+                    "consecutive_same_tool: {tool_name_signature} called {} times in a row \
+                     (limit={})",
+                    self.consecutive_same_tool, policy.max_consecutive_same_tool
+                ),
+            };
+            // Update pattern history before returning so other detectors see this round.
+            let pattern = format!("{tool_signature}::{outcome_fingerprint}");
+            if self.last_pattern.as_deref() == Some(pattern.as_str()) {
+                self.last_pattern_streak += 1;
+            } else {
+                self.last_pattern = Some(pattern.clone());
+                self.last_pattern_streak = 1;
+            }
+            self.recent_rounds.push_back(ToolLoopObservation {
+                pattern,
+                tool_name_signature: tool_name_signature.to_owned(),
+                failed,
+            });
+            if self.recent_rounds.len() > Self::MAX_RECENT_ROUNDS {
+                self.recent_rounds.pop_front();
+            }
+            return if self.warned_reason_key.as_deref() == Some(reason.key.as_str()) {
+                ToolLoopSupervisorVerdict::HardStop {
+                    reason: reason.text,
+                }
+            } else {
+                self.warned_reason_key = Some(reason.key);
+                ToolLoopSupervisorVerdict::InjectWarning {
+                    reason: reason.text,
+                }
+            };
+        }
+
         let pattern = format!("{tool_signature}::{outcome_fingerprint}");
         if self.last_pattern.as_deref() == Some(pattern.as_str()) {
             self.last_pattern_streak += 1;
@@ -912,6 +1046,7 @@ mod tests {
             "summarize note.md",
             &mut budget,
             None,
+            None,
         );
 
         let user_prompt = messages
@@ -938,6 +1073,7 @@ mod tests {
             "summarize note.md",
             &mut budget,
             None,
+            None,
         );
 
         let user_prompt = messages
@@ -948,6 +1084,41 @@ mod tests {
         assert!(
             !user_prompt.contains(crate::conversation::turn_shared::TOOL_TRUNCATION_HINT_PROMPT)
         );
+    }
+
+    #[test]
+    fn append_tool_driven_followup_messages_includes_request_summary_guidance() {
+        let mut messages = Vec::new();
+        let mut budget = FollowupPayloadBudget::new(8_000, 20_000);
+        let tool_request_summary = json!({
+            "tool": "shell.exec",
+            "request": {
+                "command": r#"C:\Windows\System32\CMD.EXE"#
+            }
+        })
+        .to_string();
+
+        append_tool_driven_followup_messages(
+            &mut messages,
+            "preface",
+            &ToolDrivenFollowupPayload::ToolFailure {
+                reason: "tool_preflight_denied: tool input needs repair".to_owned(),
+            },
+            "retry the command",
+            &mut budget,
+            None,
+            Some(tool_request_summary.as_str()),
+        );
+
+        let user_prompt = messages
+            .last()
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_str)
+            .expect("user followup prompt should exist");
+
+        assert!(user_prompt.contains("Repair guidance for shell.exec:"));
+        assert!(user_prompt.contains("CMD.EXE"));
+        assert!(user_prompt.contains("cmd.exe"));
     }
 
     #[test]
@@ -963,6 +1134,7 @@ mod tests {
             },
             "summarize note.md",
             &mut budget,
+            None,
             None,
         );
 
@@ -981,7 +1153,7 @@ mod tests {
         let user_prompt = messages[2]["content"]
             .as_str()
             .expect("user prompt should exist");
-        assert!(user_prompt.contains("managed external skill"));
+        assert!(user_prompt.contains("external skill"));
         assert!(user_prompt.contains("Original request:\nsummarize note.md"));
     }
 
@@ -1015,6 +1187,7 @@ mod tests {
             "apply the skill",
             &mut budget,
             None,
+            None,
         );
 
         let system_content = messages[0]["content"]
@@ -1038,6 +1211,7 @@ mod tests {
             &ToolDrivenFollowupPayload::ToolResult { text: tool_result },
             "summarize README.md",
             &mut budget,
+            None,
             None,
         );
 
@@ -1087,6 +1261,7 @@ mod tests {
             "summarize the test run",
             &mut budget,
             None,
+            None,
         );
 
         let (envelope, summary) =
@@ -1126,7 +1301,12 @@ mod tests {
             "adapter": "core-tools",
             "tool_name": "tool.search",
             "query": "read repo file",
+            "exact_tool_id": "file.read",
             "returned": 2,
+            "diagnostics": {
+                "reason": "exact_tool_id_not_visible",
+                "requested_tool_id": "file.read"
+            },
             "results": [
                 {
                     "tool_id": "file.read",
@@ -1170,6 +1350,7 @@ mod tests {
             "find the right tool",
             &mut budget,
             None,
+            None,
         );
 
         let assistant_tool_result = messages
@@ -1207,9 +1388,14 @@ mod tests {
         assert_eq!(envelope["tool"], "tool.search");
         assert_eq!(envelope["payload_truncated"], false);
         assert_eq!(summary["query"], "read repo file");
+        assert_eq!(summary["exact_tool_id"], "file.read");
+        assert_eq!(
+            summary["diagnostics"]["reason"],
+            "exact_tool_id_not_visible"
+        );
         assert!(summary.get("adapter").is_none());
         assert!(summary.get("tool_name").is_none());
-        assert!(summary.get("returned").is_none());
+        assert_eq!(summary["returned"], 2);
         assert_eq!(first["tool_id"], "file.read");
         assert_eq!(first["lease"], "lease-file");
         for entry in summary["results"]
@@ -1248,7 +1434,10 @@ mod tests {
             "preface",
             "stop",
             "summarize README.md",
-            Some(("tool_result", tool_result.as_str())),
+            Some(ToolDrivenFollowupTextRef::new(
+                ToolDrivenFollowupLabel::ToolResult,
+                tool_result.as_str(),
+            )),
             &mut budget,
         );
 
@@ -1266,7 +1455,10 @@ mod tests {
             "preface",
             "stop",
             "summarize the test run",
-            Some(("tool_result", tool_result.as_str())),
+            Some(ToolDrivenFollowupTextRef::new(
+                ToolDrivenFollowupLabel::ToolResult,
+                tool_result.as_str(),
+            )),
             &mut budget,
         );
 
@@ -1293,7 +1485,12 @@ mod tests {
             "adapter": "core-tools",
             "tool_name": "tool.search",
             "query": "read repo file",
+            "exact_tool_id": "file.read",
             "returned": 1,
+            "diagnostics": {
+                "reason": "exact_tool_id_not_visible",
+                "requested_tool_id": "file.read"
+            },
             "results": [
                 {
                     "tool_id": "file.read",
@@ -1325,7 +1522,10 @@ mod tests {
             "preface",
             "stop",
             "find the right tool",
-            Some(("tool_result", tool_result.as_str())),
+            Some(ToolDrivenFollowupTextRef::new(
+                ToolDrivenFollowupLabel::ToolResult,
+                tool_result.as_str(),
+            )),
             &mut budget,
         );
 
@@ -1339,9 +1539,14 @@ mod tests {
         assert_eq!(envelope["tool"], "tool.search");
         assert_eq!(envelope["payload_truncated"], false);
         assert_eq!(summary["query"], "read repo file");
+        assert_eq!(summary["exact_tool_id"], "file.read");
+        assert_eq!(
+            summary["diagnostics"]["reason"],
+            "exact_tool_id_not_visible"
+        );
         assert!(summary.get("adapter").is_none());
         assert!(summary.get("tool_name").is_none());
-        assert!(summary.get("returned").is_none());
+        assert_eq!(summary["returned"], 1);
         assert_eq!(first["tool_id"], "file.read");
         assert_eq!(first["lease"], "lease-file");
         assert!(first.get("tags").is_none());
@@ -1353,6 +1558,7 @@ mod tests {
         let evaluation = RoundKernelEvaluation {
             assistant_preface: "preface".to_owned(),
             had_tool_intents: true,
+            tool_request_summary: None,
             turn_result: TurnResult::FinalText("tool output".to_owned()),
             loop_verdict: Some(ToolLoopSupervisorVerdict::InjectWarning {
                 reason: "warning".to_owned(),
@@ -1369,11 +1575,14 @@ mod tests {
         if let RoundKernelDecision::ContinueWithFollowup(RoundFollowup::Tool {
             assistant_preface,
             payload: ToolDrivenFollowupPayload::ToolResult { text },
+            tool_request_summary,
             loop_warning_reason,
+            ..
         }) = decision
         {
             assert_eq!(assistant_preface, "preface");
             assert_eq!(text, "tool output");
+            assert!(tool_request_summary.is_none());
             assert_eq!(loop_warning_reason.as_deref(), Some("warning"));
         } else {
             panic!("unexpected decision: {decision:?}");
@@ -1385,6 +1594,7 @@ mod tests {
         let evaluation = RoundKernelEvaluation {
             assistant_preface: "preface".to_owned(),
             had_tool_intents: true,
+            tool_request_summary: None,
             turn_result: TurnResult::FinalText("tool output".to_owned()),
             loop_verdict: Some(ToolLoopSupervisorVerdict::HardStop {
                 reason: "stop".to_owned(),
@@ -1422,6 +1632,7 @@ mod tests {
         let evaluation = RoundKernelEvaluation {
             assistant_preface: "preface".to_owned(),
             had_tool_intents: true,
+            tool_request_summary: None,
             turn_result: TurnResult::ToolError(TurnFailure::retryable(
                 "tool_failed",
                 "tool failure",
@@ -1465,6 +1676,7 @@ mod tests {
         let evaluation = RoundKernelEvaluation {
             assistant_preface: "preface".to_owned(),
             had_tool_intents: true,
+            tool_request_summary: None,
             turn_result: TurnResult::FinalText("tool output".to_owned()),
             loop_verdict: Some(ToolLoopSupervisorVerdict::InjectWarning {
                 reason: "warning".to_owned(),
@@ -1599,5 +1811,95 @@ mod tests {
                 panic!("unexpected propagated error terminal action: {error}");
             }
         }
+    }
+
+    fn test_policy_with_consecutive_limit(limit: usize) -> TurnLoopPolicy {
+        TurnLoopPolicy {
+            max_rounds: 100,
+            max_tool_steps_per_round: 1,
+            max_repeated_tool_call_rounds: 100,
+            max_ping_pong_cycles: 100,
+            max_same_tool_failure_rounds: 100,
+            max_followup_tool_payload_chars: 8_000,
+            max_followup_tool_payload_chars_total: 20_000,
+            max_total_tool_calls: 200,
+            max_consecutive_same_tool: limit,
+        }
+    }
+
+    fn observe(
+        supervisor: &mut ToolLoopSupervisor,
+        policy: &TurnLoopPolicy,
+        tool_name: &str,
+    ) -> ToolLoopSupervisorVerdict {
+        supervisor.observe_round(policy, tool_name, tool_name, "ok", false)
+    }
+
+    #[test]
+    fn consecutive_same_tool_injects_warning_at_threshold() {
+        let policy = test_policy_with_consecutive_limit(3);
+        let mut supervisor = ToolLoopSupervisor::default();
+
+        // First two calls: below threshold
+        assert!(matches!(
+            observe(&mut supervisor, &policy, "shell.exec"),
+            ToolLoopSupervisorVerdict::Continue
+        ));
+        assert!(matches!(
+            observe(&mut supervisor, &policy, "shell.exec"),
+            ToolLoopSupervisorVerdict::Continue
+        ));
+        // Third call: hits threshold (>= 3) -> InjectWarning
+        assert!(matches!(
+            observe(&mut supervisor, &policy, "shell.exec"),
+            ToolLoopSupervisorVerdict::InjectWarning { .. }
+        ));
+    }
+
+    #[test]
+    fn consecutive_same_tool_hard_stops_on_repeat_warning() {
+        let policy = test_policy_with_consecutive_limit(3);
+        let mut supervisor = ToolLoopSupervisor::default();
+
+        // Get to threshold
+        observe(&mut supervisor, &policy, "shell.exec");
+        observe(&mut supervisor, &policy, "shell.exec");
+        observe(&mut supervisor, &policy, "shell.exec"); // InjectWarning
+        // Same pattern again -> HardStop
+        assert!(matches!(
+            observe(&mut supervisor, &policy, "shell.exec"),
+            ToolLoopSupervisorVerdict::HardStop { .. }
+        ));
+    }
+
+    #[test]
+    fn consecutive_same_tool_resets_on_tool_name_change() {
+        let policy = test_policy_with_consecutive_limit(3);
+        let mut supervisor = ToolLoopSupervisor::default();
+
+        observe(&mut supervisor, &policy, "shell.exec");
+        observe(&mut supervisor, &policy, "shell.exec");
+        // Switch tool - resets consecutive counter
+        assert!(matches!(
+            observe(&mut supervisor, &policy, "file.read"),
+            ToolLoopSupervisorVerdict::Continue
+        ));
+        // Back to shell.exec - should start fresh, not trigger warning
+        assert!(matches!(
+            observe(&mut supervisor, &policy, "shell.exec"),
+            ToolLoopSupervisorVerdict::Continue
+        ));
+    }
+
+    #[test]
+    fn global_circuit_breaker_allows_reaching_limit_and_trips_only_above_it() {
+        assert_eq!(tool_loop_circuit_breaker_reply(200, 200), None);
+        assert_eq!(
+            tool_loop_circuit_breaker_reply(201, 200).as_deref(),
+            Some(
+                "tool_loop_circuit_breaker: would exceed 201/200 tool calls this turn. Do you want to continue? Reply to resume."
+            )
+        );
+        assert!(tool_loop_circuit_breaker_reply(usize::MAX, 200).is_some());
     }
 }

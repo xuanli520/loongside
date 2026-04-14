@@ -75,7 +75,10 @@ mod tests {
 
         assert_eq!(config.mode, AuditMode::Fanout);
         assert!(config.retain_in_memory);
-        assert!(config.path.ends_with(".loongclaw/audit/events.jsonl"));
+        assert_eq!(
+            PathBuf::from(&config.path),
+            default_loongclaw_home().join("audit").join("events.jsonl")
+        );
     }
 
     #[test]

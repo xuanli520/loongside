@@ -294,18 +294,22 @@ async fn integ_malformed_tool_args_returns_error() {
     #[allow(clippy::wildcard_enum_match_arm)]
     match result {
         TurnResult::ToolError(err) => {
+            let mentions_repairable_shape = err.contains("tool input needs repair");
+            let mentions_object_requirement =
+                err.contains("must be an object") || err.contains("must be object");
             assert!(
-                err.contains("must be an object"),
-                "expected 'must be an object' in error, got: {err}"
+                mentions_repairable_shape && mentions_object_requirement,
+                "expected repairable object-shape error, got: {err}"
             );
         }
         other => {
-            panic!("expected ToolError with 'must be an object', got: {other:?}");
+            panic!("expected ToolError with repairable object-shape guidance, got: {other:?}");
         }
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::wildcard_enum_match_arm)]
 async fn integ_file_write_denied_without_capability() {
     let harness = TurnTestHarness::with_capabilities(BTreeSet::from([Capability::InvokeTool]));
 
@@ -324,10 +328,7 @@ async fn integ_file_write_denied_without_capability() {
                 "expected 'FilesystemWrite' in reason, got: {err}"
             );
         }
-        other @ (TurnResult::FinalText(_)
-        | TurnResult::NeedsApproval(_)
-        | TurnResult::ToolError(_)
-        | TurnResult::ProviderError(_)) => {
+        other => {
             panic!("expected ToolDenied with FilesystemWrite, got: {other:?}")
         }
     }

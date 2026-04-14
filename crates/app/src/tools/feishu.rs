@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::collections::BTreeMap;
 #[cfg(feature = "tool-file")]
 use std::fs;
@@ -11,23 +12,26 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use crate::CliResult;
-use crate::feishu::resources::calendar::{
+use crate::channel::ChannelOutboundTarget;
+use crate::channel::feishu::api::resources::bitable;
+use crate::channel::feishu::api::resources::calendar::{
     self, FeishuCalendarFreebusyQuery, FeishuCalendarListQuery,
 };
-use crate::feishu::resources::cards;
-use crate::feishu::resources::docs;
-use crate::feishu::resources::media;
-use crate::feishu::resources::messages::{
+use crate::channel::feishu::api::resources::cards;
+use crate::channel::feishu::api::resources::docs;
+use crate::channel::feishu::api::resources::media;
+use crate::channel::feishu::api::resources::messages::{
     self, FeishuMessageHistoryQuery, FeishuSearchMessagesQuery,
 };
-use crate::feishu::{
+use crate::channel::feishu::api::{
     FeishuClient, FeishuGrant, FeishuMessageResourceType, FeishuTokenStore, FeishuUserPrincipal,
     map_user_info_to_principal,
 };
+use crate::channel::feishu::send::deliver_feishu_message_body;
 
 const FEISHU_MESSAGE_RESOURCE_ACCEPTED_SCOPES: &[&str] = &[
     "im:message:readonly",
-    "im:message.group_msg:readonly",
+    "im:message.group_msg",
     "im:message",
     "im:message:send_as_bot",
     "im:message:send",
@@ -86,6 +90,54 @@ pub(crate) fn drain_deferred_feishu_card_updates(
 #[cfg(all(test, feature = "tool-file"))]
 const FEISHU_TOOL_ALIAS_PAIRS: &[(&str, &str)] = &[
     ("feishu_whoami", "feishu.whoami"),
+    ("feishu_bitable_app_create", "feishu.bitable.app.create"),
+    ("feishu_bitable_app_get", "feishu.bitable.app.get"),
+    ("feishu_bitable_app_list", "feishu.bitable.app.list"),
+    ("feishu_bitable_app_patch", "feishu.bitable.app.patch"),
+    ("feishu_bitable_app_copy", "feishu.bitable.app.copy"),
+    ("feishu_bitable_list", "feishu.bitable.list"),
+    ("feishu_bitable_table_create", "feishu.bitable.table.create"),
+    ("feishu_bitable_table_patch", "feishu.bitable.table.patch"),
+    (
+        "feishu_bitable_table_batch_create",
+        "feishu.bitable.table.batch_create",
+    ),
+    (
+        "feishu_bitable_record_create",
+        "feishu.bitable.record.create",
+    ),
+    (
+        "feishu_bitable_record_update",
+        "feishu.bitable.record.update",
+    ),
+    (
+        "feishu_bitable_record_delete",
+        "feishu.bitable.record.delete",
+    ),
+    (
+        "feishu_bitable_record_batch_create",
+        "feishu.bitable.record.batch_create",
+    ),
+    (
+        "feishu_bitable_record_batch_update",
+        "feishu.bitable.record.batch_update",
+    ),
+    (
+        "feishu_bitable_record_batch_delete",
+        "feishu.bitable.record.batch_delete",
+    ),
+    ("feishu_bitable_field_create", "feishu.bitable.field.create"),
+    ("feishu_bitable_field_list", "feishu.bitable.field.list"),
+    ("feishu_bitable_field_update", "feishu.bitable.field.update"),
+    ("feishu_bitable_field_delete", "feishu.bitable.field.delete"),
+    ("feishu_bitable_view_create", "feishu.bitable.view.create"),
+    ("feishu_bitable_view_get", "feishu.bitable.view.get"),
+    ("feishu_bitable_view_list", "feishu.bitable.view.list"),
+    ("feishu_bitable_view_patch", "feishu.bitable.view.patch"),
+    (
+        "feishu_bitable_record_search",
+        "feishu.bitable.record.search",
+    ),
     ("feishu_doc_create", "feishu.doc.create"),
     ("feishu_doc_append", "feishu.doc.append"),
     ("feishu_doc_read", "feishu.doc.read"),
@@ -106,6 +158,54 @@ const FEISHU_TOOL_ALIAS_PAIRS: &[(&str, &str)] = &[
 #[cfg(all(test, not(feature = "tool-file")))]
 const FEISHU_TOOL_ALIAS_PAIRS: &[(&str, &str)] = &[
     ("feishu_whoami", "feishu.whoami"),
+    ("feishu_bitable_app_create", "feishu.bitable.app.create"),
+    ("feishu_bitable_app_get", "feishu.bitable.app.get"),
+    ("feishu_bitable_app_list", "feishu.bitable.app.list"),
+    ("feishu_bitable_app_patch", "feishu.bitable.app.patch"),
+    ("feishu_bitable_app_copy", "feishu.bitable.app.copy"),
+    ("feishu_bitable_list", "feishu.bitable.list"),
+    ("feishu_bitable_table_create", "feishu.bitable.table.create"),
+    ("feishu_bitable_table_patch", "feishu.bitable.table.patch"),
+    (
+        "feishu_bitable_table_batch_create",
+        "feishu.bitable.table.batch_create",
+    ),
+    (
+        "feishu_bitable_record_create",
+        "feishu.bitable.record.create",
+    ),
+    (
+        "feishu_bitable_record_update",
+        "feishu.bitable.record.update",
+    ),
+    (
+        "feishu_bitable_record_delete",
+        "feishu.bitable.record.delete",
+    ),
+    (
+        "feishu_bitable_record_batch_create",
+        "feishu.bitable.record.batch_create",
+    ),
+    (
+        "feishu_bitable_record_batch_update",
+        "feishu.bitable.record.batch_update",
+    ),
+    (
+        "feishu_bitable_record_batch_delete",
+        "feishu.bitable.record.batch_delete",
+    ),
+    ("feishu_bitable_field_create", "feishu.bitable.field.create"),
+    ("feishu_bitable_field_list", "feishu.bitable.field.list"),
+    ("feishu_bitable_field_update", "feishu.bitable.field.update"),
+    ("feishu_bitable_field_delete", "feishu.bitable.field.delete"),
+    ("feishu_bitable_view_create", "feishu.bitable.view.create"),
+    ("feishu_bitable_view_get", "feishu.bitable.view.get"),
+    ("feishu_bitable_view_list", "feishu.bitable.view.list"),
+    ("feishu_bitable_view_patch", "feishu.bitable.view.patch"),
+    (
+        "feishu_bitable_record_search",
+        "feishu.bitable.record.search",
+    ),
     ("feishu_doc_create", "feishu.doc.create"),
     ("feishu_doc_append", "feishu.doc.append"),
     ("feishu_doc_read", "feishu.doc.read"),
@@ -672,6 +772,310 @@ struct FeishuCalendarListPayload {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+struct FeishuBitableListPayload {
+    #[serde(flatten)]
+    selector: GrantSelectorPayload,
+    app_token: String,
+    page_token: Option<String>,
+    page_size: Option<usize>,
+    #[serde(default, rename = "_loongclaw")]
+    internal: LoongclawInternalToolPayload,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FeishuBitableAppCreatePayload {
+    #[serde(flatten)]
+    selector: GrantSelectorPayload,
+    name: String,
+    folder_token: Option<String>,
+    #[serde(default, rename = "_loongclaw")]
+    internal: LoongclawInternalToolPayload,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FeishuBitableAppGetPayload {
+    #[serde(flatten)]
+    selector: GrantSelectorPayload,
+    app_token: String,
+    #[serde(default, rename = "_loongclaw")]
+    internal: LoongclawInternalToolPayload,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FeishuBitableAppListPayload {
+    #[serde(flatten)]
+    selector: GrantSelectorPayload,
+    folder_token: Option<String>,
+    page_token: Option<String>,
+    page_size: Option<usize>,
+    #[serde(default, rename = "_loongclaw")]
+    internal: LoongclawInternalToolPayload,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FeishuBitableAppPatchPayload {
+    #[serde(flatten)]
+    selector: GrantSelectorPayload,
+    app_token: String,
+    name: Option<String>,
+    is_advanced: Option<bool>,
+    #[serde(default, rename = "_loongclaw")]
+    internal: LoongclawInternalToolPayload,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FeishuBitableAppCopyPayload {
+    #[serde(flatten)]
+    selector: GrantSelectorPayload,
+    app_token: String,
+    name: String,
+    folder_token: Option<String>,
+    #[serde(default, rename = "_loongclaw")]
+    internal: LoongclawInternalToolPayload,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FeishuBitableRecordCreatePayload {
+    #[serde(flatten)]
+    selector: GrantSelectorPayload,
+    app_token: String,
+    table_id: String,
+    fields: Value,
+    #[serde(default, rename = "_loongclaw")]
+    internal: LoongclawInternalToolPayload,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FeishuBitableRecordUpdatePayload {
+    #[serde(flatten)]
+    selector: GrantSelectorPayload,
+    app_token: String,
+    table_id: String,
+    record_id: String,
+    fields: Value,
+    #[serde(default, rename = "_loongclaw")]
+    internal: LoongclawInternalToolPayload,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FeishuBitableRecordDeletePayload {
+    #[serde(flatten)]
+    selector: GrantSelectorPayload,
+    app_token: String,
+    table_id: String,
+    record_id: String,
+    #[serde(default, rename = "_loongclaw")]
+    internal: LoongclawInternalToolPayload,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FeishuBitableRecordBatchCreatePayload {
+    #[serde(flatten)]
+    selector: GrantSelectorPayload,
+    app_token: String,
+    table_id: String,
+    records: Vec<Value>,
+    #[serde(default, rename = "_loongclaw")]
+    internal: LoongclawInternalToolPayload,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FeishuBitableRecordBatchUpdatePayload {
+    #[serde(flatten)]
+    selector: GrantSelectorPayload,
+    app_token: String,
+    table_id: String,
+    records: Vec<Value>,
+    #[serde(default, rename = "_loongclaw")]
+    internal: LoongclawInternalToolPayload,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FeishuBitableRecordBatchDeletePayload {
+    #[serde(flatten)]
+    selector: GrantSelectorPayload,
+    app_token: String,
+    table_id: String,
+    records: Vec<String>,
+    #[serde(default, rename = "_loongclaw")]
+    internal: LoongclawInternalToolPayload,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FeishuBitableFieldCreatePayload {
+    #[serde(flatten)]
+    selector: GrantSelectorPayload,
+    app_token: String,
+    table_id: String,
+    field_name: String,
+    #[serde(rename = "type")]
+    field_type: i64,
+    property: Option<Value>,
+    #[serde(default, rename = "_loongclaw")]
+    internal: LoongclawInternalToolPayload,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FeishuBitableFieldListPayload {
+    #[serde(flatten)]
+    selector: GrantSelectorPayload,
+    app_token: String,
+    table_id: String,
+    view_id: Option<String>,
+    page_size: Option<usize>,
+    page_token: Option<String>,
+    #[serde(default, rename = "_loongclaw")]
+    internal: LoongclawInternalToolPayload,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FeishuBitableFieldUpdatePayload {
+    #[serde(flatten)]
+    selector: GrantSelectorPayload,
+    app_token: String,
+    table_id: String,
+    field_id: String,
+    field_name: String,
+    #[serde(rename = "type")]
+    field_type: i64,
+    property: Option<Value>,
+    #[serde(default, rename = "_loongclaw")]
+    internal: LoongclawInternalToolPayload,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FeishuBitableFieldDeletePayload {
+    #[serde(flatten)]
+    selector: GrantSelectorPayload,
+    app_token: String,
+    table_id: String,
+    field_id: String,
+    #[serde(default, rename = "_loongclaw")]
+    internal: LoongclawInternalToolPayload,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FeishuBitableViewCreatePayload {
+    #[serde(flatten)]
+    selector: GrantSelectorPayload,
+    app_token: String,
+    table_id: String,
+    view_name: String,
+    view_type: Option<String>,
+    #[serde(default, rename = "_loongclaw")]
+    internal: LoongclawInternalToolPayload,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FeishuBitableViewGetPayload {
+    #[serde(flatten)]
+    selector: GrantSelectorPayload,
+    app_token: String,
+    table_id: String,
+    view_id: String,
+    #[serde(default, rename = "_loongclaw")]
+    internal: LoongclawInternalToolPayload,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FeishuBitableViewListPayload {
+    #[serde(flatten)]
+    selector: GrantSelectorPayload,
+    app_token: String,
+    table_id: String,
+    page_size: Option<usize>,
+    page_token: Option<String>,
+    #[serde(default, rename = "_loongclaw")]
+    internal: LoongclawInternalToolPayload,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FeishuBitableViewPatchPayload {
+    #[serde(flatten)]
+    selector: GrantSelectorPayload,
+    app_token: String,
+    table_id: String,
+    view_id: String,
+    view_name: String,
+    #[serde(default, rename = "_loongclaw")]
+    internal: LoongclawInternalToolPayload,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FeishuBitableTableCreatePayload {
+    #[serde(flatten)]
+    selector: GrantSelectorPayload,
+    app_token: String,
+    name: String,
+    default_view_name: Option<String>,
+    fields: Option<Vec<Value>>,
+    #[serde(default, rename = "_loongclaw")]
+    internal: LoongclawInternalToolPayload,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FeishuBitableTablePatchPayload {
+    #[serde(flatten)]
+    selector: GrantSelectorPayload,
+    app_token: String,
+    table_id: String,
+    name: String,
+    #[serde(default, rename = "_loongclaw")]
+    internal: LoongclawInternalToolPayload,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FeishuBitableTableBatchCreatePayload {
+    #[serde(flatten)]
+    selector: GrantSelectorPayload,
+    app_token: String,
+    tables: Vec<Value>,
+    #[serde(default, rename = "_loongclaw")]
+    internal: LoongclawInternalToolPayload,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FeishuBitableRecordSearchPayload {
+    #[serde(flatten)]
+    selector: GrantSelectorPayload,
+    app_token: String,
+    table_id: String,
+    page_token: Option<String>,
+    page_size: Option<usize>,
+    view_id: Option<String>,
+    filter: Option<Value>,
+    sort: Option<Value>,
+    field_names: Option<Vec<String>>,
+    automatic_fields: Option<bool>,
+    #[serde(default, rename = "_loongclaw")]
+    internal: LoongclawInternalToolPayload,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 struct FeishuCalendarFreebusyPayload {
     #[serde(flatten)]
     selector: GrantSelectorPayload,
@@ -695,6 +1099,64 @@ pub(super) fn feishu_tool_alias_pairs() -> &'static [(&'static str, &'static str
 pub(super) fn canonical_feishu_tool_name(raw: &str) -> Option<&'static str> {
     match raw {
         "feishu.whoami" | "feishu_whoami" => Some("feishu.whoami"),
+        "feishu.bitable.app.create" | "feishu_bitable_app_create" => {
+            Some("feishu.bitable.app.create")
+        }
+        "feishu.bitable.app.get" | "feishu_bitable_app_get" => Some("feishu.bitable.app.get"),
+        "feishu.bitable.app.list" | "feishu_bitable_app_list" => Some("feishu.bitable.app.list"),
+        "feishu.bitable.app.patch" | "feishu_bitable_app_patch" => Some("feishu.bitable.app.patch"),
+        "feishu.bitable.app.copy" | "feishu_bitable_app_copy" => Some("feishu.bitable.app.copy"),
+        "feishu.bitable.list" | "feishu_bitable_list" => Some("feishu.bitable.list"),
+        "feishu.bitable.table.create" | "feishu_bitable_table_create" => {
+            Some("feishu.bitable.table.create")
+        }
+        "feishu.bitable.table.patch" | "feishu_bitable_table_patch" => {
+            Some("feishu.bitable.table.patch")
+        }
+        "feishu.bitable.table.batch_create" | "feishu_bitable_table_batch_create" => {
+            Some("feishu.bitable.table.batch_create")
+        }
+        "feishu.bitable.record.create" | "feishu_bitable_record_create" => {
+            Some("feishu.bitable.record.create")
+        }
+        "feishu.bitable.record.update" | "feishu_bitable_record_update" => {
+            Some("feishu.bitable.record.update")
+        }
+        "feishu.bitable.record.delete" | "feishu_bitable_record_delete" => {
+            Some("feishu.bitable.record.delete")
+        }
+        "feishu.bitable.record.batch_create" | "feishu_bitable_record_batch_create" => {
+            Some("feishu.bitable.record.batch_create")
+        }
+        "feishu.bitable.record.batch_update" | "feishu_bitable_record_batch_update" => {
+            Some("feishu.bitable.record.batch_update")
+        }
+        "feishu.bitable.record.batch_delete" | "feishu_bitable_record_batch_delete" => {
+            Some("feishu.bitable.record.batch_delete")
+        }
+        "feishu.bitable.field.create" | "feishu_bitable_field_create" => {
+            Some("feishu.bitable.field.create")
+        }
+        "feishu.bitable.field.list" | "feishu_bitable_field_list" => {
+            Some("feishu.bitable.field.list")
+        }
+        "feishu.bitable.field.update" | "feishu_bitable_field_update" => {
+            Some("feishu.bitable.field.update")
+        }
+        "feishu.bitable.field.delete" | "feishu_bitable_field_delete" => {
+            Some("feishu.bitable.field.delete")
+        }
+        "feishu.bitable.view.create" | "feishu_bitable_view_create" => {
+            Some("feishu.bitable.view.create")
+        }
+        "feishu.bitable.view.get" | "feishu_bitable_view_get" => Some("feishu.bitable.view.get"),
+        "feishu.bitable.view.list" | "feishu_bitable_view_list" => Some("feishu.bitable.view.list"),
+        "feishu.bitable.view.patch" | "feishu_bitable_view_patch" => {
+            Some("feishu.bitable.view.patch")
+        }
+        "feishu.bitable.record.search" | "feishu_bitable_record_search" => {
+            Some("feishu.bitable.record.search")
+        }
         "feishu.doc.create" | "feishu_doc_create" => Some("feishu.doc.create"),
         "feishu.doc.append" | "feishu_doc_append" => Some("feishu.doc.append"),
         "feishu.doc.read" | "feishu_doc_read" => Some("feishu.doc.read"),
@@ -718,8 +1180,129 @@ pub(super) fn is_known_feishu_tool_name(raw: &str) -> bool {
     canonical_feishu_tool_name(raw).is_some()
 }
 
+#[cfg(test)]
 pub(super) fn feishu_tool_registry_entries() -> Vec<super::ToolRegistryEntry> {
     let mut entries = Vec::new();
+    push_feishu_registry_entry(
+        &mut entries,
+        "feishu.bitable.app.create",
+        "Create a Feishu Bitable app with the selected account grant",
+    );
+    push_feishu_registry_entry(
+        &mut entries,
+        "feishu.bitable.app.get",
+        "Fetch Feishu Bitable app metadata with the selected account grant",
+    );
+    push_feishu_registry_entry(
+        &mut entries,
+        "feishu.bitable.app.list",
+        "List Feishu Bitable apps through the Drive API with the selected account grant",
+    );
+    push_feishu_registry_entry(
+        &mut entries,
+        "feishu.bitable.app.patch",
+        "Update Feishu Bitable app metadata with the selected account grant",
+    );
+    push_feishu_registry_entry(
+        &mut entries,
+        "feishu.bitable.app.copy",
+        "Copy a Feishu Bitable app with the selected account grant",
+    );
+    push_feishu_registry_entry(
+        &mut entries,
+        "feishu.bitable.list",
+        "List data tables in a Feishu Bitable app with the selected account grant",
+    );
+    push_feishu_registry_entry(
+        &mut entries,
+        "feishu.bitable.table.create",
+        "Create a Feishu Bitable table with the selected account grant",
+    );
+    push_feishu_registry_entry(
+        &mut entries,
+        "feishu.bitable.table.patch",
+        "Rename a Feishu Bitable table with the selected account grant",
+    );
+    push_feishu_registry_entry(
+        &mut entries,
+        "feishu.bitable.table.batch_create",
+        "Batch create Feishu Bitable tables with the selected account grant",
+    );
+    push_feishu_registry_entry(
+        &mut entries,
+        "feishu.bitable.record.create",
+        "Create a record in a Feishu Bitable table with the selected account grant",
+    );
+    push_feishu_registry_entry(
+        &mut entries,
+        "feishu.bitable.record.update",
+        "Update a record in a Feishu Bitable table with the selected account grant",
+    );
+    push_feishu_registry_entry(
+        &mut entries,
+        "feishu.bitable.record.delete",
+        "Delete a record in a Feishu Bitable table with the selected account grant",
+    );
+    push_feishu_registry_entry(
+        &mut entries,
+        "feishu.bitable.record.batch_create",
+        "Batch create records in a Feishu Bitable table with the selected account grant",
+    );
+    push_feishu_registry_entry(
+        &mut entries,
+        "feishu.bitable.record.batch_update",
+        "Batch update records in a Feishu Bitable table with the selected account grant",
+    );
+    push_feishu_registry_entry(
+        &mut entries,
+        "feishu.bitable.record.batch_delete",
+        "Batch delete records in a Feishu Bitable table with the selected account grant",
+    );
+    push_feishu_registry_entry(
+        &mut entries,
+        "feishu.bitable.field.create",
+        "Create a field in a Feishu Bitable table with the selected account grant",
+    );
+    push_feishu_registry_entry(
+        &mut entries,
+        "feishu.bitable.field.list",
+        "List fields in a Feishu Bitable table with the selected account grant",
+    );
+    push_feishu_registry_entry(
+        &mut entries,
+        "feishu.bitable.field.update",
+        "Update a field in a Feishu Bitable table with the selected account grant",
+    );
+    push_feishu_registry_entry(
+        &mut entries,
+        "feishu.bitable.field.delete",
+        "Delete a field in a Feishu Bitable table with the selected account grant",
+    );
+    push_feishu_registry_entry(
+        &mut entries,
+        "feishu.bitable.view.create",
+        "Create a view in a Feishu Bitable table with the selected account grant",
+    );
+    push_feishu_registry_entry(
+        &mut entries,
+        "feishu.bitable.view.get",
+        "Fetch a view in a Feishu Bitable table with the selected account grant",
+    );
+    push_feishu_registry_entry(
+        &mut entries,
+        "feishu.bitable.view.list",
+        "List views in a Feishu Bitable table with the selected account grant",
+    );
+    push_feishu_registry_entry(
+        &mut entries,
+        "feishu.bitable.view.patch",
+        "Patch a view in a Feishu Bitable table with the selected account grant",
+    );
+    push_feishu_registry_entry(
+        &mut entries,
+        "feishu.bitable.record.search",
+        "Search or list records in a Feishu Bitable table with the selected account grant",
+    );
     push_feishu_registry_entry(
         &mut entries,
         "feishu.calendar.freebusy",
@@ -792,6 +1375,507 @@ pub(super) fn feishu_tool_registry_entries() -> Vec<super::ToolRegistryEntry> {
 
 pub(super) fn feishu_provider_tool_definitions() -> Vec<Value> {
     let mut tools = Vec::new();
+    push_feishu_provider_tool_definition(
+        &mut tools,
+        "feishu_bitable_app_create",
+        "Create a Feishu Bitable app with the selected account grant.",
+        json!({
+            "type": "object",
+            "properties": {
+                "account_id": { "type": "string", "description": "Optional Feishu configured account id to route through." },
+                "open_id": { "type": "string", "description": "Optional explicit Feishu user open_id grant selector." },
+                "name": { "type": "string", "description": "Bitable app name." },
+                "folder_token": { "type": "string", "description": "Optional Drive folder token." }
+            },
+            "required": ["name"],
+            "additionalProperties": false
+        }),
+    );
+    push_feishu_provider_tool_definition(
+        &mut tools,
+        "feishu_bitable_app_get",
+        "Fetch Feishu Bitable app metadata with the selected account grant.",
+        json!({
+            "type": "object",
+            "properties": {
+                "account_id": { "type": "string", "description": "Optional Feishu configured account id to route through." },
+                "open_id": { "type": "string", "description": "Optional explicit Feishu user open_id grant selector." },
+                "app_token": { "type": "string", "description": "Feishu Bitable app token." }
+            },
+            "required": ["app_token"],
+            "additionalProperties": false
+        }),
+    );
+    push_feishu_provider_tool_definition(
+        &mut tools,
+        "feishu_bitable_app_list",
+        "List Feishu Bitable apps through the Drive API with the selected account grant.",
+        json!({
+            "type": "object",
+            "properties": {
+                "account_id": { "type": "string", "description": "Optional Feishu configured account id to route through." },
+                "open_id": { "type": "string", "description": "Optional explicit Feishu user open_id grant selector." },
+                "folder_token": { "type": "string", "description": "Optional Drive folder token." },
+                "page_size": { "type": "integer", "minimum": 1, "maximum": 200 },
+                "page_token": { "type": "string" }
+            },
+            "required": [],
+            "additionalProperties": false
+        }),
+    );
+    push_feishu_provider_tool_definition(
+        &mut tools,
+        "feishu_bitable_app_patch",
+        "Update Feishu Bitable app metadata with the selected account grant.",
+        json!({
+            "type": "object",
+            "properties": {
+                "account_id": { "type": "string", "description": "Optional Feishu configured account id to route through." },
+                "open_id": { "type": "string", "description": "Optional explicit Feishu user open_id grant selector." },
+                "app_token": { "type": "string", "description": "Feishu Bitable app token." },
+                "name": { "type": "string", "description": "Optional new app name." },
+                "is_advanced": { "type": "boolean", "description": "Optional advanced permission toggle." }
+            },
+            "required": ["app_token"],
+            "additionalProperties": false
+        }),
+    );
+    push_feishu_provider_tool_definition(
+        &mut tools,
+        "feishu_bitable_app_copy",
+        "Copy a Feishu Bitable app with the selected account grant.",
+        json!({
+            "type": "object",
+            "properties": {
+                "account_id": { "type": "string", "description": "Optional Feishu configured account id to route through." },
+                "open_id": { "type": "string", "description": "Optional explicit Feishu user open_id grant selector." },
+                "app_token": { "type": "string", "description": "Source Bitable app token." },
+                "name": { "type": "string", "description": "Copied app name." },
+                "folder_token": { "type": "string", "description": "Optional target Drive folder token." }
+            },
+            "required": ["app_token", "name"],
+            "additionalProperties": false
+        }),
+    );
+    push_feishu_provider_tool_definition(
+        &mut tools,
+        "feishu_bitable_list",
+        "List data tables in a Feishu Bitable app with the selected account grant.",
+        json!({
+            "type": "object",
+            "properties": {
+                "account_id": {
+                    "type": "string",
+                    "description": "Optional Feishu configured account id to route through."
+                },
+                "open_id": {
+                    "type": "string",
+                    "description": "Optional explicit Feishu user open_id grant selector."
+                },
+                "app_token": {
+                    "type": "string",
+                    "description": "Feishu Bitable app token."
+                },
+                "page_size": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100
+                },
+                "page_token": {
+                    "type": "string"
+                }
+            },
+            "required": ["app_token"],
+            "additionalProperties": false
+        }),
+    );
+    push_feishu_provider_tool_definition(
+        &mut tools,
+        "feishu_bitable_table_create",
+        "Create a Feishu Bitable table with the selected account grant.",
+        json!({
+            "type": "object",
+            "properties": {
+                "account_id": { "type": "string", "description": "Optional Feishu configured account id to route through." },
+                "open_id": { "type": "string", "description": "Optional explicit Feishu user open_id grant selector." },
+                "app_token": { "type": "string", "description": "Feishu Bitable app token." },
+                "name": { "type": "string", "description": "Bitable table name." },
+                "default_view_name": { "type": "string", "description": "Optional default view name." },
+                "fields": { "type": "array", "items": { "type": "object" }, "description": "Optional table field definitions." }
+            },
+            "required": ["app_token", "name"],
+            "additionalProperties": false
+        }),
+    );
+    push_feishu_provider_tool_definition(
+        &mut tools,
+        "feishu_bitable_table_patch",
+        "Rename a Feishu Bitable table with the selected account grant.",
+        json!({
+            "type": "object",
+            "properties": {
+                "account_id": { "type": "string", "description": "Optional Feishu configured account id to route through." },
+                "open_id": { "type": "string", "description": "Optional explicit Feishu user open_id grant selector." },
+                "app_token": { "type": "string", "description": "Feishu Bitable app token." },
+                "table_id": { "type": "string", "description": "Feishu Bitable table id." },
+                "name": { "type": "string", "description": "New table name." }
+            },
+            "required": ["app_token", "table_id", "name"],
+            "additionalProperties": false
+        }),
+    );
+    push_feishu_provider_tool_definition(
+        &mut tools,
+        "feishu_bitable_table_batch_create",
+        "Batch create Feishu Bitable tables with the selected account grant.",
+        json!({
+            "type": "object",
+            "properties": {
+                "account_id": { "type": "string", "description": "Optional Feishu configured account id to route through." },
+                "open_id": { "type": "string", "description": "Optional explicit Feishu user open_id grant selector." },
+                "app_token": { "type": "string", "description": "Feishu Bitable app token." },
+                "tables": { "type": "array", "items": { "type": "object" }, "description": "Tables to create; only `name` is sent upstream." }
+            },
+            "required": ["app_token", "tables"],
+            "additionalProperties": false
+        }),
+    );
+    push_feishu_provider_tool_definition(
+        &mut tools,
+        "feishu_bitable_record_create",
+        "Create a record in a Feishu Bitable table with the selected account grant.",
+        json!({
+            "type": "object",
+            "properties": {
+                "account_id": {
+                    "type": "string",
+                    "description": "Optional Feishu configured account id to route through."
+                },
+                "open_id": {
+                    "type": "string",
+                    "description": "Optional explicit Feishu user open_id grant selector."
+                },
+                "app_token": {
+                    "type": "string",
+                    "description": "Feishu Bitable app token."
+                },
+                "table_id": {
+                    "type": "string",
+                    "description": "Feishu Bitable table id."
+                },
+                "fields": {
+                    "type": "object",
+                    "description": "Record field values keyed by field name."
+                }
+            },
+            "required": ["app_token", "table_id", "fields"],
+            "additionalProperties": false
+        }),
+    );
+    push_feishu_provider_tool_definition(
+        &mut tools,
+        "feishu_bitable_record_update",
+        "Update a record in a Feishu Bitable table with the selected account grant.",
+        json!({
+            "type": "object",
+            "properties": {
+                "account_id": { "type": "string", "description": "Optional Feishu configured account id to route through." },
+                "open_id": { "type": "string", "description": "Optional explicit Feishu user open_id grant selector." },
+                "app_token": { "type": "string", "description": "Feishu Bitable app token." },
+                "table_id": { "type": "string", "description": "Feishu Bitable table id." },
+                "record_id": { "type": "string", "description": "Feishu Bitable record id." },
+                "fields": { "type": "object", "description": "Record field values keyed by field name." }
+            },
+            "required": ["app_token", "table_id", "record_id", "fields"],
+            "additionalProperties": false
+        }),
+    );
+    push_feishu_provider_tool_definition(
+        &mut tools,
+        "feishu_bitable_record_delete",
+        "Delete a record in a Feishu Bitable table with the selected account grant.",
+        json!({
+            "type": "object",
+            "properties": {
+                "account_id": { "type": "string", "description": "Optional Feishu configured account id to route through." },
+                "open_id": { "type": "string", "description": "Optional explicit Feishu user open_id grant selector." },
+                "app_token": { "type": "string", "description": "Feishu Bitable app token." },
+                "table_id": { "type": "string", "description": "Feishu Bitable table id." },
+                "record_id": { "type": "string", "description": "Feishu Bitable record id." }
+            },
+            "required": ["app_token", "table_id", "record_id"],
+            "additionalProperties": false
+        }),
+    );
+    push_feishu_provider_tool_definition(
+        &mut tools,
+        "feishu_bitable_record_batch_create",
+        "Batch create records in a Feishu Bitable table with the selected account grant.",
+        json!({
+            "type": "object",
+            "properties": {
+                "account_id": { "type": "string" },
+                "open_id": { "type": "string" },
+                "app_token": { "type": "string" },
+                "table_id": { "type": "string" },
+                "records": { "type": "array", "items": { "type": "object" } }
+            },
+            "required": ["app_token", "table_id", "records"],
+            "additionalProperties": false
+        }),
+    );
+    push_feishu_provider_tool_definition(
+        &mut tools,
+        "feishu_bitable_record_batch_update",
+        "Batch update records in a Feishu Bitable table with the selected account grant.",
+        json!({
+            "type": "object",
+            "properties": {
+                "account_id": { "type": "string" },
+                "open_id": { "type": "string" },
+                "app_token": { "type": "string" },
+                "table_id": { "type": "string" },
+                "records": { "type": "array", "items": { "type": "object" } }
+            },
+            "required": ["app_token", "table_id", "records"],
+            "additionalProperties": false
+        }),
+    );
+    push_feishu_provider_tool_definition(
+        &mut tools,
+        "feishu_bitable_record_batch_delete",
+        "Batch delete records in a Feishu Bitable table with the selected account grant.",
+        json!({
+            "type": "object",
+            "properties": {
+                "account_id": { "type": "string" },
+                "open_id": { "type": "string" },
+                "app_token": { "type": "string" },
+                "table_id": { "type": "string" },
+                "records": { "type": "array", "items": { "type": "string" } }
+            },
+            "required": ["app_token", "table_id", "records"],
+            "additionalProperties": false
+        }),
+    );
+    push_feishu_provider_tool_definition(
+        &mut tools,
+        "feishu_bitable_field_create",
+        "Create a field in a Feishu Bitable table with the selected account grant.",
+        json!({
+            "type": "object",
+            "properties": {
+                "account_id": { "type": "string" },
+                "open_id": { "type": "string" },
+                "app_token": { "type": "string" },
+                "table_id": { "type": "string" },
+                "field_name": { "type": "string" },
+                "type": { "type": "integer" },
+                "property": {}
+            },
+            "required": ["app_token", "table_id", "field_name", "type"],
+            "additionalProperties": false
+        }),
+    );
+    push_feishu_provider_tool_definition(
+        &mut tools,
+        "feishu_bitable_field_list",
+        "List fields in a Feishu Bitable table with the selected account grant.",
+        json!({
+            "type": "object",
+            "properties": {
+                "account_id": { "type": "string" },
+                "open_id": { "type": "string" },
+                "app_token": { "type": "string" },
+                "table_id": { "type": "string" },
+                "view_id": { "type": "string" },
+                "page_size": { "type": "integer" },
+                "page_token": { "type": "string" }
+            },
+            "required": ["app_token", "table_id"],
+            "additionalProperties": false
+        }),
+    );
+    push_feishu_provider_tool_definition(
+        &mut tools,
+        "feishu_bitable_field_update",
+        "Update a field in a Feishu Bitable table with the selected account grant.",
+        json!({
+            "type": "object",
+            "properties": {
+                "account_id": { "type": "string" },
+                "open_id": { "type": "string" },
+                "app_token": { "type": "string" },
+                "table_id": { "type": "string" },
+                "field_id": { "type": "string" },
+                "field_name": { "type": "string" },
+                "type": { "type": "integer" },
+                "property": {}
+            },
+            "required": ["app_token", "table_id", "field_id", "field_name", "type"],
+            "additionalProperties": false
+        }),
+    );
+    push_feishu_provider_tool_definition(
+        &mut tools,
+        "feishu_bitable_field_delete",
+        "Delete a field in a Feishu Bitable table with the selected account grant.",
+        json!({
+            "type": "object",
+            "properties": {
+                "account_id": { "type": "string" },
+                "open_id": { "type": "string" },
+                "app_token": { "type": "string" },
+                "table_id": { "type": "string" },
+                "field_id": { "type": "string" }
+            },
+            "required": ["app_token", "table_id", "field_id"],
+            "additionalProperties": false
+        }),
+    );
+    push_feishu_provider_tool_definition(
+        &mut tools,
+        "feishu_bitable_view_create",
+        "Create a view in a Feishu Bitable table with the selected account grant.",
+        json!({
+            "type": "object",
+            "properties": {
+                "account_id": { "type": "string" },
+                "open_id": { "type": "string" },
+                "app_token": { "type": "string" },
+                "table_id": { "type": "string" },
+                "view_name": { "type": "string" },
+                "view_type": { "type": "string" }
+            },
+            "required": ["app_token", "table_id", "view_name"],
+            "additionalProperties": false
+        }),
+    );
+    push_feishu_provider_tool_definition(
+        &mut tools,
+        "feishu_bitable_view_get",
+        "Fetch a view in a Feishu Bitable table with the selected account grant.",
+        json!({
+            "type": "object",
+            "properties": {
+                "account_id": { "type": "string" },
+                "open_id": { "type": "string" },
+                "app_token": { "type": "string" },
+                "table_id": { "type": "string" },
+                "view_id": { "type": "string" }
+            },
+            "required": ["app_token", "table_id", "view_id"],
+            "additionalProperties": false
+        }),
+    );
+    push_feishu_provider_tool_definition(
+        &mut tools,
+        "feishu_bitable_view_list",
+        "List views in a Feishu Bitable table with the selected account grant.",
+        json!({
+            "type": "object",
+            "properties": {
+                "account_id": { "type": "string" },
+                "open_id": { "type": "string" },
+                "app_token": { "type": "string" },
+                "table_id": { "type": "string" },
+                "page_size": { "type": "integer" },
+                "page_token": { "type": "string" }
+            },
+            "required": ["app_token", "table_id"],
+            "additionalProperties": false
+        }),
+    );
+    push_feishu_provider_tool_definition(
+        &mut tools,
+        "feishu_bitable_view_patch",
+        "Patch a view in a Feishu Bitable table with the selected account grant.",
+        json!({
+            "type": "object",
+            "properties": {
+                "account_id": { "type": "string" },
+                "open_id": { "type": "string" },
+                "app_token": { "type": "string" },
+                "table_id": { "type": "string" },
+                "view_id": { "type": "string" },
+                "view_name": { "type": "string" }
+            },
+            "required": ["app_token", "table_id", "view_id", "view_name"],
+            "additionalProperties": false
+        }),
+    );
+    push_feishu_provider_tool_definition(
+        &mut tools,
+        "feishu_bitable_record_search",
+        "Search or list records in a Feishu Bitable table with the selected account grant.",
+        json!({
+            "type": "object",
+            "properties": {
+                "account_id": {
+                    "type": "string",
+                    "description": "Optional Feishu configured account id to route through."
+                },
+                "open_id": {
+                    "type": "string",
+                    "description": "Optional explicit Feishu user open_id grant selector."
+                },
+                "app_token": {
+                    "type": "string",
+                    "description": "Feishu Bitable app token."
+                },
+                "table_id": {
+                    "type": "string",
+                    "description": "Feishu Bitable table id."
+                },
+                "view_id": {
+                    "type": "string",
+                    "description": "Optional Bitable view id."
+                },
+                "filter": {
+                    "type": "object",
+                    "description": "Optional Feishu Bitable search filter object."
+                },
+                "sort": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "field_name": {
+                                "type": "string"
+                            },
+                            "desc": {
+                                "type": "boolean"
+                            }
+                        },
+                        "required": ["field_name", "desc"],
+                        "additionalProperties": false
+                    },
+                    "description": "Optional Feishu Bitable sort rules."
+                },
+                "field_names": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "description": "Optional subset of field names to return."
+                },
+                "automatic_fields": {
+                    "type": "boolean",
+                    "description": "Whether to return automatic fields such as created_time and last_modified_time."
+                },
+                "page_size": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 500
+                },
+                "page_token": {
+                    "type": "string"
+                }
+            },
+            "required": ["app_token", "table_id"],
+            "additionalProperties": false
+        }),
+    );
     push_feishu_provider_tool_definition(
         &mut tools,
         "feishu_calendar_freebusy",
@@ -1417,8 +2501,48 @@ pub(super) fn feishu_provider_tool_definitions() -> Vec<Value> {
     tools
 }
 
+pub(super) fn feishu_provider_tool_definition(tool_name: &str) -> Option<Value> {
+    feishu_provider_tool_definitions()
+        .into_iter()
+        .find(|definition| {
+            definition
+                .get("function")
+                .and_then(|value| value.get("name"))
+                .and_then(Value::as_str)
+                .map(super::canonical_tool_name)
+                == Some(tool_name)
+        })
+}
+
+#[cfg(test)]
 pub(super) fn feishu_shape_examples() -> BTreeMap<&'static str, Value> {
     let mut shapes = BTreeMap::new();
+    shapes.insert(
+        "feishu.bitable.list",
+        json!({
+            "app_token": "bascnDemoAppToken",
+            "page_size": 20
+        }),
+    );
+    shapes.insert(
+        "feishu.bitable.record.create",
+        json!({
+            "app_token": "bascnDemoAppToken",
+            "table_id": "tblDemo",
+            "fields": {
+                "Name": "Release note",
+                "Status": "Draft"
+            }
+        }),
+    );
+    shapes.insert(
+        "feishu.bitable.record.search",
+        json!({
+            "app_token": "bascnDemoAppToken",
+            "table_id": "tblDemo",
+            "page_size": 20
+        }),
+    );
     shapes.insert(
         "feishu.doc.create",
         json!({
@@ -1518,6 +2642,76 @@ pub(super) fn execute_feishu_tool_with_config(
 ) -> Result<ToolCoreOutcome, String> {
     match request.tool_name.as_str() {
         "feishu.whoami" => execute_feishu_whoami_tool_with_config(request, config),
+        "feishu.bitable.app.create" => {
+            execute_feishu_bitable_app_create_tool_with_config(request, config)
+        }
+        "feishu.bitable.app.get" => {
+            execute_feishu_bitable_app_get_tool_with_config(request, config)
+        }
+        "feishu.bitable.app.list" => {
+            execute_feishu_bitable_app_list_tool_with_config(request, config)
+        }
+        "feishu.bitable.app.patch" => {
+            execute_feishu_bitable_app_patch_tool_with_config(request, config)
+        }
+        "feishu.bitable.app.copy" => {
+            execute_feishu_bitable_app_copy_tool_with_config(request, config)
+        }
+        "feishu.bitable.list" => execute_feishu_bitable_list_tool_with_config(request, config),
+        "feishu.bitable.table.create" => {
+            execute_feishu_bitable_table_create_tool_with_config(request, config)
+        }
+        "feishu.bitable.table.patch" => {
+            execute_feishu_bitable_table_patch_tool_with_config(request, config)
+        }
+        "feishu.bitable.table.batch_create" => {
+            execute_feishu_bitable_table_batch_create_tool_with_config(request, config)
+        }
+        "feishu.bitable.record.create" => {
+            execute_feishu_bitable_record_create_tool_with_config(request, config)
+        }
+        "feishu.bitable.record.update" => {
+            execute_feishu_bitable_record_update_tool_with_config(request, config)
+        }
+        "feishu.bitable.record.delete" => {
+            execute_feishu_bitable_record_delete_tool_with_config(request, config)
+        }
+        "feishu.bitable.record.batch_create" => {
+            execute_feishu_bitable_record_batch_create_tool_with_config(request, config)
+        }
+        "feishu.bitable.record.batch_update" => {
+            execute_feishu_bitable_record_batch_update_tool_with_config(request, config)
+        }
+        "feishu.bitable.record.batch_delete" => {
+            execute_feishu_bitable_record_batch_delete_tool_with_config(request, config)
+        }
+        "feishu.bitable.field.create" => {
+            execute_feishu_bitable_field_create_tool_with_config(request, config)
+        }
+        "feishu.bitable.field.list" => {
+            execute_feishu_bitable_field_list_tool_with_config(request, config)
+        }
+        "feishu.bitable.field.update" => {
+            execute_feishu_bitable_field_update_tool_with_config(request, config)
+        }
+        "feishu.bitable.field.delete" => {
+            execute_feishu_bitable_field_delete_tool_with_config(request, config)
+        }
+        "feishu.bitable.view.create" => {
+            execute_feishu_bitable_view_create_tool_with_config(request, config)
+        }
+        "feishu.bitable.view.get" => {
+            execute_feishu_bitable_view_get_tool_with_config(request, config)
+        }
+        "feishu.bitable.view.list" => {
+            execute_feishu_bitable_view_list_tool_with_config(request, config)
+        }
+        "feishu.bitable.view.patch" => {
+            execute_feishu_bitable_view_patch_tool_with_config(request, config)
+        }
+        "feishu.bitable.record.search" => {
+            execute_feishu_bitable_record_search_tool_with_config(request, config)
+        }
         "feishu.doc.create" => execute_feishu_doc_create_tool_with_config(request, config),
         "feishu.doc.append" => execute_feishu_doc_append_tool_with_config(request, config),
         "feishu.doc.read" => execute_feishu_doc_read_tool_with_config(request, config),
@@ -1555,8 +2749,12 @@ fn execute_feishu_whoami_tool_with_config(
     let tool_name = request.tool_name;
 
     run_feishu_future(async move {
-        let grant =
-            crate::feishu::ensure_fresh_user_grant(&context.client, &context.store, &grant).await?;
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
         let user_info = context.client.get_user_info(&grant.access_token).await?;
         let principal = map_user_info_to_principal(context.account_id.as_str(), &user_info)?;
 
@@ -1569,6 +2767,1239 @@ fn execute_feishu_whoami_tool_with_config(
                 "user_info": user_info,
                 "grant_scopes": grant.scopes.as_slice(),
             }),
+        ))
+    })
+}
+
+fn execute_feishu_bitable_list_tool_with_config(
+    request: ToolCoreRequest,
+    config: &super::runtime_config::ToolRuntimeConfig,
+) -> Result<ToolCoreOutcome, String> {
+    let payload =
+        parse_payload::<FeishuBitableListPayload>("feishu.bitable.list", request.payload)?;
+    let context = load_feishu_tool_context(
+        config,
+        requested_account_id(payload.selector.account_id.as_deref(), &payload.internal),
+    )?;
+    let grant = require_selected_grant(&context, payload.selector.open_id.as_deref())?;
+    let app_token = require_non_empty("feishu.bitable.list", "app_token", &payload.app_token)?;
+    let tool_name = request.tool_name;
+
+    run_feishu_future(async move {
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
+        ensure_required_scopes(&grant, &["base:table:read"], tool_name.as_str())?;
+        let result = bitable::list_bitable_tables(
+            &context.client,
+            &grant.access_token,
+            &app_token,
+            payload.page_token.as_deref(),
+            payload.page_size,
+        )
+        .await?;
+
+        Ok(ok_outcome(
+            tool_name.as_str(),
+            context.configured_account_label.as_str(),
+            context.account_id.as_str(),
+            &grant.principal,
+            json!({
+                "tables": result.items,
+                "has_more": result.has_more,
+                "page_token": result.page_token,
+            }),
+        ))
+    })
+}
+
+fn execute_feishu_bitable_app_create_tool_with_config(
+    request: ToolCoreRequest,
+    config: &super::runtime_config::ToolRuntimeConfig,
+) -> Result<ToolCoreOutcome, String> {
+    let payload = parse_payload::<FeishuBitableAppCreatePayload>(
+        "feishu.bitable.app.create",
+        request.payload,
+    )?;
+    let context = load_feishu_tool_context(
+        config,
+        requested_account_id(payload.selector.account_id.as_deref(), &payload.internal),
+    )?;
+    let grant = require_selected_grant(&context, payload.selector.open_id.as_deref())?;
+    let name = require_non_empty("feishu.bitable.app.create", "name", &payload.name)?;
+    let folder_token = payload.folder_token;
+    let tool_name = request.tool_name;
+
+    run_feishu_future(async move {
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
+        ensure_any_required_scope(&grant, &["bitable:app"], tool_name.as_str())?;
+        let app = bitable::create_bitable_app(
+            &context.client,
+            &grant.access_token,
+            &name,
+            folder_token.as_deref(),
+        )
+        .await?;
+
+        Ok(ok_outcome(
+            tool_name.as_str(),
+            context.configured_account_label.as_str(),
+            context.account_id.as_str(),
+            &grant.principal,
+            json!({ "app": app }),
+        ))
+    })
+}
+
+fn execute_feishu_bitable_app_get_tool_with_config(
+    request: ToolCoreRequest,
+    config: &super::runtime_config::ToolRuntimeConfig,
+) -> Result<ToolCoreOutcome, String> {
+    let payload =
+        parse_payload::<FeishuBitableAppGetPayload>("feishu.bitable.app.get", request.payload)?;
+    let context = load_feishu_tool_context(
+        config,
+        requested_account_id(payload.selector.account_id.as_deref(), &payload.internal),
+    )?;
+    let grant = require_selected_grant(&context, payload.selector.open_id.as_deref())?;
+    let app_token = require_non_empty("feishu.bitable.app.get", "app_token", &payload.app_token)?;
+    let tool_name = request.tool_name;
+
+    run_feishu_future(async move {
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
+        ensure_any_required_scope(&grant, &["bitable:app"], tool_name.as_str())?;
+        let app =
+            bitable::get_bitable_app(&context.client, &grant.access_token, &app_token).await?;
+
+        Ok(ok_outcome(
+            tool_name.as_str(),
+            context.configured_account_label.as_str(),
+            context.account_id.as_str(),
+            &grant.principal,
+            json!({ "app": app }),
+        ))
+    })
+}
+
+fn execute_feishu_bitable_app_list_tool_with_config(
+    request: ToolCoreRequest,
+    config: &super::runtime_config::ToolRuntimeConfig,
+) -> Result<ToolCoreOutcome, String> {
+    let payload =
+        parse_payload::<FeishuBitableAppListPayload>("feishu.bitable.app.list", request.payload)?;
+    let context = load_feishu_tool_context(
+        config,
+        requested_account_id(payload.selector.account_id.as_deref(), &payload.internal),
+    )?;
+    let grant = require_selected_grant(&context, payload.selector.open_id.as_deref())?;
+    let query = bitable::BitableAppListQuery {
+        folder_token: payload.folder_token,
+        page_token: payload.page_token,
+        page_size: payload.page_size,
+    };
+    let tool_name = request.tool_name;
+
+    run_feishu_future(async move {
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
+        ensure_required_scopes(&grant, &["drive:drive:readonly"], tool_name.as_str())?;
+        let result =
+            bitable::list_bitable_apps(&context.client, &grant.access_token, &query).await?;
+
+        Ok(ok_outcome(
+            tool_name.as_str(),
+            context.configured_account_label.as_str(),
+            context.account_id.as_str(),
+            &grant.principal,
+            json!({
+                "apps": result.apps,
+                "page_token": result.page_token,
+                "has_more": result.has_more,
+            }),
+        ))
+    })
+}
+
+fn execute_feishu_bitable_app_patch_tool_with_config(
+    request: ToolCoreRequest,
+    config: &super::runtime_config::ToolRuntimeConfig,
+) -> Result<ToolCoreOutcome, String> {
+    let payload =
+        parse_payload::<FeishuBitableAppPatchPayload>("feishu.bitable.app.patch", request.payload)?;
+    let context = load_feishu_tool_context(
+        config,
+        requested_account_id(payload.selector.account_id.as_deref(), &payload.internal),
+    )?;
+    let grant = require_selected_grant(&context, payload.selector.open_id.as_deref())?;
+    let app_token = require_non_empty("feishu.bitable.app.patch", "app_token", &payload.app_token)?;
+    let name = payload.name;
+    let is_advanced = payload.is_advanced;
+    let tool_name = request.tool_name;
+
+    run_feishu_future(async move {
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
+        ensure_any_required_scope(&grant, &["bitable:app"], tool_name.as_str())?;
+        let app = bitable::patch_bitable_app(
+            &context.client,
+            &grant.access_token,
+            &app_token,
+            name.as_deref(),
+            is_advanced,
+        )
+        .await?;
+
+        Ok(ok_outcome(
+            tool_name.as_str(),
+            context.configured_account_label.as_str(),
+            context.account_id.as_str(),
+            &grant.principal,
+            json!({ "app": app }),
+        ))
+    })
+}
+
+fn execute_feishu_bitable_app_copy_tool_with_config(
+    request: ToolCoreRequest,
+    config: &super::runtime_config::ToolRuntimeConfig,
+) -> Result<ToolCoreOutcome, String> {
+    let payload =
+        parse_payload::<FeishuBitableAppCopyPayload>("feishu.bitable.app.copy", request.payload)?;
+    let context = load_feishu_tool_context(
+        config,
+        requested_account_id(payload.selector.account_id.as_deref(), &payload.internal),
+    )?;
+    let grant = require_selected_grant(&context, payload.selector.open_id.as_deref())?;
+    let app_token = require_non_empty("feishu.bitable.app.copy", "app_token", &payload.app_token)?;
+    let name = require_non_empty("feishu.bitable.app.copy", "name", &payload.name)?;
+    let folder_token = payload.folder_token;
+    let tool_name = request.tool_name;
+
+    run_feishu_future(async move {
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
+        ensure_any_required_scope(&grant, &["bitable:app"], tool_name.as_str())?;
+        let app = bitable::copy_bitable_app(
+            &context.client,
+            &grant.access_token,
+            &app_token,
+            &name,
+            folder_token.as_deref(),
+        )
+        .await?;
+
+        Ok(ok_outcome(
+            tool_name.as_str(),
+            context.configured_account_label.as_str(),
+            context.account_id.as_str(),
+            &grant.principal,
+            json!({ "app": app }),
+        ))
+    })
+}
+
+fn execute_feishu_bitable_record_create_tool_with_config(
+    request: ToolCoreRequest,
+    config: &super::runtime_config::ToolRuntimeConfig,
+) -> Result<ToolCoreOutcome, String> {
+    let payload = parse_payload::<FeishuBitableRecordCreatePayload>(
+        "feishu.bitable.record.create",
+        request.payload,
+    )?;
+    let context = load_feishu_tool_context(
+        config,
+        requested_account_id(payload.selector.account_id.as_deref(), &payload.internal),
+    )?;
+    let grant = require_selected_grant(&context, payload.selector.open_id.as_deref())?;
+    let app_token = require_non_empty(
+        "feishu.bitable.record.create",
+        "app_token",
+        &payload.app_token,
+    )?;
+    let table_id = require_non_empty(
+        "feishu.bitable.record.create",
+        "table_id",
+        &payload.table_id,
+    )?;
+    if !payload.fields.is_object() {
+        return Err(format!(
+            "feishu.bitable.record.create: `fields` must be a JSON object, got {}",
+            payload.fields
+        ));
+    }
+    let fields = payload.fields;
+    let tool_name = request.tool_name;
+
+    run_feishu_future(async move {
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
+        ensure_required_scopes(&grant, &["base:record:create"], tool_name.as_str())?;
+        let record = bitable::create_bitable_record(
+            &context.client,
+            &grant.access_token,
+            &app_token,
+            &table_id,
+            fields,
+        )
+        .await?;
+
+        Ok(ok_outcome(
+            tool_name.as_str(),
+            context.configured_account_label.as_str(),
+            context.account_id.as_str(),
+            &grant.principal,
+            json!({
+                "record": record,
+            }),
+        ))
+    })
+}
+
+fn execute_feishu_bitable_table_create_tool_with_config(
+    request: ToolCoreRequest,
+    config: &super::runtime_config::ToolRuntimeConfig,
+) -> Result<ToolCoreOutcome, String> {
+    let payload = parse_payload::<FeishuBitableTableCreatePayload>(
+        "feishu.bitable.table.create",
+        request.payload,
+    )?;
+    let context = load_feishu_tool_context(
+        config,
+        requested_account_id(payload.selector.account_id.as_deref(), &payload.internal),
+    )?;
+    let grant = require_selected_grant(&context, payload.selector.open_id.as_deref())?;
+    let app_token = require_non_empty(
+        "feishu.bitable.table.create",
+        "app_token",
+        &payload.app_token,
+    )?;
+    let name = require_non_empty("feishu.bitable.table.create", "name", &payload.name)?;
+    let default_view_name = payload.default_view_name;
+    let fields = payload.fields;
+    let tool_name = request.tool_name;
+
+    run_feishu_future(async move {
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
+        ensure_any_required_scope(&grant, &["bitable:app"], tool_name.as_str())?;
+        let result = bitable::create_bitable_table(
+            &context.client,
+            &grant.access_token,
+            &app_token,
+            &name,
+            default_view_name.as_deref(),
+            fields,
+        )
+        .await?;
+
+        Ok(ok_outcome(
+            tool_name.as_str(),
+            context.configured_account_label.as_str(),
+            context.account_id.as_str(),
+            &grant.principal,
+            json!({ "result": result }),
+        ))
+    })
+}
+
+fn execute_feishu_bitable_table_patch_tool_with_config(
+    request: ToolCoreRequest,
+    config: &super::runtime_config::ToolRuntimeConfig,
+) -> Result<ToolCoreOutcome, String> {
+    let payload = parse_payload::<FeishuBitableTablePatchPayload>(
+        "feishu.bitable.table.patch",
+        request.payload,
+    )?;
+    let context = load_feishu_tool_context(
+        config,
+        requested_account_id(payload.selector.account_id.as_deref(), &payload.internal),
+    )?;
+    let grant = require_selected_grant(&context, payload.selector.open_id.as_deref())?;
+    let app_token = require_non_empty(
+        "feishu.bitable.table.patch",
+        "app_token",
+        &payload.app_token,
+    )?;
+    let table_id = require_non_empty("feishu.bitable.table.patch", "table_id", &payload.table_id)?;
+    let name = require_non_empty("feishu.bitable.table.patch", "name", &payload.name)?;
+    let tool_name = request.tool_name;
+
+    run_feishu_future(async move {
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
+        ensure_any_required_scope(&grant, &["bitable:app"], tool_name.as_str())?;
+        let result = bitable::patch_bitable_table(
+            &context.client,
+            &grant.access_token,
+            &app_token,
+            &table_id,
+            &name,
+        )
+        .await?;
+
+        Ok(ok_outcome(
+            tool_name.as_str(),
+            context.configured_account_label.as_str(),
+            context.account_id.as_str(),
+            &grant.principal,
+            json!({ "result": result }),
+        ))
+    })
+}
+
+fn execute_feishu_bitable_table_batch_create_tool_with_config(
+    request: ToolCoreRequest,
+    config: &super::runtime_config::ToolRuntimeConfig,
+) -> Result<ToolCoreOutcome, String> {
+    let payload = parse_payload::<FeishuBitableTableBatchCreatePayload>(
+        "feishu.bitable.table.batch_create",
+        request.payload,
+    )?;
+    let context = load_feishu_tool_context(
+        config,
+        requested_account_id(payload.selector.account_id.as_deref(), &payload.internal),
+    )?;
+    let grant = require_selected_grant(&context, payload.selector.open_id.as_deref())?;
+    let app_token = require_non_empty(
+        "feishu.bitable.table.batch_create",
+        "app_token",
+        &payload.app_token,
+    )?;
+    let tables = payload.tables;
+    let tool_name = request.tool_name;
+
+    run_feishu_future(async move {
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
+        ensure_any_required_scope(&grant, &["bitable:app"], tool_name.as_str())?;
+        let result = bitable::batch_create_bitable_tables(
+            &context.client,
+            &grant.access_token,
+            &app_token,
+            tables,
+        )
+        .await?;
+
+        Ok(ok_outcome(
+            tool_name.as_str(),
+            context.configured_account_label.as_str(),
+            context.account_id.as_str(),
+            &grant.principal,
+            json!({ "result": result }),
+        ))
+    })
+}
+
+fn execute_feishu_bitable_record_search_tool_with_config(
+    request: ToolCoreRequest,
+    config: &super::runtime_config::ToolRuntimeConfig,
+) -> Result<ToolCoreOutcome, String> {
+    let payload = parse_payload::<FeishuBitableRecordSearchPayload>(
+        "feishu.bitable.record.search",
+        request.payload,
+    )?;
+    let context = load_feishu_tool_context(
+        config,
+        requested_account_id(payload.selector.account_id.as_deref(), &payload.internal),
+    )?;
+    let grant = require_selected_grant(&context, payload.selector.open_id.as_deref())?;
+    let app_token = require_non_empty(
+        "feishu.bitable.record.search",
+        "app_token",
+        &payload.app_token,
+    )?;
+    let table_id = require_non_empty(
+        "feishu.bitable.record.search",
+        "table_id",
+        &payload.table_id,
+    )?;
+    let query = bitable::BitableRecordSearchQuery {
+        page_token: payload.page_token,
+        page_size: payload.page_size,
+        view_id: payload.view_id,
+        filter: payload.filter,
+        sort: payload.sort,
+        field_names: payload.field_names,
+        automatic_fields: payload.automatic_fields,
+    };
+    let tool_name = request.tool_name;
+
+    run_feishu_future(async move {
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
+        ensure_required_scopes(&grant, &["base:record:retrieve"], tool_name.as_str())?;
+        let result = bitable::search_bitable_records(
+            &context.client,
+            &grant.access_token,
+            &app_token,
+            &table_id,
+            &query,
+        )
+        .await?;
+
+        Ok(ok_outcome(
+            tool_name.as_str(),
+            context.configured_account_label.as_str(),
+            context.account_id.as_str(),
+            &grant.principal,
+            json!({
+                "result": result,
+            }),
+        ))
+    })
+}
+
+fn execute_feishu_bitable_record_update_tool_with_config(
+    request: ToolCoreRequest,
+    config: &super::runtime_config::ToolRuntimeConfig,
+) -> Result<ToolCoreOutcome, String> {
+    let payload = parse_payload::<FeishuBitableRecordUpdatePayload>(
+        "feishu.bitable.record.update",
+        request.payload,
+    )?;
+    let context = load_feishu_tool_context(
+        config,
+        requested_account_id(payload.selector.account_id.as_deref(), &payload.internal),
+    )?;
+    let grant = require_selected_grant(&context, payload.selector.open_id.as_deref())?;
+    let app_token = require_non_empty(
+        "feishu.bitable.record.update",
+        "app_token",
+        &payload.app_token,
+    )?;
+    let table_id = require_non_empty(
+        "feishu.bitable.record.update",
+        "table_id",
+        &payload.table_id,
+    )?;
+    let record_id = require_non_empty(
+        "feishu.bitable.record.update",
+        "record_id",
+        &payload.record_id,
+    )?;
+    if !payload.fields.is_object() {
+        return Err(format!(
+            "feishu.bitable.record.update: `fields` must be a JSON object, got {}",
+            payload.fields
+        ));
+    }
+    let fields = payload.fields;
+    let tool_name = request.tool_name;
+
+    run_feishu_future(async move {
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
+        ensure_any_required_scope(&grant, &["base:record:write"], tool_name.as_str())?;
+        let record = bitable::update_bitable_record(
+            &context.client,
+            &grant.access_token,
+            &app_token,
+            &table_id,
+            &record_id,
+            fields,
+        )
+        .await?;
+
+        Ok(ok_outcome(
+            tool_name.as_str(),
+            context.configured_account_label.as_str(),
+            context.account_id.as_str(),
+            &grant.principal,
+            json!({ "record": record }),
+        ))
+    })
+}
+
+fn execute_feishu_bitable_record_delete_tool_with_config(
+    request: ToolCoreRequest,
+    config: &super::runtime_config::ToolRuntimeConfig,
+) -> Result<ToolCoreOutcome, String> {
+    let payload = parse_payload::<FeishuBitableRecordDeletePayload>(
+        "feishu.bitable.record.delete",
+        request.payload,
+    )?;
+    let context = load_feishu_tool_context(
+        config,
+        requested_account_id(payload.selector.account_id.as_deref(), &payload.internal),
+    )?;
+    let grant = require_selected_grant(&context, payload.selector.open_id.as_deref())?;
+    let app_token = require_non_empty(
+        "feishu.bitable.record.delete",
+        "app_token",
+        &payload.app_token,
+    )?;
+    let table_id = require_non_empty(
+        "feishu.bitable.record.delete",
+        "table_id",
+        &payload.table_id,
+    )?;
+    let record_id = require_non_empty(
+        "feishu.bitable.record.delete",
+        "record_id",
+        &payload.record_id,
+    )?;
+    let tool_name = request.tool_name;
+
+    run_feishu_future(async move {
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
+        ensure_any_required_scope(&grant, &["base:record:write"], tool_name.as_str())?;
+        let result = bitable::delete_bitable_record(
+            &context.client,
+            &grant.access_token,
+            &app_token,
+            &table_id,
+            &record_id,
+        )
+        .await?;
+
+        Ok(ok_outcome(
+            tool_name.as_str(),
+            context.configured_account_label.as_str(),
+            context.account_id.as_str(),
+            &grant.principal,
+            json!({
+                "deleted": result.deleted,
+                "record_id": result.record_id,
+            }),
+        ))
+    })
+}
+
+fn execute_feishu_bitable_record_batch_create_tool_with_config(
+    request: ToolCoreRequest,
+    config: &super::runtime_config::ToolRuntimeConfig,
+) -> Result<ToolCoreOutcome, String> {
+    let payload = parse_payload::<FeishuBitableRecordBatchCreatePayload>(
+        "feishu.bitable.record.batch_create",
+        request.payload,
+    )?;
+    let context = load_feishu_tool_context(
+        config,
+        requested_account_id(payload.selector.account_id.as_deref(), &payload.internal),
+    )?;
+    let grant = require_selected_grant(&context, payload.selector.open_id.as_deref())?;
+    let app_token = require_non_empty(
+        "feishu.bitable.record.batch_create",
+        "app_token",
+        &payload.app_token,
+    )?;
+    let table_id = require_non_empty(
+        "feishu.bitable.record.batch_create",
+        "table_id",
+        &payload.table_id,
+    )?;
+    let records = payload.records;
+    bitable::ensure_bitable_batch_limit("feishu.bitable.record.batch_create", records.len())?;
+    let tool_name = request.tool_name;
+
+    run_feishu_future(async move {
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
+        ensure_any_required_scope(&grant, &["base:record:write"], tool_name.as_str())?;
+        let result = bitable::batch_create_bitable_records(
+            &context.client,
+            &grant.access_token,
+            &app_token,
+            &table_id,
+            records,
+        )
+        .await?;
+
+        Ok(ok_outcome(
+            tool_name.as_str(),
+            context.configured_account_label.as_str(),
+            context.account_id.as_str(),
+            &grant.principal,
+            json!({ "result": result }),
+        ))
+    })
+}
+
+fn execute_feishu_bitable_record_batch_update_tool_with_config(
+    request: ToolCoreRequest,
+    config: &super::runtime_config::ToolRuntimeConfig,
+) -> Result<ToolCoreOutcome, String> {
+    let payload = parse_payload::<FeishuBitableRecordBatchUpdatePayload>(
+        "feishu.bitable.record.batch_update",
+        request.payload,
+    )?;
+    let context = load_feishu_tool_context(
+        config,
+        requested_account_id(payload.selector.account_id.as_deref(), &payload.internal),
+    )?;
+    let grant = require_selected_grant(&context, payload.selector.open_id.as_deref())?;
+    let app_token = require_non_empty(
+        "feishu.bitable.record.batch_update",
+        "app_token",
+        &payload.app_token,
+    )?;
+    let table_id = require_non_empty(
+        "feishu.bitable.record.batch_update",
+        "table_id",
+        &payload.table_id,
+    )?;
+    let records = payload.records;
+    bitable::ensure_bitable_batch_limit("feishu.bitable.record.batch_update", records.len())?;
+    let tool_name = request.tool_name;
+
+    run_feishu_future(async move {
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
+        ensure_any_required_scope(&grant, &["base:record:write"], tool_name.as_str())?;
+        let result = bitable::batch_update_bitable_records(
+            &context.client,
+            &grant.access_token,
+            &app_token,
+            &table_id,
+            records,
+        )
+        .await?;
+
+        Ok(ok_outcome(
+            tool_name.as_str(),
+            context.configured_account_label.as_str(),
+            context.account_id.as_str(),
+            &grant.principal,
+            json!({ "result": result }),
+        ))
+    })
+}
+
+fn execute_feishu_bitable_record_batch_delete_tool_with_config(
+    request: ToolCoreRequest,
+    config: &super::runtime_config::ToolRuntimeConfig,
+) -> Result<ToolCoreOutcome, String> {
+    let payload = parse_payload::<FeishuBitableRecordBatchDeletePayload>(
+        "feishu.bitable.record.batch_delete",
+        request.payload,
+    )?;
+    let context = load_feishu_tool_context(
+        config,
+        requested_account_id(payload.selector.account_id.as_deref(), &payload.internal),
+    )?;
+    let grant = require_selected_grant(&context, payload.selector.open_id.as_deref())?;
+    let app_token = require_non_empty(
+        "feishu.bitable.record.batch_delete",
+        "app_token",
+        &payload.app_token,
+    )?;
+    let table_id = require_non_empty(
+        "feishu.bitable.record.batch_delete",
+        "table_id",
+        &payload.table_id,
+    )?;
+    let records = payload.records;
+    bitable::ensure_bitable_batch_limit("feishu.bitable.record.batch_delete", records.len())?;
+    let tool_name = request.tool_name;
+
+    run_feishu_future(async move {
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
+        ensure_any_required_scope(&grant, &["base:record:write"], tool_name.as_str())?;
+        let result = bitable::batch_delete_bitable_records(
+            &context.client,
+            &grant.access_token,
+            &app_token,
+            &table_id,
+            records,
+        )
+        .await?;
+
+        Ok(ok_outcome(
+            tool_name.as_str(),
+            context.configured_account_label.as_str(),
+            context.account_id.as_str(),
+            &grant.principal,
+            json!({ "result": result }),
+        ))
+    })
+}
+
+fn execute_feishu_bitable_field_create_tool_with_config(
+    request: ToolCoreRequest,
+    config: &super::runtime_config::ToolRuntimeConfig,
+) -> Result<ToolCoreOutcome, String> {
+    let payload = parse_payload::<FeishuBitableFieldCreatePayload>(
+        "feishu.bitable.field.create",
+        request.payload,
+    )?;
+    let context = load_feishu_tool_context(
+        config,
+        requested_account_id(payload.selector.account_id.as_deref(), &payload.internal),
+    )?;
+    let grant = require_selected_grant(&context, payload.selector.open_id.as_deref())?;
+    let app_token = require_non_empty(
+        "feishu.bitable.field.create",
+        "app_token",
+        &payload.app_token,
+    )?;
+    let table_id = require_non_empty("feishu.bitable.field.create", "table_id", &payload.table_id)?;
+    let field_name = require_non_empty(
+        "feishu.bitable.field.create",
+        "field_name",
+        &payload.field_name,
+    )?;
+    let field_type =
+        require_positive_i64("feishu.bitable.field.create", "type", payload.field_type)?;
+    let property = payload.property;
+    let tool_name = request.tool_name;
+
+    run_feishu_future(async move {
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
+        ensure_any_required_scope(&grant, &["bitable:app"], tool_name.as_str())?;
+        let field = bitable::create_bitable_field(
+            &context.client,
+            &grant.access_token,
+            &app_token,
+            &table_id,
+            &field_name,
+            field_type,
+            property,
+        )
+        .await?;
+
+        Ok(ok_outcome(
+            tool_name.as_str(),
+            context.configured_account_label.as_str(),
+            context.account_id.as_str(),
+            &grant.principal,
+            json!({ "field": field }),
+        ))
+    })
+}
+
+fn execute_feishu_bitable_field_list_tool_with_config(
+    request: ToolCoreRequest,
+    config: &super::runtime_config::ToolRuntimeConfig,
+) -> Result<ToolCoreOutcome, String> {
+    let payload = parse_payload::<FeishuBitableFieldListPayload>(
+        "feishu.bitable.field.list",
+        request.payload,
+    )?;
+    let context = load_feishu_tool_context(
+        config,
+        requested_account_id(payload.selector.account_id.as_deref(), &payload.internal),
+    )?;
+    let grant = require_selected_grant(&context, payload.selector.open_id.as_deref())?;
+    let app_token =
+        require_non_empty("feishu.bitable.field.list", "app_token", &payload.app_token)?;
+    let table_id = require_non_empty("feishu.bitable.field.list", "table_id", &payload.table_id)?;
+    let query = bitable::BitableFieldListQuery {
+        view_id: payload.view_id,
+        page_size: payload.page_size,
+        page_token: payload.page_token,
+    };
+    let tool_name = request.tool_name;
+
+    run_feishu_future(async move {
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
+        ensure_any_required_scope(&grant, &["bitable:app"], tool_name.as_str())?;
+        let result = bitable::list_bitable_fields(
+            &context.client,
+            &grant.access_token,
+            &app_token,
+            &table_id,
+            &query,
+        )
+        .await?;
+
+        Ok(ok_outcome(
+            tool_name.as_str(),
+            context.configured_account_label.as_str(),
+            context.account_id.as_str(),
+            &grant.principal,
+            json!({
+                "fields": result.items,
+                "page_token": result.page_token,
+                "has_more": result.has_more,
+                "total": result.total,
+            }),
+        ))
+    })
+}
+
+fn execute_feishu_bitable_field_update_tool_with_config(
+    request: ToolCoreRequest,
+    config: &super::runtime_config::ToolRuntimeConfig,
+) -> Result<ToolCoreOutcome, String> {
+    let payload = parse_payload::<FeishuBitableFieldUpdatePayload>(
+        "feishu.bitable.field.update",
+        request.payload,
+    )?;
+    let context = load_feishu_tool_context(
+        config,
+        requested_account_id(payload.selector.account_id.as_deref(), &payload.internal),
+    )?;
+    let grant = require_selected_grant(&context, payload.selector.open_id.as_deref())?;
+    let app_token = require_non_empty(
+        "feishu.bitable.field.update",
+        "app_token",
+        &payload.app_token,
+    )?;
+    let table_id = require_non_empty("feishu.bitable.field.update", "table_id", &payload.table_id)?;
+    let field_id = require_non_empty("feishu.bitable.field.update", "field_id", &payload.field_id)?;
+    let field_name = require_non_empty(
+        "feishu.bitable.field.update",
+        "field_name",
+        &payload.field_name,
+    )?;
+    let field_type =
+        require_positive_i64("feishu.bitable.field.update", "type", payload.field_type)?;
+    let property = payload.property;
+    let tool_name = request.tool_name;
+
+    run_feishu_future(async move {
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
+        ensure_any_required_scope(&grant, &["bitable:app"], tool_name.as_str())?;
+        let field = bitable::update_bitable_field(
+            &context.client,
+            &grant.access_token,
+            &app_token,
+            &table_id,
+            &field_id,
+            &field_name,
+            field_type,
+            property,
+        )
+        .await?;
+
+        Ok(ok_outcome(
+            tool_name.as_str(),
+            context.configured_account_label.as_str(),
+            context.account_id.as_str(),
+            &grant.principal,
+            json!({ "field": field }),
+        ))
+    })
+}
+
+fn execute_feishu_bitable_field_delete_tool_with_config(
+    request: ToolCoreRequest,
+    config: &super::runtime_config::ToolRuntimeConfig,
+) -> Result<ToolCoreOutcome, String> {
+    let payload = parse_payload::<FeishuBitableFieldDeletePayload>(
+        "feishu.bitable.field.delete",
+        request.payload,
+    )?;
+    let context = load_feishu_tool_context(
+        config,
+        requested_account_id(payload.selector.account_id.as_deref(), &payload.internal),
+    )?;
+    let grant = require_selected_grant(&context, payload.selector.open_id.as_deref())?;
+    let app_token = require_non_empty(
+        "feishu.bitable.field.delete",
+        "app_token",
+        &payload.app_token,
+    )?;
+    let table_id = require_non_empty("feishu.bitable.field.delete", "table_id", &payload.table_id)?;
+    let field_id = require_non_empty("feishu.bitable.field.delete", "field_id", &payload.field_id)?;
+    let tool_name = request.tool_name;
+
+    run_feishu_future(async move {
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
+        ensure_any_required_scope(&grant, &["bitable:app"], tool_name.as_str())?;
+        let result = bitable::delete_bitable_field(
+            &context.client,
+            &grant.access_token,
+            &app_token,
+            &table_id,
+            &field_id,
+        )
+        .await?;
+
+        Ok(ok_outcome(
+            tool_name.as_str(),
+            context.configured_account_label.as_str(),
+            context.account_id.as_str(),
+            &grant.principal,
+            json!({
+                "deleted": result.deleted,
+                "field_id": result.field_id,
+            }),
+        ))
+    })
+}
+
+fn execute_feishu_bitable_view_create_tool_with_config(
+    request: ToolCoreRequest,
+    config: &super::runtime_config::ToolRuntimeConfig,
+) -> Result<ToolCoreOutcome, String> {
+    let payload = parse_payload::<FeishuBitableViewCreatePayload>(
+        "feishu.bitable.view.create",
+        request.payload,
+    )?;
+    let context = load_feishu_tool_context(
+        config,
+        requested_account_id(payload.selector.account_id.as_deref(), &payload.internal),
+    )?;
+    let grant = require_selected_grant(&context, payload.selector.open_id.as_deref())?;
+    let app_token = require_non_empty(
+        "feishu.bitable.view.create",
+        "app_token",
+        &payload.app_token,
+    )?;
+    let table_id = require_non_empty("feishu.bitable.view.create", "table_id", &payload.table_id)?;
+    let view_name = require_non_empty(
+        "feishu.bitable.view.create",
+        "view_name",
+        &payload.view_name,
+    )?;
+    let view_type = payload.view_type;
+    let tool_name = request.tool_name;
+
+    run_feishu_future(async move {
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
+        ensure_any_required_scope(&grant, &["bitable:app"], tool_name.as_str())?;
+        let view = bitable::create_bitable_view(
+            &context.client,
+            &grant.access_token,
+            &app_token,
+            &table_id,
+            &view_name,
+            view_type.as_deref(),
+        )
+        .await?;
+
+        Ok(ok_outcome(
+            tool_name.as_str(),
+            context.configured_account_label.as_str(),
+            context.account_id.as_str(),
+            &grant.principal,
+            json!({ "view": view }),
+        ))
+    })
+}
+
+fn execute_feishu_bitable_view_get_tool_with_config(
+    request: ToolCoreRequest,
+    config: &super::runtime_config::ToolRuntimeConfig,
+) -> Result<ToolCoreOutcome, String> {
+    let payload =
+        parse_payload::<FeishuBitableViewGetPayload>("feishu.bitable.view.get", request.payload)?;
+    let context = load_feishu_tool_context(
+        config,
+        requested_account_id(payload.selector.account_id.as_deref(), &payload.internal),
+    )?;
+    let grant = require_selected_grant(&context, payload.selector.open_id.as_deref())?;
+    let app_token = require_non_empty("feishu.bitable.view.get", "app_token", &payload.app_token)?;
+    let table_id = require_non_empty("feishu.bitable.view.get", "table_id", &payload.table_id)?;
+    let view_id = require_non_empty("feishu.bitable.view.get", "view_id", &payload.view_id)?;
+    let tool_name = request.tool_name;
+
+    run_feishu_future(async move {
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
+        ensure_any_required_scope(&grant, &["bitable:app"], tool_name.as_str())?;
+        let view = bitable::get_bitable_view(
+            &context.client,
+            &grant.access_token,
+            &app_token,
+            &table_id,
+            &view_id,
+        )
+        .await?;
+
+        Ok(ok_outcome(
+            tool_name.as_str(),
+            context.configured_account_label.as_str(),
+            context.account_id.as_str(),
+            &grant.principal,
+            json!({ "view": view }),
+        ))
+    })
+}
+
+fn execute_feishu_bitable_view_list_tool_with_config(
+    request: ToolCoreRequest,
+    config: &super::runtime_config::ToolRuntimeConfig,
+) -> Result<ToolCoreOutcome, String> {
+    let payload =
+        parse_payload::<FeishuBitableViewListPayload>("feishu.bitable.view.list", request.payload)?;
+    let context = load_feishu_tool_context(
+        config,
+        requested_account_id(payload.selector.account_id.as_deref(), &payload.internal),
+    )?;
+    let grant = require_selected_grant(&context, payload.selector.open_id.as_deref())?;
+    let app_token = require_non_empty("feishu.bitable.view.list", "app_token", &payload.app_token)?;
+    let table_id = require_non_empty("feishu.bitable.view.list", "table_id", &payload.table_id)?;
+    let query = bitable::BitableViewListQuery {
+        page_size: payload.page_size,
+        page_token: payload.page_token,
+    };
+    let tool_name = request.tool_name;
+
+    run_feishu_future(async move {
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
+        ensure_any_required_scope(&grant, &["bitable:app"], tool_name.as_str())?;
+        let result = bitable::list_bitable_views(
+            &context.client,
+            &grant.access_token,
+            &app_token,
+            &table_id,
+            &query,
+        )
+        .await?;
+
+        Ok(ok_outcome(
+            tool_name.as_str(),
+            context.configured_account_label.as_str(),
+            context.account_id.as_str(),
+            &grant.principal,
+            json!({
+                "views": result.items,
+                "page_token": result.page_token,
+                "has_more": result.has_more,
+                "total": result.total,
+            }),
+        ))
+    })
+}
+
+fn execute_feishu_bitable_view_patch_tool_with_config(
+    request: ToolCoreRequest,
+    config: &super::runtime_config::ToolRuntimeConfig,
+) -> Result<ToolCoreOutcome, String> {
+    let payload = parse_payload::<FeishuBitableViewPatchPayload>(
+        "feishu.bitable.view.patch",
+        request.payload,
+    )?;
+    let context = load_feishu_tool_context(
+        config,
+        requested_account_id(payload.selector.account_id.as_deref(), &payload.internal),
+    )?;
+    let grant = require_selected_grant(&context, payload.selector.open_id.as_deref())?;
+    let app_token =
+        require_non_empty("feishu.bitable.view.patch", "app_token", &payload.app_token)?;
+    let table_id = require_non_empty("feishu.bitable.view.patch", "table_id", &payload.table_id)?;
+    let view_id = require_non_empty("feishu.bitable.view.patch", "view_id", &payload.view_id)?;
+    let view_name =
+        require_non_empty("feishu.bitable.view.patch", "view_name", &payload.view_name)?;
+    let tool_name = request.tool_name;
+
+    run_feishu_future(async move {
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
+        ensure_any_required_scope(&grant, &["bitable:app"], tool_name.as_str())?;
+        let view = bitable::patch_bitable_view(
+            &context.client,
+            &grant.access_token,
+            &app_token,
+            &table_id,
+            &view_id,
+            &view_name,
+        )
+        .await?;
+
+        Ok(ok_outcome(
+            tool_name.as_str(),
+            context.configured_account_label.as_str(),
+            context.account_id.as_str(),
+            &grant.principal,
+            json!({ "view": view }),
         ))
     })
 }
@@ -1594,8 +4025,12 @@ fn execute_feishu_doc_create_tool_with_config(
     let tool_name = request.tool_name;
 
     run_feishu_future(async move {
-        let grant =
-            crate::feishu::ensure_fresh_user_grant(&context.client, &context.store, &grant).await?;
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
         ensure_required_scopes(&grant, FEISHU_DOC_WRITE_REQUIRED_SCOPES, tool_name.as_str())?;
         let document = docs::create_document(
             &context.client,
@@ -1669,8 +4104,12 @@ fn execute_feishu_doc_append_tool_with_config(
     let tool_name = request.tool_name;
 
     run_feishu_future(async move {
-        let grant =
-            crate::feishu::ensure_fresh_user_grant(&context.client, &context.store, &grant).await?;
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
         ensure_required_scopes(&grant, FEISHU_DOC_WRITE_REQUIRED_SCOPES, tool_name.as_str())?;
         let document_id = docs::extract_document_id(url.as_str())
             .ok_or_else(|| "failed to resolve Feishu document id".to_owned())?;
@@ -1721,8 +4160,12 @@ fn execute_feishu_doc_read_tool_with_config(
     let tool_name = request.tool_name;
 
     run_feishu_future(async move {
-        let grant =
-            crate::feishu::ensure_fresh_user_grant(&context.client, &context.store, &grant).await?;
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
         ensure_any_required_scope(&grant, FEISHU_DOC_READ_ACCEPTED_SCOPES, tool_name.as_str())?;
         let document = docs::fetch_document_content(
             &context.client,
@@ -1760,8 +4203,12 @@ fn execute_feishu_messages_search_tool_with_config(
     let tool_name = request.tool_name;
 
     run_feishu_future(async move {
-        let grant =
-            crate::feishu::ensure_fresh_user_grant(&context.client, &context.store, &grant).await?;
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
         ensure_required_scopes(&grant, &["search:message"], tool_name.as_str())?;
         let page = messages::search_messages(
             &context.client,
@@ -1821,11 +4268,15 @@ fn execute_feishu_messages_history_tool_with_config(
     let tool_name = request.tool_name;
 
     run_feishu_future(async move {
-        let grant =
-            crate::feishu::ensure_fresh_user_grant(&context.client, &context.store, &grant).await?;
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
         ensure_any_required_scope(
             &grant,
-            &["im:message:readonly", "im:message.group_msg:readonly"],
+            &["im:message:readonly", "im:message.group_msg"],
             tool_name.as_str(),
         )?;
         let tenant_access_token = context.client.get_tenant_access_token().await?;
@@ -1902,11 +4353,15 @@ fn execute_feishu_messages_send_tool_with_config(
     let tool_name = request.tool_name;
 
     run_feishu_future(async move {
-        let grant =
-            crate::feishu::ensure_fresh_user_grant(&context.client, &context.store, &grant).await?;
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
         ensure_any_required_scope(
             &grant,
-            crate::feishu::FEISHU_MESSAGE_WRITE_ACCEPTED_SCOPES,
+            crate::channel::feishu::api::FEISHU_MESSAGE_WRITE_ACCEPTED_SCOPES,
             tool_name.as_str(),
         )?;
         let tenant_access_token = context.client.get_tenant_access_token().await?;
@@ -1930,13 +4385,17 @@ fn execute_feishu_messages_send_tool_with_config(
             media.file_key.as_deref(),
         )?;
         let msg_type = body.msg_type().to_owned();
-        let delivery = messages::send_outbound_message(
+        let mut target = ChannelOutboundTarget::feishu_receive_id(receive_id.clone())
+            .with_feishu_receive_id_type(receive_id_type.clone());
+        if let Some(uuid) = uuid.as_ref() {
+            target = target.with_idempotency_key(uuid.clone());
+        }
+        let delivery = deliver_feishu_message_body(
             &context.client,
             &tenant_access_token,
-            &receive_id_type,
-            &receive_id,
+            context.receive_id_type.as_str(),
+            &target,
             &body,
-            uuid.as_deref(),
         )
         .await?;
 
@@ -2007,11 +4466,15 @@ fn execute_feishu_messages_reply_tool_with_config(
     let tool_name = request.tool_name;
 
     run_feishu_future(async move {
-        let grant =
-            crate::feishu::ensure_fresh_user_grant(&context.client, &context.store, &grant).await?;
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
         ensure_any_required_scope(
             &grant,
-            crate::feishu::FEISHU_MESSAGE_WRITE_ACCEPTED_SCOPES,
+            crate::channel::feishu::api::FEISHU_MESSAGE_WRITE_ACCEPTED_SCOPES,
             tool_name.as_str(),
         )?;
         let tenant_access_token = context.client.get_tenant_access_token().await?;
@@ -2035,13 +4498,17 @@ fn execute_feishu_messages_reply_tool_with_config(
             media.file_key.as_deref(),
         )?;
         let msg_type = body.msg_type().to_owned();
-        let delivery = messages::reply_outbound_message(
+        let mut target = ChannelOutboundTarget::feishu_message_reply(message_id.clone())
+            .with_feishu_reply_in_thread(reply_in_thread);
+        if let Some(uuid) = uuid.as_ref() {
+            target = target.with_idempotency_key(uuid.clone());
+        }
+        let delivery = deliver_feishu_message_body(
             &context.client,
             &tenant_access_token,
-            &message_id,
+            context.receive_id_type.as_str(),
+            &target,
             &body,
-            reply_in_thread,
-            uuid.as_deref(),
         )
         .await?;
 
@@ -2239,11 +4706,15 @@ fn execute_feishu_messages_get_tool_with_config(
     let tool_name = request.tool_name;
 
     run_feishu_future(async move {
-        let grant =
-            crate::feishu::ensure_fresh_user_grant(&context.client, &context.store, &grant).await?;
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
         ensure_any_required_scope(
             &grant,
-            &["im:message:readonly", "im:message.group_msg:readonly"],
+            &["im:message:readonly", "im:message.group_msg"],
             tool_name.as_str(),
         )?;
         let tenant_access_token = context.client.get_tenant_access_token().await?;
@@ -2312,9 +4783,12 @@ fn execute_feishu_messages_resource_get_tool_with_config(
         let tool_name = request.tool_name;
 
         run_feishu_future(async move {
-            let grant =
-                crate::feishu::ensure_fresh_user_grant(&context.client, &context.store, &grant)
-                    .await?;
+            let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+                &context.client,
+                &context.store,
+                &grant,
+            )
+            .await?;
             ensure_any_required_scope(
                 &grant,
                 FEISHU_MESSAGE_RESOURCE_ACCEPTED_SCOPES,
@@ -2327,6 +4801,7 @@ fn execute_feishu_messages_resource_get_tool_with_config(
                 &message_id,
                 &file_key,
                 resource_type,
+                media::FEISHU_MESSAGE_RESOURCE_DOWNLOAD_MAX_BYTES,
             )
             .await?;
             if let Some(parent) = save_path.parent() {
@@ -2377,8 +4852,12 @@ fn execute_feishu_calendar_list_tool_with_config(
     let tool_name = request.tool_name;
 
     run_feishu_future(async move {
-        let grant =
-            crate::feishu::ensure_fresh_user_grant(&context.client, &context.store, &grant).await?;
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
         ensure_required_scopes(&grant, &["calendar:calendar:readonly"], tool_name.as_str())?;
         if payload.primary {
             let calendars = calendar::get_primary_calendars(
@@ -2441,8 +4920,12 @@ fn execute_feishu_calendar_freebusy_tool_with_config(
     let tool_name = request.tool_name;
 
     run_feishu_future(async move {
-        let grant =
-            crate::feishu::ensure_fresh_user_grant(&context.client, &context.store, &grant).await?;
+        let grant = crate::channel::feishu::api::ensure_fresh_user_grant(
+            &context.client,
+            &context.store,
+            &grant,
+        )
+        .await?;
         ensure_required_scopes(&grant, &["calendar:calendar:readonly"], tool_name.as_str())?;
         let effective_user_id = payload.user_id.clone().or_else(|| {
             trimmed_opt(payload.room_id.as_deref())
@@ -2499,7 +4982,7 @@ fn load_feishu_tool_context(
                 .to_owned(),
         );
     };
-    let resolved = crate::feishu::resolve_requested_feishu_account(
+    let resolved = crate::channel::feishu::api::resolve_requested_feishu_account(
         &runtime.channel,
         trimmed_opt(requested_account_id),
         "set payload.account_id to one of those configured accounts to disambiguate the Feishu tool request",
@@ -2525,7 +5008,7 @@ fn require_selected_grant(
     context: &FeishuToolContext,
     open_id: Option<&str>,
 ) -> CliResult<FeishuGrant> {
-    let resolution = crate::feishu::resolve_grant_selection(
+    let resolution = crate::channel::feishu::api::resolve_grant_selection(
         &context.store,
         context.account_id.as_str(),
         trimmed_opt(open_id),
@@ -2534,15 +5017,17 @@ fn require_selected_grant(
         return Ok(grant);
     }
     Err(
-        crate::feishu::describe_grant_selection_error_for_display(
+        crate::channel::feishu::api::describe_grant_selection_error_for_display(
             context.account_id.as_str(),
             context.configured_account_id.as_str(),
             &resolution,
         )
         .unwrap_or_else(|| {
             format!(
-                "no stored Feishu grant for account `{}`; run `loongclaw feishu auth start --account {}` first",
-                context.configured_account_id, context.configured_account_id
+                "no stored Feishu grant for account `{}`; run `{} feishu auth start --account {}` first",
+                context.configured_account_id,
+                crate::config::active_cli_command_name(),
+                context.configured_account_id
             )
         }),
     )
@@ -2554,6 +5039,16 @@ fn require_non_empty(tool_name: &str, field: &str, value: &str) -> CliResult<Str
         return Err(format!("{tool_name} requires payload.{field}"));
     }
     Ok(trimmed.to_owned())
+}
+
+fn require_positive_i64(tool_name: &str, field: &str, value: i64) -> CliResult<i64> {
+    if value > 0 {
+        return Ok(value);
+    }
+
+    Err(format!(
+        "{tool_name} invalid payload.{field}: expected positive integer, got {value}"
+    ))
 }
 
 fn resolve_feishu_doc_content_type(
@@ -3197,6 +5692,7 @@ fn search_chat_scope(payload: &FeishuMessagesSearchPayload) -> Vec<String> {
         .unwrap_or_default()
 }
 
+#[cfg(test)]
 fn push_feishu_registry_entry(
     entries: &mut Vec<super::ToolRegistryEntry>,
     name: &'static str,

@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 
 use crate::config::{
     MemoryBackendKind, MemoryConfig, MemoryIngestMode, MemoryMode, MemoryProfile, MemorySystemKind,
+    PersonalizationConfig,
 };
 
 /// Typed runtime configuration for the memory (SQLite) subsystem.
@@ -15,6 +16,7 @@ pub struct MemoryRuntimeConfig {
     pub backend: MemoryBackendKind,
     pub profile: MemoryProfile,
     pub system: MemorySystemKind,
+    pub resolved_system_id: Option<String>,
     pub mode: MemoryMode,
     pub fail_open: bool,
     pub ingest_mode: MemoryIngestMode,
@@ -22,6 +24,7 @@ pub struct MemoryRuntimeConfig {
     pub sliding_window: usize,
     pub summary_max_chars: usize,
     pub profile_note: Option<String>,
+    pub personalization: Option<PersonalizationConfig>,
 }
 
 impl Default for MemoryRuntimeConfig {
@@ -31,6 +34,7 @@ impl Default for MemoryRuntimeConfig {
             backend: defaults.backend,
             profile: defaults.profile,
             system: defaults.system,
+            resolved_system_id: Some(defaults.resolved_system_id()),
             mode: defaults.resolved_mode(),
             fail_open: defaults.fail_open,
             ingest_mode: defaults.ingest_mode,
@@ -38,6 +42,7 @@ impl Default for MemoryRuntimeConfig {
             sliding_window: defaults.sliding_window,
             summary_max_chars: defaults.summary_char_budget(),
             profile_note: defaults.trimmed_profile_note(),
+            personalization: defaults.trimmed_personalization(),
         }
     }
 }
@@ -48,6 +53,7 @@ impl MemoryRuntimeConfig {
             backend: config.resolved_backend(),
             profile: config.resolved_profile(),
             system: config.resolved_system(),
+            resolved_system_id: Some(config.resolved_system_id()),
             mode: config.resolved_mode(),
             fail_open: config.fail_open,
             ingest_mode: config.ingest_mode,
@@ -55,6 +61,7 @@ impl MemoryRuntimeConfig {
             sliding_window: config.sliding_window,
             summary_max_chars: config.summary_char_budget(),
             profile_note: config.trimmed_profile_note(),
+            personalization: config.trimmed_personalization(),
         }
     }
 
@@ -76,8 +83,9 @@ impl MemoryRuntimeConfig {
             self.mode = profile.mode();
         }
 
-        if let Some(system) = crate::memory::supported_memory_system_kind_from_env() {
-            self.system = system;
+        if let Some(system_id) = crate::memory::registered_memory_system_id_from_env() {
+            self.system = MemorySystemKind::parse_id(system_id.as_str()).unwrap_or_default();
+            self.resolved_system_id = Some(system_id);
         }
 
         if let Some(fail_open) = parse_bool(std::env::var("LOONGCLAW_MEMORY_FAIL_OPEN").ok()) {
@@ -138,6 +146,10 @@ impl MemoryRuntimeConfig {
         runtime
     }
 
+    pub fn from_memory_config_without_env_overrides(config: &MemoryConfig) -> Self {
+        Self::from_memory_config_base(config)
+    }
+
     pub const fn strict_mode_requested(&self) -> bool {
         !self.fail_open
     }
@@ -148,6 +160,12 @@ impl MemoryRuntimeConfig {
 
     pub const fn effective_fail_open(&self) -> bool {
         !self.strict_mode_active()
+    }
+
+    pub fn selected_system_id(&self) -> &str {
+        self.resolved_system_id
+            .as_deref()
+            .unwrap_or(crate::memory::DEFAULT_MEMORY_SYSTEM_ID)
     }
 }
 
@@ -188,7 +206,27 @@ pub fn get_memory_runtime_config() -> &'static MemoryRuntimeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::{
+        MEMORY_SYSTEM_ENV, MemorySystem, MemorySystemCapability, MemorySystemMetadata,
+        register_memory_system,
+    };
     use crate::test_support::ScopedEnv;
+
+    struct RuntimeConfigRegistryMemorySystem;
+
+    impl MemorySystem for RuntimeConfigRegistryMemorySystem {
+        fn id(&self) -> &'static str {
+            "registry-runtime-config"
+        }
+
+        fn metadata(&self) -> MemorySystemMetadata {
+            MemorySystemMetadata::new(
+                "registry-runtime-config",
+                [MemorySystemCapability::PromptHydration],
+                "Runtime config registry test system",
+            )
+        }
+    }
 
     #[test]
     fn parse_sliding_window_accepts_positive_integer() {
@@ -233,6 +271,7 @@ mod tests {
             backend: MemoryBackendKind::Sqlite,
             profile: MemoryProfile::WindowOnly,
             system: MemorySystemKind::Builtin,
+            resolved_system_id: Some(crate::memory::DEFAULT_MEMORY_SYSTEM_ID.to_owned()),
             mode: MemoryMode::WindowOnly,
             fail_open: true,
             ingest_mode: MemoryIngestMode::SyncMinimal,
@@ -240,6 +279,7 @@ mod tests {
             sliding_window: 12,
             summary_max_chars: 1200,
             profile_note: None,
+            personalization: None,
         };
         assert_eq!(
             config.sqlite_path,
@@ -265,6 +305,33 @@ mod tests {
     }
 
     #[test]
+    fn runtime_config_from_memory_config_carries_personalization() {
+        let _env = ScopedEnv::new();
+        let default_personalization = PersonalizationConfig::default();
+        let schema_version = default_personalization.schema_version;
+        let personalization = PersonalizationConfig {
+            preferred_name: Some("Chum".to_owned()),
+            response_density: Some(crate::config::ResponseDensity::Balanced),
+            initiative_level: Some(crate::config::InitiativeLevel::AskBeforeActing),
+            standing_boundaries: Some("Ask before destructive actions.".to_owned()),
+            timezone: Some("Asia/Shanghai".to_owned()),
+            locale: Some("zh-CN".to_owned()),
+            prompt_state: crate::config::PersonalizationPromptState::Suppressed,
+            schema_version,
+            updated_at_epoch_seconds: Some(1_775_095_200),
+        };
+        let config = MemoryConfig {
+            personalization: Some(personalization),
+            ..MemoryConfig::default()
+        };
+
+        let runtime = MemoryRuntimeConfig::from_memory_config(&config);
+        let expected_personalization = config.trimmed_personalization();
+
+        assert_eq!(runtime.personalization, expected_personalization);
+    }
+
+    #[test]
     fn hydrated_memory_runtime_config_carries_system_policy() {
         let _env = ScopedEnv::new();
         let config = MemoryConfig {
@@ -277,6 +344,10 @@ mod tests {
         let runtime = MemoryRuntimeConfig::from_memory_config(&config);
 
         assert_eq!(runtime.system, crate::config::MemorySystemKind::Builtin);
+        assert_eq!(
+            runtime.resolved_system_id.as_deref(),
+            Some(crate::memory::DEFAULT_MEMORY_SYSTEM_ID)
+        );
         assert!(!runtime.fail_open);
         assert!(runtime.strict_mode_requested());
         assert!(!runtime.strict_mode_active());
@@ -321,5 +392,23 @@ mod tests {
             Some(PathBuf::from("/tmp/env-memory.sqlite3"))
         );
         assert_eq!(runtime.profile_note.as_deref(), Some("env profile note"));
+    }
+
+    #[test]
+    fn memory_system_field_preserves_registry_backed_env_selection() {
+        register_memory_system("registry-runtime-config", || {
+            Box::new(RuntimeConfigRegistryMemorySystem)
+        })
+        .expect("register runtime-config registry system");
+        let mut env = ScopedEnv::new();
+        env.set(MEMORY_SYSTEM_ENV, "registry-runtime-config");
+
+        let config = MemoryConfig::default();
+        let runtime = MemoryRuntimeConfig::from_memory_config(&config);
+
+        assert_eq!(
+            runtime.resolved_system_id.as_deref(),
+            Some("registry-runtime-config")
+        );
     }
 }

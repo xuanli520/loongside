@@ -40,16 +40,57 @@ fn unique_temp_path(label: &str) -> PathBuf {
         .expect("system time before unix epoch")
         .as_nanos();
     let counter = TEMP_PATH_COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!(
+    let temp_dir = std::env::temp_dir();
+    let canonical_temp_dir = dunce::canonicalize(&temp_dir).unwrap_or(temp_dir);
+    canonical_temp_dir.join(format!(
         "loongclaw-onboard-{label}-{}-{nanos}-{counter}",
         std::process::id(),
     ))
 }
 
+fn isolated_output_path(label: &str) -> PathBuf {
+    let output_root = unique_temp_path("output-root");
+    std::fs::create_dir_all(&output_root).expect("create isolated output root");
+    output_root.join(label)
+}
+
 fn provider_choice_input(kind: mvp::config::ProviderKind) -> String {
-    let index = mvp::config::ProviderKind::all_sorted()
+    let mut options = mvp::config::ProviderKind::all_sorted()
         .iter()
-        .position(|candidate| *candidate == kind)
+        .copied()
+        .filter(|candidate| {
+            *candidate != mvp::config::ProviderKind::Kimi
+                && *candidate != mvp::config::ProviderKind::KimiCoding
+                && *candidate != mvp::config::ProviderKind::Stepfun
+                && *candidate != mvp::config::ProviderKind::StepPlan
+        })
+        .map(|candidate| {
+            let label =
+                loongclaw_daemon::onboard_cli::provider_kind_display_name(candidate).to_owned();
+            let slug = loongclaw_daemon::onboard_cli::provider_kind_id(candidate).to_owned();
+            (label, slug)
+        })
+        .collect::<Vec<_>>();
+    options.push(("Kimi".to_owned(), "kimi".to_owned()));
+    options.push(("Stepfun".to_owned(), "stepfun".to_owned()));
+    options.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let target_slug = if matches!(
+        kind,
+        mvp::config::ProviderKind::Kimi | mvp::config::ProviderKind::KimiCoding
+    ) {
+        "kimi"
+    } else if matches!(
+        kind,
+        mvp::config::ProviderKind::Stepfun | mvp::config::ProviderKind::StepPlan
+    ) {
+        "stepfun"
+    } else {
+        loongclaw_daemon::onboard_cli::provider_kind_id(kind)
+    };
+    let index = options
+        .iter()
+        .position(|(_, slug)| slug == target_slug)
         .expect("provider kind should exist in the interactive onboarding order");
     (index + 1).to_string()
 }
@@ -61,9 +102,31 @@ fn scripted_input_not_cancelled(raw: String) -> loongclaw_daemon::CliResult<Stri
     Ok(raw)
 }
 
+fn is_scripted_preinstalled_skill_input(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    trimmed.split(',').map(str::trim).all(|token| {
+        mvp::tools::bundled_preinstall_targets()
+            .iter()
+            .any(|target| target.install_id == token)
+    })
+}
+
 struct DetectedEnvironmentGuard {
     _lock: MutexGuard<'static, ()>,
     saved: Vec<(String, Option<OsString>)>,
+}
+
+fn isolated_loongclaw_home(label: &str) -> PathBuf {
+    let home = unique_temp_path(label);
+    std::fs::create_dir_all(&home).expect("create isolated loongclaw home");
+    home
+}
+
+fn isolated_sqlite_path(label: &str) -> PathBuf {
+    unique_temp_path(label).with_extension("sqlite3")
 }
 
 impl DetectedEnvironmentGuard {
@@ -95,6 +158,12 @@ impl DetectedEnvironmentGuard {
         if let Some(key) = default_config.feishu.app_secret_env.as_deref() {
             keys.insert(key.to_owned());
         }
+        for descriptor in mvp::config::web_search_provider_descriptors() {
+            for env_name in descriptor.api_key_env_names {
+                keys.insert((*env_name).to_owned());
+            }
+        }
+        keys.insert("LOONGCLAW_SQLITE_PATH".to_owned());
 
         let saved = keys
             .into_iter()
@@ -105,7 +174,23 @@ impl DetectedEnvironmentGuard {
                 }
                 (key, value)
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let isolated_home = isolated_loongclaw_home("detected-env-home");
+        let saved_loongclaw_home = std::env::var_os("LOONG_HOME");
+        unsafe {
+            std::env::set_var("LOONG_HOME", &isolated_home);
+        }
+        let isolated_sqlite = isolated_sqlite_path("detected-env-memory");
+        let saved_loongclaw_sqlite_path = std::env::var_os("LOONGCLAW_SQLITE_PATH");
+        unsafe {
+            std::env::set_var("LOONGCLAW_SQLITE_PATH", &isolated_sqlite);
+        }
+        let mut saved = saved;
+        saved.push(("LOONG_HOME".to_owned(), saved_loongclaw_home));
+        saved.push((
+            "LOONGCLAW_SQLITE_PATH".to_owned(),
+            saved_loongclaw_sqlite_path,
+        ));
 
         Self { _lock: lock, saved }
     }
@@ -122,6 +207,54 @@ impl Drop for DetectedEnvironmentGuard {
                     std::env::remove_var(&key);
                 },
             }
+        }
+    }
+}
+
+struct EnvVarGuard {
+    _lock: Option<MutexGuard<'static, ()>>,
+    key: String,
+    saved: Option<OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &str, value: &str) -> Self {
+        let lock = super::lock_daemon_test_environment();
+        Self::set_inner(Some(lock), key, value)
+    }
+
+    /// # Safety
+    ///
+    /// The caller must already hold the daemon test environment lock, or an
+    /// equivalent external guard, for the full lifetime of the returned
+    /// `EnvVarGuard`. This wraps process-global environment mutation without
+    /// taking the lock itself.
+    unsafe fn set_unlocked(key: &str, value: &str) -> Self {
+        Self::set_inner(None, key, value)
+    }
+
+    fn set_inner(lock: Option<MutexGuard<'static, ()>>, key: &str, value: &str) -> Self {
+        let saved = std::env::var_os(key);
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self {
+            _lock: lock,
+            key: key.to_owned(),
+            saved,
+        }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match self.saved.take() {
+            Some(value) => unsafe {
+                std::env::set_var(&self.key, value);
+            },
+            None => unsafe {
+                std::env::remove_var(&self.key);
+            },
         }
     }
 }
@@ -154,7 +287,10 @@ fn import_candidate_with_provider(
     candidate.config.provider.base_url = profile.base_url.to_owned();
     candidate.config.provider.chat_completions_path = profile.chat_completions_path.to_owned();
     candidate.config.provider.model = model.to_owned();
-    candidate.config.provider.api_key_env = Some(credential_env.to_owned());
+    candidate
+        .config
+        .provider
+        .set_api_key_env_binding(Some(credential_env.to_owned()));
     candidate
         .domains
         .push(loongclaw_daemon::migration::types::DomainPreview {
@@ -221,6 +357,29 @@ impl loongclaw_daemon::onboard_cli::OnboardUi for ScriptedOnboardUi {
         self.next_input(label)
     }
 
+    fn prompt_allow_empty(&mut self, label: &str) -> loongclaw_daemon::CliResult<String> {
+        self.outputs.push(format!("PROMPT {label}"));
+        match self.inputs.front() {
+            Some(value)
+                if label == "preinstalled skills"
+                    && !is_scripted_preinstalled_skill_input(value) =>
+            {
+                Ok(String::new())
+            }
+            Some(_) => Ok(self.inputs.pop_front().ok_or_else(|| {
+                format!(
+                    "missing scripted input for {label}; transcript so far:\n{}",
+                    self.outputs.join("\n")
+                )
+            })?),
+            None if label == "preinstalled skills" => Ok(String::new()),
+            None => Err(format!(
+                "missing scripted input for {label}; transcript so far:\n{}",
+                self.outputs.join("\n")
+            )),
+        }
+    }
+
     fn prompt_confirm(
         &mut self,
         message: &str,
@@ -271,10 +430,28 @@ impl loongclaw_daemon::onboard_cli::OnboardUi for ScriptedOnboardUi {
                 options.len()
             ));
         }
-        options
+        let direct_match = options
             .iter()
-            .position(|option| option.slug.eq_ignore_ascii_case(trimmed))
-            .ok_or_else(|| format!("invalid scripted selection input: {trimmed}"))
+            .position(|option| option.slug.eq_ignore_ascii_case(trimmed));
+
+        if let Some(index) = direct_match {
+            return Ok(index);
+        }
+
+        let parsed_personality = loongclaw_daemon::onboard_cli::parse_prompt_personality(trimmed);
+
+        if let Some(personality) = parsed_personality {
+            let canonical_slug = loongclaw_daemon::onboard_cli::prompt_personality_id(personality);
+            let canonical_match = options
+                .iter()
+                .position(|option| option.slug.eq_ignore_ascii_case(canonical_slug));
+
+            if let Some(index) = canonical_match {
+                return Ok(index);
+            }
+        }
+
+        Err(format!("invalid scripted selection input: {trimmed}"))
     }
 }
 
@@ -301,8 +478,24 @@ async fn run_scripted_onboard_flow_with_context(
     inputs: impl IntoIterator<Item = impl Into<String>>,
     context: loongclaw_daemon::onboard_cli::OnboardRuntimeContext,
 ) -> loongclaw_daemon::CliResult<Vec<String>> {
+    let sqlite_override_guard = if std::env::var_os("LOONGCLAW_SQLITE_PATH").is_some() {
+        None
+    } else {
+        let sqlite_path = options
+            .output
+            .as_deref()
+            .map(PathBuf::from)
+            .map(|path| path.with_extension("sqlite3"))
+            .unwrap_or_else(|| isolated_sqlite_path("scripted-onboard-memory"));
+        let sqlite_path_text = sqlite_path.display().to_string();
+        Some(EnvVarGuard::set(
+            "LOONGCLAW_SQLITE_PATH",
+            sqlite_path_text.as_str(),
+        ))
+    };
     let mut ui = ScriptedOnboardUi::new(inputs);
     loongclaw_daemon::onboard_cli::run_onboard_cli_with_ui(options, &mut ui, &context).await?;
+    drop(sqlite_override_guard);
     Ok(ui.transcript())
 }
 
@@ -389,6 +582,8 @@ fn default_non_interactive_onboard_options(
         provider: None,
         model: None,
         api_key_env: None,
+        web_search_provider: None,
+        web_search_api_key_env: None,
         personality: None,
         memory_profile: None,
         system_prompt: None,
@@ -398,17 +593,17 @@ fn default_non_interactive_onboard_options(
 
 #[test]
 fn scripted_onboard_ui_select_one_accepts_slug_input() {
-    let mut ui = ScriptedOnboardUi::new(["friendly_collab"]);
+    let mut ui = ScriptedOnboardUi::new(["hermit"]);
     let options = vec![
         loongclaw_daemon::onboard_cli::SelectOption {
-            label: "calm engineering".to_owned(),
-            slug: "calm_engineering".to_owned(),
+            label: "classicist".to_owned(),
+            slug: "classicist".to_owned(),
             description: String::new(),
             recommended: true,
         },
         loongclaw_daemon::onboard_cli::SelectOption {
-            label: "friendly collab".to_owned(),
-            slug: "friendly_collab".to_owned(),
+            label: "hermit".to_owned(),
+            slug: "hermit".to_owned(),
             description: String::new(),
             recommended: false,
         },
@@ -422,6 +617,37 @@ fn scripted_onboard_ui_select_one_accepts_slug_input() {
         loongclaw_daemon::onboard_cli::SelectInteractionMode::List,
     )
     .expect("scripted selection should accept slug input so integration tests stay aligned");
+
+    assert_eq!(index, 1);
+    assert_eq!(ui.transcript(), vec!["SELECT Personality".to_owned()]);
+}
+
+#[test]
+fn scripted_onboard_ui_select_one_accepts_legacy_personality_alias_input() {
+    let mut ui = ScriptedOnboardUi::new(["friendly_collab"]);
+    let options = vec![
+        loongclaw_daemon::onboard_cli::SelectOption {
+            label: "classicist".to_owned(),
+            slug: "classicist".to_owned(),
+            description: String::new(),
+            recommended: true,
+        },
+        loongclaw_daemon::onboard_cli::SelectOption {
+            label: "hermit".to_owned(),
+            slug: "hermit".to_owned(),
+            description: String::new(),
+            recommended: false,
+        },
+    ];
+
+    let index = loongclaw_daemon::onboard_cli::OnboardUi::select_one(
+        &mut ui,
+        "Personality",
+        &options,
+        Some(0),
+        loongclaw_daemon::onboard_cli::SelectInteractionMode::List,
+    )
+    .expect("legacy personality aliases should stay accepted in scripted selection");
 
     assert_eq!(index, 1);
     assert_eq!(ui.transcript(), vec!["SELECT Personality".to_owned()]);
@@ -521,6 +747,18 @@ fn provider_default_env_mapping_is_stable() {
     );
     assert_eq!(
         loongclaw_daemon::onboard_cli::provider_default_api_key_env(
+            mvp::config::ProviderKind::OpencodeZen
+        ),
+        Some("OPENCODE_API_KEY")
+    );
+    assert_eq!(
+        loongclaw_daemon::onboard_cli::provider_default_api_key_env(
+            mvp::config::ProviderKind::OpencodeGo
+        ),
+        Some("OPENCODE_API_KEY")
+    );
+    assert_eq!(
+        loongclaw_daemon::onboard_cli::provider_default_api_key_env(
             mvp::config::ProviderKind::KimiCoding
         ),
         Some("KIMI_CODING_API_KEY")
@@ -552,6 +790,14 @@ fn provider_kind_id_mapping_includes_kimi_coding() {
         "bedrock"
     );
     assert_eq!(
+        loongclaw_daemon::onboard_cli::provider_kind_id(mvp::config::ProviderKind::OpencodeZen),
+        "opencode_zen"
+    );
+    assert_eq!(
+        loongclaw_daemon::onboard_cli::provider_kind_id(mvp::config::ProviderKind::OpencodeGo),
+        "opencode_go"
+    );
+    assert_eq!(
         loongclaw_daemon::onboard_cli::provider_kind_id(mvp::config::ProviderKind::Custom),
         "custom"
     );
@@ -560,16 +806,44 @@ fn provider_kind_id_mapping_includes_kimi_coding() {
 #[test]
 fn parse_prompt_personality_accepts_supported_ids() {
     assert_eq!(
+        crate::onboard_cli::parse_prompt_personality("classicist"),
+        Some(mvp::prompt::PromptPersonality::Classicist)
+    );
+    assert_eq!(
+        crate::onboard_cli::parse_prompt_personality("pragmatist"),
+        Some(mvp::prompt::PromptPersonality::Pragmatist)
+    );
+    assert_eq!(
+        crate::onboard_cli::parse_prompt_personality("idealist"),
+        Some(mvp::prompt::PromptPersonality::Idealist)
+    );
+    assert_eq!(
+        crate::onboard_cli::parse_prompt_personality("romanticist"),
+        Some(mvp::prompt::PromptPersonality::Romanticist)
+    );
+    assert_eq!(
+        crate::onboard_cli::parse_prompt_personality("hermit"),
+        Some(mvp::prompt::PromptPersonality::Hermit)
+    );
+    assert_eq!(
+        crate::onboard_cli::parse_prompt_personality("cyber_radical"),
+        Some(mvp::prompt::PromptPersonality::CyberRadical)
+    );
+    assert_eq!(
+        crate::onboard_cli::parse_prompt_personality("nihilist"),
+        Some(mvp::prompt::PromptPersonality::Nihilist)
+    );
+    assert_eq!(
         crate::onboard_cli::parse_prompt_personality("calm_engineering"),
-        Some(mvp::prompt::PromptPersonality::CalmEngineering)
+        Some(mvp::prompt::PromptPersonality::Classicist)
     );
     assert_eq!(
         crate::onboard_cli::parse_prompt_personality("friendly_collab"),
-        Some(mvp::prompt::PromptPersonality::FriendlyCollab)
+        Some(mvp::prompt::PromptPersonality::Hermit)
     );
     assert_eq!(
         crate::onboard_cli::parse_prompt_personality("autonomous_executor"),
-        Some(mvp::prompt::PromptPersonality::AutonomousExecutor)
+        Some(mvp::prompt::PromptPersonality::Pragmatist)
     );
     assert_eq!(
         crate::onboard_cli::parse_prompt_personality("unknown"),
@@ -637,7 +911,9 @@ async fn non_interactive_personality_and_memory_profile_are_persisted() {
             provider: Some("openai".to_owned()),
             model: Some("openai/gpt-5.1".to_owned()),
             api_key_env: Some("OPENAI_API_KEY".to_owned()),
-            personality: Some("friendly_collab".to_owned()),
+            web_search_provider: None,
+            web_search_api_key_env: None,
+            personality: Some("hermit".to_owned()),
             memory_profile: Some("profile_plus_window".to_owned()),
             system_prompt: None,
             skip_model_probe: true,
@@ -660,11 +936,71 @@ async fn non_interactive_personality_and_memory_profile_are_persisted() {
         .expect("load non-interactive personality/memory config");
     assert_eq!(
         config.cli.personality,
-        Some(mvp::prompt::PromptPersonality::FriendlyCollab)
+        Some(mvp::prompt::PromptPersonality::Hermit)
     );
     assert_eq!(
         config.memory.profile,
         mvp::config::MemoryProfile::ProfilePlusWindow
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn non_interactive_legacy_personality_alias_still_maps_to_supported_preset() {
+    let _env_guard = DetectedEnvironmentGuard::without_detected_environment();
+    unsafe {
+        std::env::set_var("OPENAI_API_KEY", "openai-test-token");
+    }
+
+    let output_path = unique_temp_path("non-interactive-legacy-personality-config.toml");
+    let transcript = run_scripted_onboard_flow(
+        crate::onboard_cli::OnboardCommandOptions {
+            output: output_path.to_str().map(str::to_owned),
+            force: false,
+            non_interactive: true,
+            accept_risk: true,
+            provider: Some("openai".to_owned()),
+            model: Some("openai/gpt-5.1".to_owned()),
+            api_key_env: Some("OPENAI_API_KEY".to_owned()),
+            web_search_provider: None,
+            web_search_api_key_env: None,
+            personality: Some("friendly_collab".to_owned()),
+            memory_profile: None,
+            system_prompt: None,
+            skip_model_probe: true,
+        },
+        std::iter::empty::<String>(),
+        None,
+        None,
+    )
+    .await
+    .expect("run non-interactive onboarding with legacy personality alias");
+
+    assert!(
+        transcript
+            .iter()
+            .any(|line| line.contains("onboarding complete")),
+        "non-interactive legacy personality path should still complete successfully: {transcript:#?}"
+    );
+
+    let raw_config = std::fs::read_to_string(&output_path).expect("read written config");
+    let canonical_personality = "personality = \"hermit\"";
+    let legacy_personality = "personality = \"friendly_collab\"";
+
+    assert!(
+        raw_config.contains(canonical_personality),
+        "non-interactive onboarding should persist the canonical personality id: {raw_config}"
+    );
+    assert!(
+        !raw_config.contains(legacy_personality),
+        "non-interactive onboarding should not persist the legacy alias: {raw_config}"
+    );
+
+    let (_, config) = mvp::config::load(output_path.to_str())
+        .expect("load non-interactive legacy personality config");
+
+    assert_eq!(
+        config.cli.personality,
+        Some(mvp::prompt::PromptPersonality::Hermit)
     );
 }
 
@@ -685,6 +1021,8 @@ async fn non_interactive_system_prompt_override_disables_prompt_pack() {
             provider: Some("openai".to_owned()),
             model: Some("openai/gpt-5.1".to_owned()),
             api_key_env: Some("OPENAI_API_KEY".to_owned()),
+            web_search_provider: None,
+            web_search_api_key_env: None,
             personality: None,
             memory_profile: None,
             system_prompt: Some("Stay concise and technical.".to_owned()),
@@ -730,7 +1068,9 @@ async fn non_interactive_onboard_rejects_unresolved_preflight_warnings() {
     config.provider.base_url = format!("http://{addr}");
     config.provider.model = "openai/gpt-5.1-codex".to_owned();
     config.provider.wire_api = mvp::config::ProviderWireApi::Responses;
-    config.provider.api_key = Some("test-openai-key".to_owned());
+    config.provider.api_key = Some(loongclaw_contracts::SecretRef::Inline(
+        "test-openai-key".to_owned(),
+    ));
     mvp::config::write(Some(output.to_string_lossy().as_ref()), &config, true)
         .expect("write existing config");
 
@@ -744,7 +1084,11 @@ async fn non_interactive_onboard_rejects_unresolved_preflight_warnings() {
         .expect_err("non-interactive onboarding should stop on unresolved warnings");
 
     assert!(
-        error.contains("unresolved") && error.contains("warning"),
+        error.contains("provider transport:"),
+        "non-interactive warning-gate errors should surface the first blocking warning detail: {error}"
+    );
+    assert!(
+        error.contains("rerun without --non-interactive"),
         "unexpected warning-gate error: {error}"
     );
 
@@ -756,6 +1100,45 @@ async fn non_interactive_onboard_rejects_unresolved_preflight_warnings() {
                 && normalized.contains("authorization: bearer test-openai-key")
         }),
         "warning reproduction should still perform the model probe before the warning gate: {requests:#?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn non_interactive_explicit_web_search_provider_does_not_silently_fall_back() {
+    let _env_guard = DetectedEnvironmentGuard::without_detected_environment();
+    let output = unique_temp_path("non-interactive-explicit-web-search.toml");
+    let _openai_env = unsafe { EnvVarGuard::set_unlocked("OPENAI_API_KEY", "openai-test-token") };
+
+    let error = run_scripted_onboard_flow(
+        crate::onboard_cli::OnboardCommandOptions {
+            output: output.to_str().map(str::to_owned),
+            force: false,
+            non_interactive: true,
+            accept_risk: true,
+            provider: Some("openai".to_owned()),
+            model: Some("openai/gpt-5.1".to_owned()),
+            api_key_env: Some("OPENAI_API_KEY".to_owned()),
+            web_search_provider: Some("tavily".to_owned()),
+            web_search_api_key_env: None,
+            personality: None,
+            memory_profile: None,
+            system_prompt: None,
+            skip_model_probe: true,
+        },
+        std::iter::empty::<String>(),
+        None,
+        None,
+    )
+    .await
+    .expect_err("missing Tavily credentials should fail instead of silently falling back");
+
+    assert!(
+        error.contains("Tavily") || error.contains("TAVILY_API_KEY"),
+        "preflight should keep the explicit Tavily selection visible in the failure path: {error}"
+    );
+    assert!(
+        !error.contains("DuckDuckGo"),
+        "explicit web-search selection should not be silently replaced by DuckDuckGo in the failure path: {error}"
     );
 }
 
@@ -833,29 +1216,32 @@ async fn non_interactive_onboard_allows_explicit_skip_model_probe_warning() {
 
     let raw = std::fs::read_to_string(&output).expect("read written onboarding config");
     assert!(
-        raw.contains("oauth_access_token = \"${OPENAI_CODEX_OAUTH_TOKEN}\""),
-        "onboarding should persist the openai oauth binding as the canonical env reference after provider-aligned credential routing: {raw}"
+        raw.contains("[providers.openai.oauth_access_token]")
+            && raw.contains("env = \"OPENAI_CODEX_OAUTH_TOKEN\""),
+        "onboarding should persist the routed openai oauth env binding in the canonical secret field: {raw}"
+    );
+    assert!(
+        !raw.contains("oauth_access_token_env = "),
+        "provider-aligned onboarding should not keep the legacy oauth_access_token_env field for the openai oauth route: {raw}"
     );
     assert!(
         !raw.contains("api_key = "),
         "provider-aligned onboarding should not fall back to the legacy api_key field for the openai oauth route: {raw}"
-    );
-    assert!(
-        !raw.contains("api_key_env"),
-        "canonical onboarding config should not persist the legacy api_key_env field: {raw}"
     );
 
     let (_, config) = mvp::config::load(Some(output.to_string_lossy().as_ref()))
         .expect("load written onboarding config");
     assert_eq!(config.provider.model, "openai/gpt-5.1-codex");
     assert_eq!(
-        config.provider.oauth_access_token.as_deref(),
-        Some("${OPENAI_CODEX_OAUTH_TOKEN}"),
-        "reloaded config should keep the canonical oauth credential source after provider-aligned routing"
+        config.provider.oauth_access_token,
+        Some(loongclaw_contracts::SecretRef::Env {
+            env: "OPENAI_CODEX_OAUTH_TOKEN".to_owned(),
+        }),
+        "reloaded config should keep the routed oauth env binding in the canonical oauth_access_token field"
     );
     assert_eq!(
-        config.provider.api_key, None,
-        "reloaded config should not repopulate the legacy api_key field for the oauth-backed openai route"
+        config.provider.oauth_access_token_env, None,
+        "reloaded config should not keep the legacy oauth_access_token_env field after provider-aligned onboarding"
     );
     assert_eq!(
         config.provider.authorization_header(),
@@ -865,7 +1251,89 @@ async fn non_interactive_onboard_allows_explicit_skip_model_probe_warning() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn non_interactive_onboard_preserves_reviewed_auto_when_probe_is_skipped() {
+async fn non_interactive_onboard_persists_github_copilot_oauth_env_binding() {
+    let _env_guard = DetectedEnvironmentGuard::without_detected_environment();
+    let root = unique_temp_path("non-interactive-github-copilot-root");
+    std::fs::create_dir_all(&root).expect("create test root");
+    let output = root.join("loongclaw.toml");
+    unsafe {
+        std::env::set_var(
+            "GITHUB_COPILOT_OAUTH_TOKEN",
+            "test-github-copilot-oauth-token",
+        );
+    }
+
+    let mut options = default_non_interactive_onboard_options(&output);
+    options.provider = Some("github-copilot".to_owned());
+    options.model = Some("copilot-test-model".to_owned());
+    options.skip_model_probe = true;
+
+    let mut ui = ScriptedOnboardUi::new(std::iter::empty::<String>());
+    let context =
+        loongclaw_daemon::onboard_cli::OnboardRuntimeContext::new_for_tests(80, None, None);
+    loongclaw_daemon::onboard_cli::run_onboard_cli_with_ui(options, &mut ui, &context)
+        .await
+        .expect("GitHub Copilot onboarding should reuse an existing OAuth token env in non-interactive mode");
+
+    let raw = std::fs::read_to_string(&output).expect("read written onboarding config");
+    assert!(
+        raw.contains("[providers.github-copilot.oauth_access_token]")
+            && raw.contains("env = \"GITHUB_COPILOT_OAUTH_TOKEN\""),
+        "GitHub Copilot onboarding should persist the OAuth env binding in the canonical secret field: {raw}"
+    );
+    assert!(
+        !raw.contains("oauth_access_token_env = "),
+        "GitHub Copilot onboarding should not keep the legacy oauth_access_token_env field: {raw}"
+    );
+
+    let (_, config) = mvp::config::load(Some(output.to_string_lossy().as_ref()))
+        .expect("load written onboarding config");
+    assert_eq!(
+        config.provider.kind,
+        mvp::config::ProviderKind::GithubCopilot
+    );
+    assert_eq!(config.provider.model, "copilot-test-model");
+    assert_eq!(
+        config.provider.oauth_access_token,
+        Some(loongclaw_contracts::SecretRef::Env {
+            env: "GITHUB_COPILOT_OAUTH_TOKEN".to_owned(),
+        }),
+        "reloaded config should keep the routed OAuth env binding in the canonical oauth_access_token field"
+    );
+    assert_eq!(config.provider.oauth_access_token_env, None);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn non_interactive_onboard_rejects_github_copilot_without_oauth_token() {
+    let _env_guard = DetectedEnvironmentGuard::without_detected_environment();
+    let root = unique_temp_path("non-interactive-github-copilot-missing-token-root");
+    std::fs::create_dir_all(&root).expect("create test root");
+    let output = root.join("loongclaw.toml");
+
+    let mut options = default_non_interactive_onboard_options(&output);
+    options.provider = Some("github-copilot".to_owned());
+    options.model = Some("copilot-test-model".to_owned());
+    options.skip_model_probe = true;
+
+    let mut ui = ScriptedOnboardUi::new(std::iter::empty::<String>());
+    let context =
+        loongclaw_daemon::onboard_cli::OnboardRuntimeContext::new_for_tests(80, None, None);
+    let error = loongclaw_daemon::onboard_cli::run_onboard_cli_with_ui(options, &mut ui, &context)
+        .await
+        .expect_err("GitHub Copilot onboarding should fail without a reusable OAuth token in non-interactive mode");
+
+    assert!(
+        error.contains("GITHUB_COPILOT_OAUTH_TOKEN"),
+        "missing-token error should name the expected GitHub Copilot env source: {error}"
+    );
+    assert!(
+        error.contains("--non-interactive"),
+        "missing-token error should explain why interactive device login was skipped: {error}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn non_interactive_onboard_applies_reviewed_default_when_probe_is_skipped() {
     let _env_guard = DetectedEnvironmentGuard::without_detected_environment();
     let root = unique_temp_path("non-interactive-reviewed-auto-skip-root");
     std::fs::create_dir_all(&root).expect("create test root");
@@ -883,19 +1351,19 @@ async fn non_interactive_onboard_preserves_reviewed_auto_when_probe_is_skipped()
         loongclaw_daemon::onboard_cli::OnboardRuntimeContext::new_for_tests(80, None, None);
     loongclaw_daemon::onboard_cli::run_onboard_cli_with_ui(options, &mut ui, &context)
         .await
-        .expect("skip-model-probe should allow non-interactive onboarding to keep reviewed auto providers on auto");
+        .expect("skip-model-probe should allow non-interactive onboarding to materialize the reviewed default model");
 
     let raw = std::fs::read_to_string(&output).expect("read written onboarding config");
     let (_, config) = mvp::config::load(Some(output.to_string_lossy().as_ref()))
         .expect("load written onboarding config");
     assert_eq!(config.provider.kind, mvp::config::ProviderKind::Deepseek);
     assert_eq!(
-        config.provider.model, "auto",
-        "non-interactive onboarding should preserve model = auto when the operator did not explicitly pin a reviewed provider model"
+        config.provider.model, "deepseek-chat",
+        "non-interactive onboarding should materialize the reviewed provider default so skip-model-probe still leaves a usable explicit model"
     );
     assert!(
-        !raw.contains("model = \"deepseek-chat\""),
-        "skip-model-probe onboarding should not silently rewrite reviewed providers to the reviewed model: {raw}"
+        raw.contains("model = \"deepseek-chat\""),
+        "skip-model-probe onboarding should persist the reviewed model explicitly instead of leaving the config on auto: {raw}"
     );
 }
 
@@ -915,7 +1383,9 @@ async fn non_interactive_onboard_allows_explicit_model_probe_warning() {
     let mut config = mvp::config::LoongClawConfig::default();
     config.provider.base_url = format!("http://{addr}");
     config.provider.model = "openai/gpt-5.1-codex".to_owned();
-    config.provider.api_key = Some("test-openai-key".to_owned());
+    config.provider.api_key = Some(loongclaw_contracts::SecretRef::Inline(
+        "test-openai-key".to_owned(),
+    ));
     mvp::config::write(Some(output.to_string_lossy().as_ref()), &config, true)
         .expect("write existing config");
 
@@ -941,7 +1411,7 @@ async fn non_interactive_onboard_allows_explicit_model_probe_warning() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn non_interactive_onboard_reports_reviewed_auto_probe_failure_without_rewriting_config() {
+async fn non_interactive_onboard_applies_reviewed_default_when_probe_fails() {
     let _env_guard = DetectedEnvironmentGuard::without_detected_environment();
     let root = unique_temp_path("non-interactive-reviewed-auto-failure-root");
     std::fs::create_dir_all(&root).expect("create test root");
@@ -957,10 +1427,11 @@ async fn non_interactive_onboard_reports_reviewed_auto_probe_failure_without_rew
     config.provider.kind = mvp::config::ProviderKind::Deepseek;
     config.provider.base_url = format!("http://{addr}");
     config.provider.model = "auto".to_owned();
-    config.provider.api_key = Some("test-deepseek-key".to_owned());
+    config.provider.api_key = Some(loongclaw_contracts::SecretRef::Inline(
+        "test-deepseek-key".to_owned(),
+    ));
     mvp::config::write(Some(output.to_string_lossy().as_ref()), &config, true)
         .expect("write existing config");
-    let original_body = std::fs::read_to_string(&output).expect("read original config");
 
     let mut options = default_non_interactive_onboard_options(&output);
     options.force = true;
@@ -968,21 +1439,18 @@ async fn non_interactive_onboard_reports_reviewed_auto_probe_failure_without_rew
 
     let mut ui = ScriptedOnboardUi::new(std::iter::empty::<String>());
     let context = crate::onboard_cli::OnboardRuntimeContext::new_for_tests(80, None, None);
-    let error = crate::onboard_cli::run_onboard_cli_with_ui(options, &mut ui, &context)
+    crate::onboard_cli::run_onboard_cli_with_ui(options, &mut ui, &context)
         .await
-        .expect_err("reviewed auto-model probe failures should block non-interactive onboarding until the model is pinned explicitly");
+        .expect("reviewed onboarding defaults should let non-interactive onboarding pin a usable explicit model even when catalog probing fails");
 
+    let written = std::fs::read_to_string(&output).expect("read config after onboarding");
     assert!(
-        error.contains("accept reviewed model `deepseek-chat`")
-            && error.contains("provider.model")
-            && error.contains("preferred_models"),
-        "reviewed auto-model probe failures should surface the actionable explicit-model remediation instead of a generic rerun hint: {error}"
+        written.contains("model = \"deepseek-chat\""),
+        "non-interactive onboarding should persist the reviewed model explicitly instead of leaving the provider on auto after a probe warning: {written}"
     );
-    assert_eq!(
-        std::fs::read_to_string(&output).expect("read config after blocked onboard"),
-        original_body,
-        "blocking reviewed auto-model probe failures should leave the existing auto config untouched"
-    );
+    let (_, written_config) = mvp::config::load(Some(output.to_string_lossy().as_ref()))
+        .expect("load written onboarding config");
+    assert_eq!(written_config.provider.model, "deepseek-chat");
 
     let requests = server.join().expect("join local provider server");
     assert!(
@@ -991,7 +1459,7 @@ async fn non_interactive_onboard_reports_reviewed_auto_probe_failure_without_rew
             request.starts_with("GET /v1/models ")
                 && normalized.contains("authorization: bearer test-deepseek-key")
         }),
-        "reviewed auto-model failures should still attempt the provider model probe before surfacing the actionable remediation: {requests:#?}"
+        "reviewed-default onboarding should still attempt the provider model probe with resolved auth before falling back to the explicit reviewed model: {requests:#?}"
     );
 }
 
@@ -1007,7 +1475,9 @@ async fn non_interactive_api_key_env_override_clears_existing_oauth_credentials(
 
     let mut existing = mvp::config::LoongClawConfig::default();
     existing.provider.model = "openai/gpt-5.1-codex".to_owned();
-    existing.provider.oauth_access_token = Some("${OPENAI_CODEX_OAUTH_TOKEN}".to_owned());
+    existing.provider.oauth_access_token = Some(loongclaw_contracts::SecretRef::Inline(
+        "${OPENAI_CODEX_OAUTH_TOKEN}".to_owned(),
+    ));
     mvp::config::write(Some(output.to_string_lossy().as_ref()), &existing, true)
         .expect("write existing config with oauth credential");
 
@@ -1026,8 +1496,8 @@ async fn non_interactive_api_key_env_override_clears_existing_oauth_credentials(
 
     let raw = std::fs::read_to_string(&output).expect("read written onboarding config");
     assert!(
-        raw.contains("api_key = \"${OPENAI_API_KEY}\""),
-        "api key env override should persist the selected api key source: {raw}"
+        raw.contains("[providers.openai.api_key]") && raw.contains("env = \"OPENAI_API_KEY\""),
+        "api key env override should persist the selected api key source in the canonical secret field: {raw}"
     );
     assert!(
         !raw.contains("OPENAI_CODEX_OAUTH_TOKEN"),
@@ -1037,10 +1507,17 @@ async fn non_interactive_api_key_env_override_clears_existing_oauth_credentials(
     let (_, config) = mvp::config::load(Some(output.to_string_lossy().as_ref()))
         .expect("load written onboarding config");
     assert_eq!(config.provider.oauth_access_token, None);
+    assert_eq!(config.provider.oauth_access_token_env, None);
     assert_eq!(
-        config.provider.api_key.as_deref(),
-        Some("${OPENAI_API_KEY}"),
-        "reloaded config should keep only the selected api key credential source"
+        config.provider.api_key,
+        Some(loongclaw_contracts::SecretRef::Env {
+            env: "OPENAI_API_KEY".to_owned(),
+        }),
+        "reloaded config should keep only the selected api key env binding in the canonical api_key field"
+    );
+    assert_eq!(
+        config.provider.api_key_env, None,
+        "reloaded config should not keep the legacy api_key_env field after persisting the selected api key source"
     );
 }
 
@@ -1056,7 +1533,9 @@ async fn non_interactive_api_key_env_override_clears_existing_inline_api_key() {
 
     let mut existing = mvp::config::LoongClawConfig::default();
     existing.provider.model = "openai/gpt-5.1-codex".to_owned();
-    existing.provider.api_key = Some("inline-secret".to_owned());
+    existing.provider.api_key = Some(loongclaw_contracts::SecretRef::Inline(
+        "inline-secret".to_owned(),
+    ));
     mvp::config::write(Some(output.to_string_lossy().as_ref()), &existing, true)
         .expect("write existing config with inline api key");
 
@@ -1075,8 +1554,8 @@ async fn non_interactive_api_key_env_override_clears_existing_inline_api_key() {
 
     let raw = std::fs::read_to_string(&output).expect("read written onboarding config");
     assert!(
-        raw.contains("api_key = \"${OPENAI_API_KEY}\""),
-        "api key env override should persist the selected api key source: {raw}"
+        raw.contains("[providers.openai.api_key]") && raw.contains("env = \"OPENAI_API_KEY\""),
+        "api key env override should persist the selected api key source in the canonical secret field: {raw}"
     );
     assert!(
         !raw.contains("inline-secret"),
@@ -1086,9 +1565,15 @@ async fn non_interactive_api_key_env_override_clears_existing_inline_api_key() {
     let (_, config) = mvp::config::load(Some(output.to_string_lossy().as_ref()))
         .expect("load written onboarding config");
     assert_eq!(
-        config.provider.api_key.as_deref(),
-        Some("${OPENAI_API_KEY}"),
-        "reloaded config should keep only the selected api key env reference"
+        config.provider.api_key,
+        Some(loongclaw_contracts::SecretRef::Env {
+            env: "OPENAI_API_KEY".to_owned(),
+        }),
+        "reloaded config should keep only the selected api key env binding in the canonical api_key field"
+    );
+    assert_eq!(
+        config.provider.api_key_env, None,
+        "reloaded config should not keep the legacy api_key_env field after persisting the selected api key source"
     );
 }
 
@@ -1101,7 +1586,9 @@ async fn non_interactive_api_key_env_clear_keeps_existing_inline_credential() {
 
     let mut existing = mvp::config::LoongClawConfig::default();
     existing.provider.model = "openai/gpt-5.1-codex".to_owned();
-    existing.provider.api_key = Some("inline-secret".to_owned());
+    existing.provider.api_key = Some(loongclaw_contracts::SecretRef::Inline(
+        "inline-secret".to_owned(),
+    ));
     existing.provider.api_key_env = Some("OPENAI_API_KEY".to_owned());
     mvp::config::write(Some(output.to_string_lossy().as_ref()), &existing, true)
         .expect("write existing config with inline credential and env binding");
@@ -1128,7 +1615,11 @@ async fn non_interactive_api_key_env_clear_keeps_existing_inline_credential() {
     let (_, config) = mvp::config::load(Some(output.to_string_lossy().as_ref()))
         .expect("load written onboarding config");
     assert_eq!(
-        config.provider.api_key.as_deref(),
+        config
+            .provider
+            .api_key
+            .as_ref()
+            .and_then(|value| value.inline_literal_value()),
         Some("inline-secret"),
         "explicit clear token should preserve the existing inline provider credential"
     );
@@ -1144,7 +1635,9 @@ async fn non_interactive_system_prompt_clear_restores_builtin_prompt() {
 
     let mut existing = mvp::config::LoongClawConfig::default();
     existing.provider.model = "openai/gpt-5.1-codex".to_owned();
-    existing.provider.api_key = Some("inline-secret".to_owned());
+    existing.provider.api_key = Some(loongclaw_contracts::SecretRef::Inline(
+        "inline-secret".to_owned(),
+    ));
     existing.cli.system_prompt = "custom review prompt".to_owned();
     mvp::config::write(Some(output.to_string_lossy().as_ref()), &existing, true)
         .expect("write existing config with custom system prompt");
@@ -1177,7 +1670,9 @@ async fn interactive_onboard_clear_token_keeps_inline_provider_credential() {
     let output_path = unique_temp_path("interactive-clear-inline-credential.toml");
     let mut existing = mvp::config::LoongClawConfig::default();
     existing.provider.model = "gpt-4.1".to_owned();
-    existing.provider.api_key = Some("inline-secret".to_owned());
+    existing.provider.api_key = Some(loongclaw_contracts::SecretRef::Inline(
+        "inline-secret".to_owned(),
+    ));
     existing.provider.api_key_env = Some("OPENAI_API_KEY".to_owned());
     mvp::config::write(output_path.to_str(), &existing, true).expect("write existing config");
 
@@ -1190,6 +1685,8 @@ async fn interactive_onboard_clear_token_keeps_inline_provider_credential() {
             provider: None,
             model: None,
             api_key_env: None,
+            web_search_provider: None,
+            web_search_api_key_env: None,
             personality: None,
             memory_profile: None,
             system_prompt: None,
@@ -1201,6 +1698,7 @@ async fn interactive_onboard_clear_token_keeps_inline_provider_credential() {
             provider_choice_input(mvp::config::ProviderKind::Openai),
             "gpt-4.1".to_owned(),
             ":clear".to_owned(),
+            String::new(),
             String::new(),
             String::new(),
             String::new(),
@@ -1233,7 +1731,11 @@ async fn interactive_onboard_clear_token_keeps_inline_provider_credential() {
     let (_, config) =
         mvp::config::load(output_path.to_str()).expect("load interactive onboarding config");
     assert_eq!(
-        config.provider.api_key.as_deref(),
+        config
+            .provider
+            .api_key
+            .as_ref()
+            .and_then(|value| value.inline_literal_value()),
         Some("inline-secret"),
         "explicit :clear should keep the existing inline provider credential in the saved config: {transcript:#?}"
     );
@@ -1246,7 +1748,9 @@ async fn interactive_onboard_clear_token_restores_builtin_system_prompt() {
     let output_path = unique_temp_path("interactive-clear-system-prompt.toml");
     let mut existing = mvp::config::LoongClawConfig::default();
     existing.provider.model = "gpt-4.1".to_owned();
-    existing.provider.api_key = Some("inline-secret".to_owned());
+    existing.provider.api_key = Some(loongclaw_contracts::SecretRef::Inline(
+        "inline-secret".to_owned(),
+    ));
     existing.cli.system_prompt = "custom review prompt".to_owned();
     mvp::config::write(output_path.to_str(), &existing, true).expect("write existing config");
 
@@ -1256,6 +1760,7 @@ async fn interactive_onboard_clear_token_restores_builtin_system_prompt() {
         "gpt-4.1".to_owned(),
         String::new(),
         ":clear".to_owned(),
+        String::new(),
         String::new(),
         "y".to_owned(),
         "y".to_owned(),
@@ -1272,6 +1777,8 @@ async fn interactive_onboard_clear_token_restores_builtin_system_prompt() {
             provider: None,
             model: None,
             api_key_env: None,
+            web_search_provider: None,
+            web_search_api_key_env: None,
             personality: None,
             memory_profile: None,
             system_prompt: Some(existing.cli.system_prompt.clone()),
@@ -1298,6 +1805,206 @@ async fn interactive_onboard_clear_token_restores_builtin_system_prompt() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn interactive_onboard_web_search_custom_env_persists_explicit_env_reference() {
+    let _env_guard = DetectedEnvironmentGuard::without_detected_environment();
+    let _openai_env = unsafe { EnvVarGuard::set_unlocked("OPENAI_API_KEY", "openai-test-token") };
+    let _tavily_env = unsafe { EnvVarGuard::set_unlocked("TEAM_TAVILY_KEY", "tavily-test-token") };
+    let output_path = unique_temp_path("interactive-web-search-env.toml");
+    let mut existing = mvp::config::LoongClawConfig::default();
+    existing.provider.model = "gpt-4.1".to_owned();
+    existing.provider.api_key_env = Some("OPENAI_API_KEY".to_owned());
+    mvp::config::write(output_path.to_str(), &existing, true).expect("write existing config");
+
+    let transcript = run_scripted_onboard_flow(
+        loongclaw_daemon::onboard_cli::OnboardCommandOptions {
+            output: output_path.to_str().map(str::to_owned),
+            force: false,
+            non_interactive: false,
+            accept_risk: true,
+            provider: None,
+            model: None,
+            api_key_env: None,
+            web_search_provider: None,
+            web_search_api_key_env: None,
+            personality: None,
+            memory_profile: None,
+            system_prompt: None,
+            skip_model_probe: true,
+        },
+        vec![
+            "1".to_owned(),
+            "2".to_owned(),
+            provider_choice_input(mvp::config::ProviderKind::Openai),
+            "gpt-4.1".to_owned(),
+            "OPENAI_API_KEY".to_owned(),
+            String::new(),
+            String::new(),
+            String::new(),
+            "tavily".to_owned(),
+            "TEAM_TAVILY_KEY".to_owned(),
+            "y".to_owned(),
+            "y".to_owned(),
+            "o".to_owned(),
+        ],
+        None,
+        None,
+    )
+    .await
+    .expect("run scripted onboarding with custom web search env");
+
+    let joined = transcript.join("\n");
+    assert!(
+        joined.contains("choose web search credential"),
+        "interactive onboarding should prompt for a web-search credential source when the selected provider requires one: {transcript:#?}"
+    );
+
+    let (_, config) =
+        mvp::config::load(output_path.to_str()).expect("load onboarding config with web search");
+    assert_eq!(
+        config.tools.web_search.default_provider,
+        mvp::config::WEB_SEARCH_PROVIDER_TAVILY
+    );
+    assert_eq!(
+        config.tools.web_search.tavily_api_key.as_deref(),
+        Some("${TEAM_TAVILY_KEY}"),
+        "interactive onboarding should persist the selected web-search env as an explicit env reference"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn interactive_onboard_firecrawl_web_search_custom_env_persists_explicit_env_reference() {
+    let _env_guard = DetectedEnvironmentGuard::without_detected_environment();
+    let _openai_env = unsafe { EnvVarGuard::set_unlocked("OPENAI_API_KEY", "openai-test-token") };
+    let _firecrawl_env =
+        unsafe { EnvVarGuard::set_unlocked("TEAM_FIRECRAWL_KEY", "firecrawl-test-token") };
+    let output_path = unique_temp_path("interactive-firecrawl-web-search-env.toml");
+    let mut existing = mvp::config::LoongClawConfig::default();
+
+    existing.provider.model = "gpt-4.1".to_owned();
+    existing.provider.api_key_env = Some("OPENAI_API_KEY".to_owned());
+    mvp::config::write(output_path.to_str(), &existing, true).expect("write existing config");
+
+    let transcript = run_scripted_onboard_flow(
+        loongclaw_daemon::onboard_cli::OnboardCommandOptions {
+            output: output_path.to_str().map(str::to_owned),
+            force: false,
+            non_interactive: false,
+            accept_risk: true,
+            provider: None,
+            model: None,
+            api_key_env: None,
+            web_search_provider: None,
+            web_search_api_key_env: None,
+            personality: None,
+            memory_profile: None,
+            system_prompt: None,
+            skip_model_probe: true,
+        },
+        vec![
+            "1".to_owned(),
+            "2".to_owned(),
+            provider_choice_input(mvp::config::ProviderKind::Openai),
+            "gpt-4.1".to_owned(),
+            "OPENAI_API_KEY".to_owned(),
+            String::new(),
+            String::new(),
+            String::new(),
+            "firecrawl".to_owned(),
+            "TEAM_FIRECRAWL_KEY".to_owned(),
+            "y".to_owned(),
+            "y".to_owned(),
+            "o".to_owned(),
+        ],
+        None,
+        None,
+    )
+    .await
+    .expect("run scripted onboarding with custom firecrawl web search env");
+
+    let joined = transcript.join("\n");
+    assert!(
+        joined.contains("choose web search credential"),
+        "interactive onboarding should prompt for a web-search credential source when Firecrawl is selected: {transcript:#?}"
+    );
+
+    let (_, config) =
+        mvp::config::load(output_path.to_str()).expect("load onboarding config with firecrawl");
+    assert_eq!(
+        config.tools.web_search.default_provider,
+        mvp::config::WEB_SEARCH_PROVIDER_FIRECRAWL
+    );
+    assert_eq!(
+        config.tools.web_search.firecrawl_api_key.as_deref(),
+        Some("${TEAM_FIRECRAWL_KEY}"),
+        "interactive onboarding should persist the selected Firecrawl env as an explicit env reference"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn interactive_onboard_web_search_blank_input_keeps_inline_credential() {
+    let _env_guard = DetectedEnvironmentGuard::without_detected_environment();
+    let _openai_env = unsafe { EnvVarGuard::set_unlocked("OPENAI_API_KEY", "openai-test-token") };
+    let output_path = unique_temp_path("interactive-web-search-inline.toml");
+    let mut existing = mvp::config::LoongClawConfig::default();
+    existing.provider.model = "gpt-4.1".to_owned();
+    existing.provider.api_key_env = Some("OPENAI_API_KEY".to_owned());
+    existing.tools.web_search.default_provider = mvp::config::WEB_SEARCH_PROVIDER_TAVILY.to_owned();
+    existing.tools.web_search.tavily_api_key = Some("inline-web-search-secret".to_owned());
+    mvp::config::write(output_path.to_str(), &existing, true).expect("write existing config");
+
+    let transcript = run_scripted_onboard_flow(
+        loongclaw_daemon::onboard_cli::OnboardCommandOptions {
+            output: output_path.to_str().map(str::to_owned),
+            force: false,
+            non_interactive: false,
+            accept_risk: true,
+            provider: None,
+            model: None,
+            api_key_env: None,
+            web_search_provider: None,
+            web_search_api_key_env: None,
+            personality: None,
+            memory_profile: None,
+            system_prompt: None,
+            skip_model_probe: true,
+        },
+        vec![
+            "1".to_owned(),
+            "2".to_owned(),
+            provider_choice_input(mvp::config::ProviderKind::Openai),
+            "gpt-4.1".to_owned(),
+            "OPENAI_API_KEY".to_owned(),
+            String::new(),
+            String::new(),
+            String::new(),
+            "tavily".to_owned(),
+            String::new(),
+            "y".to_owned(),
+            "y".to_owned(),
+            "o".to_owned(),
+        ],
+        None,
+        None,
+    )
+    .await
+    .expect("run scripted onboarding while keeping inline web search credential");
+
+    let joined = transcript.join("\n");
+    assert!(
+        joined.contains("leave this blank to keep inline credentials"),
+        "web-search credential onboarding should explain how blank input preserves inline credentials: {transcript:#?}"
+    );
+
+    let (_, config) = mvp::config::load(output_path.to_str())
+        .expect("load onboarding config with inline web search credential");
+    assert_eq!(
+        config.tools.web_search.tavily_api_key.as_deref(),
+        Some("inline-web-search-secret"),
+        "blank web-search credential input should preserve the existing inline credential"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn interactive_onboard_only_shows_large_logo_on_the_initial_screen() {
     let _env_guard = DetectedEnvironmentGuard::without_detected_environment();
     unsafe {
@@ -1319,12 +2026,14 @@ async fn interactive_onboard_only_shows_large_logo_on_the_initial_screen() {
             provider: None,
             model: None,
             api_key_env: None,
+            web_search_provider: None,
+            web_search_api_key_env: None,
             personality: None,
             memory_profile: None,
             system_prompt: None,
             skip_model_probe: true,
         },
-        ["y", "1", "2", "", "", "", "", "", "", "y"],
+        ["y", "1", "2", "", "", "", "", "", "", "", "y"],
         None,
         None,
     )
@@ -1418,6 +2127,8 @@ requires_openai_auth = true
             provider: None,
             model: None,
             api_key_env: None,
+            web_search_provider: None,
+            web_search_api_key_env: None,
             personality: None,
             memory_profile: None,
             system_prompt: None,
@@ -1459,6 +2170,8 @@ requires_openai_auth = true
             provider: None,
             model: None,
             api_key_env: None,
+            web_search_provider: None,
+            web_search_api_key_env: None,
             personality: None,
             memory_profile: None,
             system_prompt: None,
@@ -1510,7 +2223,9 @@ async fn onboard_restores_original_config_when_memory_bootstrap_fails_after_writ
     let mut config = mvp::config::LoongClawConfig::default();
     config.provider.base_url = format!("http://{addr}");
     config.provider.model = "openai/gpt-5.1-codex".to_owned();
-    config.provider.api_key = Some("test-openai-key".to_owned());
+    config.provider.api_key = Some(loongclaw_contracts::SecretRef::Inline(
+        "test-openai-key".to_owned(),
+    ));
     config.memory.sqlite_path = invalid_sqlite_dir.display().to_string();
     mvp::config::write(Some(output.to_string_lossy().as_ref()), &config, true)
         .expect("write existing config");
@@ -1549,7 +2264,9 @@ async fn onboard_restores_original_config_when_memory_bootstrap_fails_after_writ
 #[test]
 fn provider_credential_check_accepts_inline_api_key() {
     let mut config = mvp::config::LoongClawConfig::default();
-    config.provider.api_key = Some("inline-secret".to_owned());
+    config.provider.api_key = Some(loongclaw_contracts::SecretRef::Inline(
+        "inline-secret".to_owned(),
+    ));
     config.provider.api_key_env = None;
 
     let check = loongclaw_daemon::onboard_cli::provider_credential_check(&config);
@@ -1573,8 +2290,10 @@ fn provider_credential_check_mentions_active_profile_id_when_saved_profiles_exis
             default_for_kind: true,
             provider: mvp::config::ProviderConfig {
                 kind: mvp::config::ProviderKind::VolcengineCoding,
-                model: "ark-code-latest".to_owned(),
-                api_key: Some("inline-secret".to_owned()),
+                model: "doubao-seed-2.0-code".to_owned(),
+                api_key: Some(loongclaw_contracts::SecretRef::Inline(
+                    "inline-secret".to_owned(),
+                )),
                 base_url: "https://ark.cn-beijing.volces.com/api/coding/v3".to_owned(),
                 wire_api: mvp::config::ProviderWireApi::ChatCompletions,
                 chat_completions_path: "/chat/completions".to_owned(),
@@ -1605,7 +2324,9 @@ fn provider_credential_check_mentions_active_profile_id_when_saved_profiles_exis
 #[test]
 fn preferred_api_key_env_default_stays_blank_for_inline_credentials() {
     let mut config = mvp::config::LoongClawConfig::default();
-    config.provider.api_key = Some("inline-secret".to_owned());
+    config.provider.api_key = Some(loongclaw_contracts::SecretRef::Inline(
+        "inline-secret".to_owned(),
+    ));
     config.provider.api_key_env = None;
 
     let value = loongclaw_daemon::onboard_cli::preferred_api_key_env_default(&config);
@@ -1737,14 +2458,24 @@ fn onboard_risk_screen_uses_brand_header_and_continue_cancel_options() {
 #[test]
 fn import_surfaces_include_ready_provider_and_channels() {
     let mut config = mvp::config::LoongClawConfig::default();
-    config.provider.api_key = Some("provider-secret".to_owned());
+    config.provider.api_key = Some(loongclaw_contracts::SecretRef::Inline(
+        "provider-secret".to_owned(),
+    ));
     config.telegram.enabled = true;
-    config.telegram.bot_token = Some("123456:test-token".to_owned());
+    config.telegram.bot_token = Some(loongclaw_contracts::SecretRef::Inline(
+        "123456:test-token".to_owned(),
+    ));
     config.telegram.allowed_chat_ids = vec![42];
     config.feishu.enabled = true;
-    config.feishu.app_id = Some("cli_a1b2c3".to_owned());
-    config.feishu.app_secret = Some("feishu-secret".to_owned());
-    config.feishu.verification_token = Some("verify-token".to_owned());
+    config.feishu.app_id = Some(loongclaw_contracts::SecretRef::Inline(
+        "cli_a1b2c3".to_owned(),
+    ));
+    config.feishu.app_secret = Some(loongclaw_contracts::SecretRef::Inline(
+        "feishu-secret".to_owned(),
+    ));
+    config.feishu.verification_token = Some(loongclaw_contracts::SecretRef::Inline(
+        "verify-token".to_owned(),
+    ));
 
     let surfaces = loongclaw_daemon::onboard_cli::collect_import_surfaces(&config);
     assert!(
@@ -1790,11 +2521,19 @@ fn import_surfaces_mark_missing_channel_secret_for_review() {
 fn channel_preflight_checks_report_enabled_channels() {
     let mut config = mvp::config::LoongClawConfig::default();
     config.telegram.enabled = true;
-    config.telegram.bot_token = Some("123456:test-token".to_owned());
+    config.telegram.bot_token = Some(loongclaw_contracts::SecretRef::Inline(
+        "123456:test-token".to_owned(),
+    ));
     config.feishu.enabled = true;
-    config.feishu.app_id = Some("cli_a1b2c3".to_owned());
-    config.feishu.app_secret = Some("feishu-secret".to_owned());
-    config.feishu.verification_token = Some("verify-token".to_owned());
+    config.feishu.app_id = Some(loongclaw_contracts::SecretRef::Inline(
+        "cli_a1b2c3".to_owned(),
+    ));
+    config.feishu.app_secret = Some(loongclaw_contracts::SecretRef::Inline(
+        "feishu-secret".to_owned(),
+    ));
+    config.feishu.verification_token = Some(loongclaw_contracts::SecretRef::Inline(
+        "verify-token".to_owned(),
+    ));
 
     let checks = loongclaw_daemon::onboard_cli::collect_channel_preflight_checks(&config);
     assert!(
@@ -1850,6 +2589,373 @@ fn import_surfaces_detect_ready_channels_from_environment_only() {
                 && surface.level == loongclaw_daemon::onboard_cli::ImportSurfaceLevel::Ready
         }),
         "feishu env should surface as import-ready even without an existing config: {surfaces:#?}"
+    );
+}
+
+#[test]
+fn import_surfaces_detect_configured_plugin_backed_channels_for_review_when_managed_bridge_install_root_is_missing()
+ {
+    let config: mvp::config::LoongClawConfig = serde_json::from_value(json!({
+        "weixin": {
+            "enabled": true,
+            "bridge_url": "https://bridge.example.test/weixin",
+            "bridge_access_token": "weixin-token",
+            "allowed_contact_ids": ["wxid_alice"]
+        }
+    }))
+    .expect("deserialize weixin config");
+
+    let surfaces = loongclaw_daemon::onboard_cli::collect_import_surfaces(&config);
+
+    assert!(
+        surfaces.iter().any(|surface| {
+            surface.name == "weixin channel"
+                && surface.level == loongclaw_daemon::onboard_cli::ImportSurfaceLevel::Review
+                && surface.detail.contains("external_skills.install_root")
+        }),
+        "import preview should surface managed bridge review guidance when a plugin-backed channel is configured but install_root is missing: {surfaces:#?}"
+    );
+}
+
+#[test]
+fn import_surfaces_detect_configured_plugin_backed_channels_as_ready_when_single_compatible_managed_bridge_is_available()
+ {
+    let install_root = unique_temp_path("managed-bridge-import-ready");
+    let manifest = super::managed_bridge_manifest(
+        "weixin",
+        Some("channel"),
+        super::compatible_managed_bridge_metadata(
+            "wechat_clawbot_ilink_bridge",
+            "weixin_reply_loop",
+        ),
+    );
+    let mut config: mvp::config::LoongClawConfig = serde_json::from_value(json!({
+        "weixin": {
+            "enabled": true,
+            "bridge_url": "https://bridge.example.test/weixin",
+            "bridge_access_token": "weixin-token",
+            "allowed_contact_ids": ["wxid_alice"]
+        }
+    }))
+    .expect("deserialize weixin config");
+
+    std::fs::create_dir_all(&install_root).expect("create managed bridge install root");
+    super::write_managed_bridge_manifest(
+        install_root.as_path(),
+        "weixin-managed-bridge",
+        &manifest,
+    );
+    config.external_skills.install_root = Some(install_root.display().to_string());
+
+    let surfaces = loongclaw_daemon::onboard_cli::collect_import_surfaces(&config);
+
+    assert!(
+        surfaces.iter().any(|surface| {
+            surface.name == "weixin channel"
+                && surface.level == loongclaw_daemon::onboard_cli::ImportSurfaceLevel::Ready
+                && surface.detail.contains("weixin-managed-bridge")
+        }),
+        "import preview should mark a configured plugin-backed channel as ready when exactly one compatible managed bridge is available: {surfaces:#?}"
+    );
+}
+
+#[test]
+fn import_surfaces_ignore_unconfigured_plugin_backed_channels_even_when_managed_bridge_is_installed()
+ {
+    let install_root = unique_temp_path("managed-bridge-import-unconfigured");
+    let manifest = super::managed_bridge_manifest(
+        "weixin",
+        Some("channel"),
+        super::compatible_managed_bridge_metadata(
+            "wechat_clawbot_ilink_bridge",
+            "weixin_reply_loop",
+        ),
+    );
+    let mut config = mvp::config::LoongClawConfig::default();
+
+    std::fs::create_dir_all(&install_root).expect("create managed bridge install root");
+    super::write_managed_bridge_manifest(
+        install_root.as_path(),
+        "weixin-managed-bridge",
+        &manifest,
+    );
+    config.external_skills.install_root = Some(install_root.display().to_string());
+
+    let surfaces = loongclaw_daemon::onboard_cli::collect_import_surfaces(&config);
+
+    assert!(
+        surfaces
+            .iter()
+            .all(|surface| surface.name != "weixin channel"),
+        "import preview should ignore plugin-backed channels that still match the default placeholder snapshot: {surfaces:#?}"
+    );
+}
+
+#[test]
+fn managed_bridge_onboard_preflight_warns_when_install_root_is_missing() {
+    let config: mvp::config::LoongClawConfig = serde_json::from_value(json!({
+        "weixin": {
+            "enabled": true,
+            "bridge_url": "https://bridge.example.test/weixin",
+            "bridge_access_token": "weixin-token",
+            "allowed_contact_ids": ["wxid_alice"]
+        }
+    }))
+    .expect("deserialize weixin config");
+
+    let checks = loongclaw_daemon::onboard_cli::collect_channel_preflight_checks(&config);
+
+    assert!(
+        checks.iter().any(|check| {
+            check.name == "weixin channel"
+                && check.level == loongclaw_daemon::onboard_cli::OnboardCheckLevel::Warn
+                && check.detail.contains("external_skills.install_root")
+        }),
+        "onboard preflight should surface managed bridge discovery guidance when install_root is missing: {checks:#?}"
+    );
+}
+
+#[test]
+fn managed_bridge_onboard_preflight_warns_when_managed_bridge_setup_is_incomplete() {
+    let install_root = unique_temp_path("managed-bridge-onboard-preflight-incomplete");
+    let mut metadata = super::compatible_managed_bridge_metadata(
+        "qq_official_bot_gateway_or_plugin_bridge",
+        "qqbot_reply_loop",
+    );
+    let removed_transport_family = metadata.remove("transport_family");
+    let setup = super::managed_bridge_setup_with_guidance(
+        "channel",
+        vec!["QQBOT_BRIDGE_URL"],
+        vec!["qqbot.bridge_url"],
+        vec!["https://example.test/docs/qqbot-bridge"],
+        Some("Run the QQ bridge setup flow before enabling this bridge."),
+    );
+    let manifest = super::managed_bridge_manifest_with_setup("qqbot", metadata, Some(setup));
+    let mut config: mvp::config::LoongClawConfig = serde_json::from_value(json!({
+        "qqbot": {
+            "enabled": true,
+            "app_id": "10001",
+            "client_secret": "qqbot-secret",
+            "allowed_peer_ids": ["openid-alice"]
+        }
+    }))
+    .expect("deserialize qqbot config");
+
+    assert_eq!(
+        removed_transport_family.as_deref(),
+        Some("qq_official_bot_gateway_or_plugin_bridge")
+    );
+
+    std::fs::create_dir_all(&install_root).expect("create managed bridge install root");
+    super::write_managed_bridge_manifest(install_root.as_path(), "qqbot-bridge-guided", &manifest);
+    config.external_skills.install_root = Some(install_root.display().to_string());
+
+    let checks = loongclaw_daemon::onboard_cli::collect_channel_preflight_checks(&config);
+
+    assert!(
+        checks.iter().any(|check| {
+            check.name == "qq bot channel"
+                && check.level == loongclaw_daemon::onboard_cli::OnboardCheckLevel::Warn
+                && check.detail.contains("QQBOT_BRIDGE_URL")
+                && check.detail.contains("qqbot.bridge_url")
+        }),
+        "onboard preflight should preserve managed bridge setup guidance when discovery finds only incomplete plugins: {checks:#?}"
+    );
+}
+
+#[test]
+fn managed_bridge_onboard_preflight_warns_when_managed_bridge_discovery_is_ambiguous() {
+    let install_root = unique_temp_path("managed-bridge-onboard-preflight-ambiguous");
+    let first_manifest = super::managed_bridge_manifest_with_plugin_id(
+        "weixin-bridge-a",
+        "weixin",
+        super::compatible_managed_bridge_metadata(
+            "wechat_clawbot_ilink_bridge",
+            "weixin_reply_loop",
+        ),
+        Some(super::managed_bridge_setup_with_guidance(
+            "channel",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        )),
+    );
+    let second_manifest = super::managed_bridge_manifest_with_plugin_id(
+        "weixin-bridge-b",
+        "weixin",
+        super::compatible_managed_bridge_metadata(
+            "wechat_clawbot_ilink_bridge",
+            "weixin_reply_loop",
+        ),
+        Some(super::managed_bridge_setup_with_guidance(
+            "channel",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        )),
+    );
+    let mut config: mvp::config::LoongClawConfig = serde_json::from_value(json!({
+        "weixin": {
+            "enabled": true,
+            "bridge_url": "https://bridge.example.test/weixin",
+            "bridge_access_token": "weixin-token",
+            "allowed_contact_ids": ["wxid_alice"]
+        }
+    }))
+    .expect("deserialize weixin config");
+
+    std::fs::create_dir_all(&install_root).expect("create managed bridge install root");
+    super::write_managed_bridge_manifest(
+        install_root.as_path(),
+        "weixin-bridge-a",
+        &first_manifest,
+    );
+    super::write_managed_bridge_manifest(
+        install_root.as_path(),
+        "weixin-bridge-b",
+        &second_manifest,
+    );
+    config.external_skills.install_root = Some(install_root.display().to_string());
+
+    let checks = loongclaw_daemon::onboard_cli::collect_channel_preflight_checks(&config);
+
+    assert!(
+        checks.iter().any(|check| {
+            check.name == "weixin channel"
+                && check.level == loongclaw_daemon::onboard_cli::OnboardCheckLevel::Warn
+                && check.detail.contains("weixin-bridge-a")
+                && check.detail.contains("weixin-bridge-b")
+        }),
+        "onboard preflight should warn when multiple compatible managed bridges are discovered: {checks:#?}"
+    );
+}
+
+#[test]
+fn managed_bridge_onboard_preflight_passes_when_single_compatible_plugin_is_available() {
+    let install_root = unique_temp_path("managed-bridge-onboard-preflight-ready");
+    let manifest = super::managed_bridge_manifest(
+        "weixin",
+        Some("channel"),
+        super::compatible_managed_bridge_metadata(
+            "wechat_clawbot_ilink_bridge",
+            "weixin_reply_loop",
+        ),
+    );
+    let mut config: mvp::config::LoongClawConfig = serde_json::from_value(json!({
+        "weixin": {
+            "enabled": true,
+            "bridge_url": "https://bridge.example.test/weixin",
+            "bridge_access_token": "weixin-token",
+            "allowed_contact_ids": ["wxid_alice"]
+        }
+    }))
+    .expect("deserialize weixin config");
+
+    std::fs::create_dir_all(&install_root).expect("create managed bridge install root");
+    super::write_managed_bridge_manifest(
+        install_root.as_path(),
+        "weixin-managed-bridge",
+        &manifest,
+    );
+    config.external_skills.install_root = Some(install_root.display().to_string());
+
+    let checks = loongclaw_daemon::onboard_cli::collect_channel_preflight_checks(&config);
+
+    assert!(
+        checks.iter().any(|check| {
+            check.name == "weixin channel"
+                && check.level == loongclaw_daemon::onboard_cli::OnboardCheckLevel::Pass
+                && check.detail.contains("weixin-managed-bridge")
+        }),
+        "onboard preflight should pass when exactly one compatible managed bridge is ready: {checks:#?}"
+    );
+}
+
+#[test]
+fn managed_bridge_onboard_preflight_warns_when_bridge_contract_is_misconfigured_even_with_ready_plugin()
+ {
+    let install_root = unique_temp_path("managed-bridge-onboard-preflight-contract-misconfigured");
+    let manifest = super::managed_bridge_manifest(
+        "weixin",
+        Some("channel"),
+        super::compatible_managed_bridge_metadata(
+            "wechat_clawbot_ilink_bridge",
+            "weixin_reply_loop",
+        ),
+    );
+    let mut config: mvp::config::LoongClawConfig = serde_json::from_value(json!({
+        "weixin": {
+            "enabled": true,
+            "bridge_access_token": "weixin-token",
+            "allowed_contact_ids": ["wxid_alice"]
+        }
+    }))
+    .expect("deserialize weixin config");
+
+    std::fs::create_dir_all(&install_root).expect("create managed bridge install root");
+    super::write_managed_bridge_manifest(
+        install_root.as_path(),
+        "weixin-managed-bridge",
+        &manifest,
+    );
+    config.external_skills.install_root = Some(install_root.display().to_string());
+
+    let checks = loongclaw_daemon::onboard_cli::collect_channel_preflight_checks(&config);
+
+    assert!(
+        checks.iter().any(|check| {
+            check.name == "weixin channel"
+                && check.level == loongclaw_daemon::onboard_cli::OnboardCheckLevel::Warn
+                && check.detail.contains("bridge_url is missing")
+        }),
+        "onboard preflight should keep bridge contract issues visible even when managed bridge discovery is ready: {checks:#?}"
+    );
+}
+
+#[test]
+fn managed_bridge_onboard_preflight_summarizes_mixed_multi_account_detail() {
+    let install_root = unique_temp_path("managed-bridge-onboard-preflight-multi-account-detail");
+    let mut config = super::mixed_account_weixin_plugin_bridge_config();
+
+    super::install_ready_weixin_managed_bridge(install_root.as_path());
+    config.external_skills.install_root = Some(install_root.display().to_string());
+
+    let checks = loongclaw_daemon::onboard_cli::collect_channel_preflight_checks(&config);
+    let weixin_check = checks
+        .iter()
+        .find(|check| check.name == "weixin channel")
+        .expect("weixin preflight check");
+    let detail = weixin_check.detail.as_str();
+
+    assert_eq!(
+        weixin_check.level,
+        loongclaw_daemon::onboard_cli::OnboardCheckLevel::Warn
+    );
+    assert!(
+        detail.contains("weixin-managed-bridge"),
+        "multi-account onboard preflight should keep the selected plugin identity visible: {checks:#?}"
+    );
+    assert!(
+        detail.contains("configured_account=ops"),
+        "multi-account onboard preflight should mention the ready default account: {checks:#?}"
+    );
+    assert!(
+        detail.contains("(default): ready"),
+        "multi-account onboard preflight should mark the default account as ready when it passes contract checks: {checks:#?}"
+    );
+    assert!(
+        detail.contains("configured_account=backup"),
+        "multi-account onboard preflight should mention blocked non-default accounts: {checks:#?}"
+    );
+    assert!(
+        detail.contains("bridge_url is missing"),
+        "multi-account onboard preflight should keep the blocking contract detail visible: {checks:#?}"
+    );
+    assert!(
+        detail.contains(super::MIXED_ACCOUNT_WEIXIN_PLUGIN_BRIDGE_SUMMARY),
+        "onboard preflight detail should keep the shared mixed-account summary inside the discovery-ready prefix: {checks:#?}"
     );
 }
 
@@ -2043,9 +3149,12 @@ requires_openai_auth = true
         mvp::config::ProviderKind::KimiCoding
     );
     assert_eq!(
-        codex_candidate.config.provider.api_key_env.as_deref(),
-        Some("KIMI_CODING_API_KEY")
+        codex_candidate.config.provider.api_key,
+        Some(loongclaw_contracts::SecretRef::Env {
+            env: "KIMI_CODING_API_KEY".to_owned(),
+        })
     );
+    assert_eq!(codex_candidate.config.provider.api_key_env, None);
 }
 
 #[test]
@@ -2054,7 +3163,9 @@ fn collect_import_candidates_prepend_recommended_plan_before_detected_sources() 
     let codex_path = unique_temp_path("codex-config.toml");
 
     let mut existing = mvp::config::LoongClawConfig::default();
-    existing.provider.api_key = Some("provider-secret".to_owned());
+    existing.provider.api_key = Some(loongclaw_contracts::SecretRef::Inline(
+        "provider-secret".to_owned(),
+    ));
     let output_str = output_path
         .to_str()
         .expect("temp output path should be valid utf-8");
@@ -2216,7 +3327,7 @@ fn onboard_presentation_review_and_shortcut_copy_stays_canonical() {
     let guided = loongclaw_daemon::onboard_presentation::review_flow_copy(
         loongclaw_daemon::onboard_presentation::ReviewFlowKind::Guided,
     );
-    assert_eq!(guided.progress_line, "step 7 of 7 · review");
+    assert_eq!(guided.progress_line, "step 8 of 8 · review");
     assert_eq!(guided.header_subtitle, "review setup");
 
     let quick_current = loongclaw_daemon::onboard_presentation::review_flow_copy(
@@ -2953,7 +4064,7 @@ fn onboard_provider_selection_screen_includes_focus_title_and_choices() {
         "provider choice screen should use a focused decision title: {lines:#?}"
     );
     assert!(
-        lines.iter().any(|line| line == "step 1 of 7 · provider"),
+        lines.iter().any(|line| line == "step 1 of 8 · provider"),
         "provider choice screen should keep the guided-flow progress context inside the screen: {lines:#?}"
     );
     assert!(
@@ -3369,6 +4480,7 @@ fn onboard_current_setup_shortcut_screen_summarizes_existing_setup_and_choices()
 
 #[test]
 fn onboard_current_setup_shortcut_is_limited_to_healthy_interactive_keep_flow() {
+    let _guard = EnvVarGuard::set("LOONGCLAW_WEB_SEARCH_PROVIDER", "");
     let base_options = loongclaw_daemon::onboard_cli::OnboardCommandOptions {
         output: None,
         force: false,
@@ -3377,6 +4489,8 @@ fn onboard_current_setup_shortcut_is_limited_to_healthy_interactive_keep_flow() 
         provider: None,
         model: None,
         api_key_env: None,
+        web_search_provider: None,
+        web_search_api_key_env: None,
         personality: None,
         memory_profile: None,
         system_prompt: None,
@@ -3410,6 +4524,63 @@ fn onboard_current_setup_shortcut_is_limited_to_healthy_interactive_keep_flow() 
             loongclaw_daemon::onboard_cli::OnboardEntryChoice::ContinueCurrentSetup,
         ),
         "repairable setups should stay on the explicit review/edit path"
+    );
+}
+
+#[test]
+fn onboard_current_setup_shortcut_is_disabled_by_web_search_provider_override_env() {
+    let _guard = EnvVarGuard::set("LOONGCLAW_WEB_SEARCH_PROVIDER", "tavily");
+    let options = loongclaw_daemon::onboard_cli::OnboardCommandOptions {
+        output: None,
+        force: false,
+        non_interactive: false,
+        accept_risk: false,
+        provider: None,
+        model: None,
+        api_key_env: None,
+        web_search_provider: None,
+        web_search_api_key_env: None,
+        personality: None,
+        memory_profile: None,
+        system_prompt: None,
+        skip_model_probe: false,
+    };
+
+    assert!(
+        !loongclaw_daemon::onboard_cli::should_offer_current_setup_shortcut(
+            &options,
+            loongclaw_daemon::migration::types::CurrentSetupState::Healthy,
+            loongclaw_daemon::onboard_cli::OnboardEntryChoice::ContinueCurrentSetup,
+        ),
+        "an explicit web-search provider override should force the detailed onboarding path"
+    );
+}
+
+#[test]
+fn onboard_current_setup_shortcut_is_disabled_by_web_search_provider_option() {
+    let options = loongclaw_daemon::onboard_cli::OnboardCommandOptions {
+        output: None,
+        force: false,
+        non_interactive: false,
+        accept_risk: false,
+        provider: None,
+        model: None,
+        api_key_env: None,
+        web_search_provider: Some("tavily".to_owned()),
+        web_search_api_key_env: None,
+        personality: None,
+        memory_profile: None,
+        system_prompt: None,
+        skip_model_probe: false,
+    };
+
+    assert!(
+        !loongclaw_daemon::onboard_cli::should_offer_current_setup_shortcut(
+            &options,
+            loongclaw_daemon::migration::types::CurrentSetupState::Healthy,
+            loongclaw_daemon::onboard_cli::OnboardEntryChoice::ContinueCurrentSetup,
+        ),
+        "an explicit --web-search-provider option should force the detailed onboarding path"
     );
 }
 
@@ -3485,6 +4656,7 @@ fn onboard_detected_setup_shortcut_screen_summarizes_starting_point_and_choices(
 #[test]
 fn onboard_detected_setup_shortcut_is_limited_to_interactive_import_flow_with_default_provider_choice()
  {
+    let _guard = EnvVarGuard::set("LOONGCLAW_WEB_SEARCH_PROVIDER", "");
     let base_options = loongclaw_daemon::onboard_cli::OnboardCommandOptions {
         output: None,
         force: false,
@@ -3493,6 +4665,8 @@ fn onboard_detected_setup_shortcut_is_limited_to_interactive_import_flow_with_de
         provider: None,
         model: None,
         api_key_env: None,
+        web_search_provider: None,
+        web_search_api_key_env: None,
         personality: None,
         memory_profile: None,
         system_prompt: None,
@@ -3547,6 +4721,75 @@ fn onboard_detected_setup_shortcut_is_limited_to_interactive_import_flow_with_de
             &default_provider_plan,
         ),
         "the detected-setup fast lane should stay scoped to detected-setup entry choices"
+    );
+}
+
+#[test]
+fn onboard_detected_setup_shortcut_is_disabled_by_web_search_provider_override_env() {
+    let _guard = EnvVarGuard::set("LOONGCLAW_WEB_SEARCH_PROVIDER", "tavily");
+    let options = loongclaw_daemon::onboard_cli::OnboardCommandOptions {
+        output: None,
+        force: false,
+        non_interactive: false,
+        accept_risk: false,
+        provider: None,
+        model: None,
+        api_key_env: None,
+        web_search_provider: None,
+        web_search_api_key_env: None,
+        personality: None,
+        memory_profile: None,
+        system_prompt: None,
+        skip_model_probe: false,
+    };
+    let plan = loongclaw_daemon::migration::ProviderSelectionPlan {
+        imported_choices: Vec::new(),
+        default_kind: Some(mvp::config::ProviderKind::Openai),
+        default_profile_id: Some("openai".to_owned()),
+        requires_explicit_choice: false,
+    };
+
+    assert!(
+        !loongclaw_daemon::onboard_cli::should_offer_detected_setup_shortcut(
+            &options,
+            loongclaw_daemon::onboard_cli::OnboardEntryChoice::ImportDetectedSetup,
+            &plan,
+        ),
+        "an explicit web-search provider override should force the detailed detected-setup path"
+    );
+}
+
+#[test]
+fn onboard_detected_setup_shortcut_is_disabled_by_web_search_provider_option() {
+    let options = loongclaw_daemon::onboard_cli::OnboardCommandOptions {
+        output: None,
+        force: false,
+        non_interactive: false,
+        accept_risk: false,
+        provider: None,
+        model: None,
+        api_key_env: None,
+        web_search_provider: Some("tavily".to_owned()),
+        web_search_api_key_env: None,
+        personality: None,
+        memory_profile: None,
+        system_prompt: None,
+        skip_model_probe: false,
+    };
+    let plan = loongclaw_daemon::migration::ProviderSelectionPlan {
+        imported_choices: Vec::new(),
+        default_kind: Some(mvp::config::ProviderKind::Openai),
+        default_profile_id: Some("openai".to_owned()),
+        requires_explicit_choice: false,
+    };
+
+    assert!(
+        !loongclaw_daemon::onboard_cli::should_offer_detected_setup_shortcut(
+            &options,
+            loongclaw_daemon::onboard_cli::OnboardEntryChoice::ImportDetectedSetup,
+            &plan,
+        ),
+        "an explicit --web-search-provider option should force the detailed detected-setup path"
     );
 }
 
@@ -3772,6 +5015,13 @@ fn onboard_single_detected_setup_preview_screen_uses_compact_follow_up_layout() 
             .iter()
             .any(|line| line.contains("good fit: reuse Codex config as your starting point")),
         "single detected-setup preview should explain why this detected starting point is being carried forward: {lines:#?}"
+    );
+    assert!(
+        lines.iter().all(|line| {
+            let normalized = line.to_ascii_lowercase();
+            !(normalized.contains("esc") && normalized.contains("cancel"))
+        }),
+        "single detected-setup preview should not advertise an escape cancel path that the flow never reads: {lines:#?}"
     );
 }
 
@@ -4165,7 +5415,7 @@ fn onboard_model_selection_screen_keeps_provider_context() {
         "model screen should use a focused title: {lines:#?}"
     );
     assert!(
-        lines.iter().any(|line| line == "step 2 of 7 · model"),
+        lines.iter().any(|line| line == "step 2 of 8 · model"),
         "model screen should include guided progress context without relying on an external step header: {lines:#?}"
     );
     assert!(
@@ -4243,7 +5493,7 @@ fn onboard_model_selection_screen_wraps_compact_header_and_progress_on_narrow_wi
         "narrow model screen should split the compact header instead of forcing brand and version onto one line: {lines:#?}"
     );
     assert!(
-        lines.iter().any(|line| line == "step 2 of 7 · model"),
+        lines.iter().any(|line| line == "step 2 of 8 · model"),
         "narrow model screen should still keep the step context visible: {lines:#?}"
     );
 }
@@ -4252,8 +5502,9 @@ fn onboard_model_selection_screen_wraps_compact_header_and_progress_on_narrow_wi
 fn onboard_api_key_env_screen_explains_suggested_env_and_blank_behavior() {
     let mut config = mvp::config::LoongClawConfig::default();
     config.provider.kind = mvp::config::ProviderKind::Openai;
-    config.provider.api_key_env = None;
-    config.provider.oauth_access_token_env = Some("OPENAI_CODEX_OAUTH_TOKEN".to_owned());
+    config.provider.oauth_access_token = Some(loongclaw_contracts::SecretRef::Env {
+        env: "OPENAI_CODEX_OAUTH_TOKEN".to_owned(),
+    });
 
     let lines = loongclaw_daemon::onboard_cli::render_api_key_env_selection_screen_lines(
         &config,
@@ -4269,7 +5520,7 @@ fn onboard_api_key_env_screen_explains_suggested_env_and_blank_behavior() {
     assert!(
         lines
             .iter()
-            .any(|line| line == "step 3 of 7 · credential source"),
+            .any(|line| line == "step 3 of 8 · credential source"),
         "credential-env screen should include guided progress context inside the screen: {lines:#?}"
     );
     assert!(
@@ -4279,19 +5530,19 @@ fn onboard_api_key_env_screen_explains_suggested_env_and_blank_behavior() {
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("- current source: ${OPENAI_CODEX_OAUTH_TOKEN}")),
+            .any(|line| line.contains("- current source: OPENAI_CODEX_OAUTH_TOKEN")),
         "credential-env screen should show the active oauth credential source instead of hiding it behind api-key-only rendering: {lines:#?}"
     );
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("- suggested source: ${OPENAI_API_KEY}")),
+            .any(|line| line.contains("- suggested source: OPENAI_API_KEY")),
         "credential-env screen should surface the suggested env var name: {lines:#?}"
     );
     assert!(
         lines
             .iter()
-            .any(|line| line == "- press Enter to use suggested source: ${OPENAI_API_KEY}"),
+            .any(|line| line == "- press Enter to use suggested source: OPENAI_API_KEY"),
         "credential-env screen should state that Enter uses the suggested env when no current env is set: {lines:#?}"
     );
     assert!(
@@ -4313,7 +5564,9 @@ fn onboard_api_key_env_screen_explains_suggested_env_and_blank_behavior() {
 fn onboard_api_key_env_screen_shows_prefilled_env_when_enter_default_is_overridden() {
     let mut config = mvp::config::LoongClawConfig::default();
     config.provider.kind = mvp::config::ProviderKind::Openai;
-    config.provider.api_key_env = Some("OPENAI_API_KEY".to_owned());
+    config.provider.api_key = Some(loongclaw_contracts::SecretRef::Env {
+        env: "OPENAI_API_KEY".to_owned(),
+    });
 
     let lines =
         loongclaw_daemon::onboard_cli::render_api_key_env_selection_screen_lines_with_default(
@@ -4326,7 +5579,7 @@ fn onboard_api_key_env_screen_shows_prefilled_env_when_enter_default_is_overridd
     assert!(
         lines
             .iter()
-            .any(|line| line == "- press Enter to use prefilled source: ${TEAM_OPENAI_KEY}"),
+            .any(|line| line == "- press Enter to use prefilled source: TEAM_OPENAI_KEY"),
         "credential-env screen should surface the actual prefilled env when it differs from both the current and suggested env: {lines:#?}"
     );
     assert!(
@@ -4377,7 +5630,7 @@ fn onboard_api_key_env_screen_wraps_progress_line_on_narrow_width() {
         "credential-env screen should keep the progress line within narrow terminal widths: {lines:#?}"
     );
     assert!(
-        lines.iter().any(|line| line == "step 3 of 7 ·"),
+        lines.iter().any(|line| line == "step 3 of 8 ·"),
         "narrow credential-env screen should keep the step label on the first wrapped line: {lines:#?}"
     );
     assert!(
@@ -4411,9 +5664,20 @@ fn onboard_api_key_env_screen_redacts_invalid_current_source_and_keeps_clear_hin
             .any(|line| line == "- type :clear to clear the configured credential env"),
         "credential-env screen should still offer the clear token when the configured env pointer is present but redacted: {lines:#?}"
     );
+    let current_source_line = lines
+        .iter()
+        .find(|line| line.starts_with("- current source:"))
+        .expect("credential-env screen should include the current source line");
     assert!(
-        lines.iter().all(|line| !line.contains(secret)),
-        "credential-env screen must never echo the invalid secret-like configured env pointer: {lines:#?}"
+        !current_source_line.contains(secret),
+        "credential-env screen must never echo the invalid secret-like configured env pointer in the current source line: {lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .filter(|line| !line.starts_with("- example: "))
+            .all(|line| !line.contains(secret)),
+        "credential-env screen must never echo the invalid secret-like configured env pointer in any rendered line: {lines:#?}"
     );
 }
 
@@ -4433,7 +5697,7 @@ fn onboard_system_prompt_screen_explains_blank_behavior() {
     assert!(
         lines
             .iter()
-            .any(|line| line == "step 4 of 6 · system prompt"),
+            .any(|line| line == "step 4 of 7 · system prompt"),
         "system-prompt screen should include guided progress context inside the screen: {lines:#?}"
     );
     assert!(
@@ -4509,9 +5773,30 @@ fn onboard_system_prompt_screen_wraps_long_current_prompt() {
 #[test]
 fn onboard_personality_selection_screen_shows_native_personality_choices() {
     let mut config = mvp::config::LoongClawConfig::default();
-    config.cli.personality = Some(mvp::prompt::PromptPersonality::FriendlyCollab);
+    config.cli.personality = Some(mvp::prompt::PromptPersonality::Hermit);
 
     let lines = crate::onboard_cli::render_personality_selection_screen_lines(&config, 80);
+    let expected_personality_ids = [
+        "classicist",
+        "pragmatist",
+        "idealist",
+        "romanticist",
+        "hermit",
+        "cyber_radical",
+        "nihilist",
+    ];
+    let selector_line_count = lines
+        .iter()
+        .filter(|line| {
+            expected_personality_ids
+                .iter()
+                .any(|personality_id| line.contains(&format!("{personality_id})")))
+        })
+        .count();
+    let experimental_line_count = lines
+        .iter()
+        .filter(|line| line.contains("experimental ·"))
+        .count();
 
     assert_compact_loongclaw_header(&lines, "personality screen");
     assert!(
@@ -4523,15 +5808,33 @@ fn onboard_personality_selection_screen_shows_native_personality_choices() {
         "personality screen should use a focused title: {lines:#?}"
     );
     assert!(
-        lines.iter().any(|line| line == "step 4 of 7 · personality"),
+        lines.iter().any(|line| line == "step 4 of 8 · personality"),
         "personality screen should surface the native prompt-pack progress step: {lines:#?}"
     );
-    assert!(
-        lines.iter().any(|line| line.contains("friendly_collab)")),
-        "personality screen should keep the canonical friendly_collab selector visible without bracket syntax: {lines:#?}"
+
+    for personality_id in expected_personality_ids {
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains(&format!("{personality_id})"))),
+            "personality screen should surface every catalog personality id: {lines:#?}"
+        );
+    }
+
+    assert_eq!(
+        selector_line_count, 7,
+        "personality screen should render exactly seven selector lines from the shared catalog: {lines:#?}"
     );
     assert!(
-        lines.iter().all(|line| !line.contains("[friendly_collab]")),
+        lines.iter().any(|line| line.contains("experimental ·")),
+        "personality screen should mark sharper presets as experimental in the shared catalog-driven descriptions: {lines:#?}"
+    );
+    assert_eq!(
+        experimental_line_count, 2,
+        "personality screen should label both experimental personalities: {lines:#?}"
+    );
+    assert!(
+        lines.iter().all(|line| !line.contains("[hermit]")),
         "personality screen should not imply that brackets are part of the expected selector syntax: {lines:#?}"
     );
 }
@@ -4550,7 +5853,7 @@ fn onboard_prompt_addendum_screen_explains_keep_and_clear_behavior() {
     assert!(
         lines
             .iter()
-            .any(|line| line == "step 5 of 7 · prompt addendum"),
+            .any(|line| line == "step 5 of 8 · prompt addendum"),
         "prompt-addendum screen should surface the native prompt-pack progress step: {lines:#?}"
     );
     assert!(
@@ -4586,7 +5889,7 @@ fn onboard_memory_profile_screen_shows_supported_profiles() {
     assert!(
         lines
             .iter()
-            .any(|line| line == "step 6 of 7 · memory profile"),
+            .any(|line| line == "step 6 of 8 · memory profile"),
         "memory-profile screen should surface the native prompt-pack progress step: {lines:#?}"
     );
     assert!(
@@ -4647,7 +5950,13 @@ fn onboard_provider_selection_uses_imported_provider_config_for_selected_choice(
 
     assert_eq!(resolved.kind, mvp::config::ProviderKind::Deepseek);
     assert_eq!(resolved.model, "deepseek-chat");
-    assert_eq!(resolved.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
+    assert_eq!(
+        resolved.api_key,
+        Some(loongclaw_contracts::SecretRef::Env {
+            env: "DEEPSEEK_API_KEY".to_owned(),
+        })
+    );
+    assert_eq!(resolved.api_key_env, None);
 }
 
 #[test]
@@ -4707,10 +6016,11 @@ fn onboarding_success_summary_reports_import_source_and_enabled_channels() {
         summary.channels,
         vec!["cli".to_owned(), "telegram".to_owned(), "feishu".to_owned()]
     );
+    assert!(summary.suggested_channels.is_empty());
     assert!(
         summary.next_actions.iter().any(|action| action
             .command
-            .contains("loongclaw ask --config '/tmp/loongclaw-config.toml' --message")),
+            .contains("loong ask --config '/tmp/loongclaw-config.toml' --message")),
         "success summary should keep a direct ask handoff: {summary:#?}"
     );
 }
@@ -4735,7 +6045,7 @@ fn onboarding_success_summary_derives_structured_actions() {
     );
     assert_eq!(
         summary.next_actions[2].kind,
-        loongclaw_daemon::onboard_cli::OnboardingActionKind::Channel
+        loongclaw_daemon::onboard_cli::OnboardingActionKind::Personalize
     );
     assert_eq!(
         summary.next_actions[3].kind,
@@ -4743,13 +6053,208 @@ fn onboarding_success_summary_derives_structured_actions() {
     );
     assert_eq!(
         summary.next_actions[4].kind,
+        loongclaw_daemon::onboard_cli::OnboardingActionKind::Channel
+    );
+    assert_eq!(
+        summary.next_actions[5].kind,
         crate::onboard_cli::OnboardingActionKind::BrowserPreview
     );
     assert_eq!(summary.next_actions[0].label, "first answer");
     assert_eq!(summary.next_actions[1].label, "chat");
-    assert_eq!(summary.next_actions[2].label, "telegram");
-    assert_eq!(summary.next_actions[3].label, "feishu");
-    assert_eq!(summary.next_actions[4].label, "enable browser preview");
+    assert_eq!(summary.next_actions[2].label, "working preferences");
+    assert_eq!(summary.next_actions[3].label, "Telegram");
+    assert_eq!(summary.next_actions[4].label, "Feishu/Lark");
+    assert_eq!(summary.next_actions[5].label, "enable browser preview");
+}
+
+#[test]
+fn onboarding_success_summary_suggests_registry_backed_channels_when_none_are_enabled() {
+    let path = PathBuf::from("/tmp/loongclaw-config.toml");
+    let summary = crate::onboard_cli::build_onboarding_success_summary(
+        &path,
+        &mvp::config::LoongClawConfig::default(),
+        None,
+    );
+    let lines = crate::onboard_cli::render_onboarding_success_summary_with_width(&summary, 140);
+    let saved_setup_index = lines
+        .iter()
+        .position(|line| line == "saved setup")
+        .expect("saved setup heading");
+
+    assert_eq!(
+        summary.suggested_channels,
+        vec![
+            "Telegram (personal and group chat bot)".to_owned(),
+            "Feishu/Lark (enterprise chat app)".to_owned(),
+            "Matrix (federated room sync bot)".to_owned(),
+        ]
+    );
+    assert_eq!(
+        summary.next_actions[2].kind,
+        crate::onboard_cli::OnboardingActionKind::Personalize
+    );
+    assert_eq!(summary.next_actions[2].label, "working preferences");
+    assert_eq!(
+        summary.next_actions[3].kind,
+        crate::onboard_cli::OnboardingActionKind::Channel
+    );
+    assert_eq!(summary.next_actions[3].label, "channels");
+    assert_eq!(
+        summary.next_actions[3].command,
+        "loong channels --config '/tmp/loongclaw-config.toml'"
+    );
+    assert!(
+        lines
+            .iter()
+            .skip(saved_setup_index + 1)
+            .all(|line| !line.starts_with("- channels: ")),
+        "success summary should not render cli-only channel state as a service-channel list: {lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| {
+            line == "- suggested channels: Telegram (personal and group chat bot), Feishu/Lark (enterprise chat app), Matrix (federated room sync bot)"
+        }),
+        "success summary should render registry-backed suggested runtime channels when no service channels are enabled: {lines:#?}"
+    );
+}
+
+#[test]
+fn onboarding_success_summary_adds_doctor_action_for_plugin_backed_channels_needing_bridge_review()
+{
+    let mut config: mvp::config::LoongClawConfig = serde_json::from_value(json!({
+        "weixin": {
+            "enabled": true,
+            "bridge_url": "https://bridge.example.test/weixin",
+            "bridge_access_token": "weixin-token",
+            "allowed_contact_ids": ["wxid_alice"]
+        }
+    }))
+    .expect("deserialize weixin config");
+    let path = PathBuf::from("/tmp/loongclaw-config.toml");
+
+    config.external_skills.install_root = None;
+
+    let summary = crate::onboard_cli::build_onboarding_success_summary(&path, &config, None);
+    let action_kinds = summary
+        .next_actions
+        .iter()
+        .map(|action| action.kind)
+        .collect::<Vec<_>>();
+    let action_labels = summary
+        .next_actions
+        .iter()
+        .map(|action| action.label.clone())
+        .collect::<Vec<_>>();
+
+    assert!(
+        summary.next_actions.iter().any(|action| action.kind
+            == crate::onboard_cli::OnboardingActionKind::Doctor
+            && action.command
+                == format!(
+                    "{} doctor --config '/tmp/loongclaw-config.toml'",
+                    super::active_cli_command_name()
+                )),
+        "plugin-backed channels that still need managed bridge review should surface doctor as an explicit next action: {summary:#?}"
+    );
+    assert!(
+        summary
+            .next_actions
+            .iter()
+            .position(|action| action.kind == crate::onboard_cli::OnboardingActionKind::Doctor)
+            < summary.next_actions.iter().position(|action| {
+                action.kind == crate::onboard_cli::OnboardingActionKind::Channel
+                    && action.label == "channels"
+            }),
+        "doctor should be promoted ahead of the generic channel catalog when a managed bridge still needs review: kinds={action_kinds:?} labels={action_labels:?}"
+    );
+}
+
+#[test]
+fn onboarding_success_summary_adds_doctor_action_for_incomplete_managed_bridge_setup() {
+    let install_root = unique_temp_path("managed-bridge-success-summary-incomplete");
+    let mut metadata = super::compatible_managed_bridge_metadata(
+        "qq_official_bot_gateway_or_plugin_bridge",
+        "qqbot_reply_loop",
+    );
+    let removed_transport_family = metadata.remove("transport_family");
+    let setup = super::managed_bridge_setup_with_guidance(
+        "channel",
+        vec!["QQBOT_BRIDGE_URL"],
+        vec!["qqbot.bridge_url"],
+        vec!["https://example.test/docs/qqbot-bridge"],
+        Some("Run the QQ bridge setup flow before enabling this bridge."),
+    );
+    let manifest = super::managed_bridge_manifest_with_setup("qqbot", metadata, Some(setup));
+    let mut config: mvp::config::LoongClawConfig = serde_json::from_value(json!({
+        "qqbot": {
+            "enabled": true,
+            "app_id": "10001",
+            "client_secret": "qqbot-secret",
+            "allowed_peer_ids": ["openid-alice"]
+        }
+    }))
+    .expect("deserialize qqbot config");
+    let path = PathBuf::from("/tmp/loongclaw-config.toml");
+
+    assert_eq!(
+        removed_transport_family.as_deref(),
+        Some("qq_official_bot_gateway_or_plugin_bridge")
+    );
+
+    std::fs::create_dir_all(&install_root).expect("create managed bridge install root");
+    super::write_managed_bridge_manifest(install_root.as_path(), "qqbot-bridge-guided", &manifest);
+    config.external_skills.install_root = Some(install_root.display().to_string());
+
+    let summary = crate::onboard_cli::build_onboarding_success_summary(&path, &config, None);
+
+    assert!(
+        summary
+            .next_actions
+            .iter()
+            .any(|action| action.kind == crate::onboard_cli::OnboardingActionKind::Doctor),
+        "incomplete managed bridge setup should produce a doctor follow-up action: {summary:#?}"
+    );
+}
+
+#[test]
+fn onboarding_success_summary_keeps_generic_handoff_when_managed_bridge_is_ready() {
+    let install_root = unique_temp_path("managed-bridge-success-summary-ready");
+    let manifest = super::managed_bridge_manifest(
+        "weixin",
+        Some("channel"),
+        super::compatible_managed_bridge_metadata(
+            "wechat_clawbot_ilink_bridge",
+            "weixin_reply_loop",
+        ),
+    );
+    let mut config: mvp::config::LoongClawConfig = serde_json::from_value(json!({
+        "weixin": {
+            "enabled": true,
+            "bridge_url": "https://bridge.example.test/weixin",
+            "bridge_access_token": "weixin-token",
+            "allowed_contact_ids": ["wxid_alice"]
+        }
+    }))
+    .expect("deserialize weixin config");
+    let path = PathBuf::from("/tmp/loongclaw-config.toml");
+
+    std::fs::create_dir_all(&install_root).expect("create managed bridge install root");
+    super::write_managed_bridge_manifest(
+        install_root.as_path(),
+        "weixin-managed-bridge",
+        &manifest,
+    );
+    config.external_skills.install_root = Some(install_root.display().to_string());
+
+    let summary = crate::onboard_cli::build_onboarding_success_summary(&path, &config, None);
+
+    assert!(
+        summary
+            .next_actions
+            .iter()
+            .all(|action| action.kind != crate::onboard_cli::OnboardingActionKind::Doctor),
+        "ready managed bridge setups should keep the existing generic handoff and avoid forcing doctor into the next-action list: {summary:#?}"
+    );
 }
 
 #[test]
@@ -4767,14 +6272,14 @@ fn onboarding_success_summary_advertises_browser_preview_enable_action() {
             action.kind == crate::onboard_cli::OnboardingActionKind::BrowserPreview
                 && action.label == "enable browser preview"
                 && action.command
-                    == "loongclaw skills enable-browser-preview --config '/tmp/loongclaw-config.toml'"
+                    == "loong skills enable-browser-preview --config '/tmp/loongclaw-config.toml'"
         }),
         "onboarding should surface a concrete browser preview enable step for operators: {summary:#?}"
     );
     assert!(
         lines.iter().any(|line| {
             line.contains("enable browser preview")
-                && line.contains("loongclaw skills enable-browser-preview --config")
+                && line.contains("loong skills enable-browser-preview --config")
         }) && lines
             .iter()
             .any(|line| line.contains("/tmp/loongclaw-config.toml")),
@@ -4868,7 +6373,7 @@ fn onboard_preflight_screen_summarizes_status_counts_and_guidance() {
         "preflight screen should use a focused title: {lines:#?}"
     );
     assert!(
-        lines.iter().any(|line| line == "step 7 of 7 · review"),
+        lines.iter().any(|line| line == "step 8 of 8 · review"),
         "preflight screen should stay anchored to the review step: {lines:#?}"
     );
     assert!(
@@ -4989,7 +6494,7 @@ fn current_setup_preflight_screen_uses_quick_review_progress_copy() {
         "current-setup preflight should use quick-review progress copy: {lines:#?}"
     );
     assert!(
-        lines.iter().all(|line| line != "step 7 of 7 · review"),
+        lines.iter().all(|line| line != "step 8 of 8 · review"),
         "current-setup preflight should not reuse the guided step progress copy: {lines:#?}"
     );
 }
@@ -5015,7 +6520,7 @@ fn detected_setup_preflight_screen_uses_quick_review_progress_copy() {
         "detected-setup preflight should use quick-review progress copy: {lines:#?}"
     );
     assert!(
-        lines.iter().all(|line| line != "step 7 of 7 · review"),
+        lines.iter().all(|line| line != "step 8 of 8 · review"),
         "detected-setup preflight should not reuse the guided step progress copy: {lines:#?}"
     );
 }
@@ -5102,7 +6607,7 @@ fn current_setup_write_confirmation_screen_uses_quick_review_progress_copy() {
         "current-setup write-confirm should use quick-review progress copy: {lines:#?}"
     );
     assert!(
-        lines.iter().all(|line| line != "step 7 of 7 · review"),
+        lines.iter().all(|line| line != "step 8 of 8 · review"),
         "current-setup write-confirm should not reuse the guided step progress copy: {lines:#?}"
     );
 }
@@ -5123,7 +6628,7 @@ fn detected_setup_write_confirmation_screen_uses_quick_review_progress_copy() {
         "detected-setup write-confirm should use quick-review progress copy: {lines:#?}"
     );
     assert!(
-        lines.iter().all(|line| line != "step 7 of 7 · review"),
+        lines.iter().all(|line| line != "step 8 of 8 · review"),
         "detected-setup write-confirm should not reuse the guided step progress copy: {lines:#?}"
     );
 }
@@ -5138,9 +6643,13 @@ async fn onboard_current_setup_shortcut_flow_skips_detailed_edit_screens() {
     let output_path = unique_temp_path("current-shortcut-config.toml");
     let mut existing = mvp::config::LoongClawConfig::default();
     existing.provider.model = "gpt-4.1".to_owned();
-    existing.provider.api_key = Some("inline-secret".to_owned());
+    existing.provider.api_key = Some(loongclaw_contracts::SecretRef::Inline(
+        "inline-secret".to_owned(),
+    ));
     existing.telegram.enabled = true;
-    existing.telegram.bot_token = Some("123456:test-token".to_owned());
+    existing.telegram.bot_token = Some(loongclaw_contracts::SecretRef::Inline(
+        "123456:test-token".to_owned(),
+    ));
     mvp::config::write(output_path.to_str(), &existing, true).expect("write existing config");
 
     let transcript = run_scripted_onboard_flow(
@@ -5152,6 +6661,8 @@ async fn onboard_current_setup_shortcut_flow_skips_detailed_edit_screens() {
             provider: None,
             model: None,
             api_key_env: None,
+            web_search_provider: None,
+            web_search_api_key_env: None,
             personality: None,
             memory_profile: None,
             system_prompt: None,
@@ -5204,7 +6715,132 @@ async fn onboard_current_setup_shortcut_flow_skips_detailed_edit_screens() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn onboard_current_setup_shortcut_can_install_selected_bundled_skills() {
+    let output_path = isolated_output_path("current-shortcut-preinstall-config.toml");
+    let mut existing = mvp::config::LoongClawConfig::default();
+    existing.provider.model = "gpt-4.1".to_owned();
+    existing.provider.api_key = Some(loongclaw_contracts::SecretRef::Inline(
+        "inline-secret".to_owned(),
+    ));
+    mvp::config::write(output_path.to_str(), &existing, true).expect("write existing config");
+
+    let transcript = run_scripted_onboard_flow(
+        loongclaw_daemon::onboard_cli::OnboardCommandOptions {
+            output: output_path.to_str().map(str::to_owned),
+            force: false,
+            non_interactive: false,
+            accept_risk: true,
+            provider: None,
+            model: None,
+            api_key_env: None,
+            web_search_provider: None,
+            web_search_api_key_env: None,
+            personality: None,
+            memory_profile: None,
+            system_prompt: None,
+            skip_model_probe: true,
+        },
+        ["1", "1", "find-skills,agent-browser", "y", "y", "o"],
+        None,
+        None,
+    )
+    .await
+    .expect("run scripted onboarding with bundled skill selection");
+
+    assert!(
+        transcript
+            .iter()
+            .any(|line| line.contains("preinstalled skills")),
+        "onboarding transcript should include the bundled skill selection step: {transcript:#?}"
+    );
+
+    let (_, config) =
+        mvp::config::load(output_path.to_str()).expect("load written onboarding config");
+    assert!(
+        config.external_skills.enabled,
+        "selecting bundled skills should enable the external-skills runtime"
+    );
+    assert!(
+        config.external_skills.auto_expose_installed,
+        "selecting bundled skills should auto-expose installed skills"
+    );
+
+    let install_root = config
+        .external_skills
+        .resolved_install_root()
+        .expect("bundled skill selection should persist a managed install root");
+    assert!(
+        install_root.join("find-skills").join("SKILL.md").exists(),
+        "selected bundled skills should be installed into the managed runtime"
+    );
+    assert!(
+        install_root
+            .join("agent-browser")
+            .join("references")
+            .join("authentication.md")
+            .exists(),
+        "onboarding should install full bundled skill directories"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn onboard_current_setup_shortcut_can_install_minimax_office_pack() {
+    let output_path = isolated_output_path("current-shortcut-minimax-office-config.toml");
+    let mut existing = mvp::config::LoongClawConfig::default();
+    existing.provider.model = "gpt-4.1".to_owned();
+    existing.provider.api_key = Some(loongclaw_contracts::SecretRef::Inline(
+        "inline-secret".to_owned(),
+    ));
+    mvp::config::write(output_path.to_str(), &existing, true).expect("write existing config");
+
+    let transcript = run_scripted_onboard_flow(
+        loongclaw_daemon::onboard_cli::OnboardCommandOptions {
+            output: output_path.to_str().map(str::to_owned),
+            force: false,
+            non_interactive: false,
+            accept_risk: true,
+            provider: None,
+            model: None,
+            api_key_env: None,
+            web_search_provider: None,
+            web_search_api_key_env: None,
+            personality: None,
+            memory_profile: None,
+            system_prompt: None,
+            skip_model_probe: true,
+        },
+        ["1", "1", "minimax-office", "y", "y", "o"],
+        None,
+        None,
+    )
+    .await
+    .expect("run scripted onboarding with minimax office pack");
+
+    assert!(
+        transcript
+            .iter()
+            .any(|line| line.contains("preinstalled skills")),
+        "onboarding transcript should include the bundled skill selection step: {transcript:#?}"
+    );
+
+    let (_, config) =
+        mvp::config::load(output_path.to_str()).expect("load written onboarding config");
+    let install_root = config
+        .external_skills
+        .resolved_install_root()
+        .expect("minimax office pack should persist an install root");
+
+    for skill_id in ["minimax-docx", "minimax-pdf", "minimax-xlsx"] {
+        assert!(
+            install_root.join(skill_id).join("SKILL.md").exists(),
+            "minimax office pack should install `{skill_id}`"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn onboard_detected_setup_shortcut_flow_skips_detailed_edit_screens() {
+    let _env_guard = DetectedEnvironmentGuard::without_detected_environment();
     let workspace_root = unique_temp_path("detected-shortcut-workspace");
     std::fs::create_dir_all(&workspace_root).expect("create workspace root");
     std::fs::write(workspace_root.join("AGENTS.md"), "# local guidance\n")
@@ -5254,6 +6890,8 @@ requires_openai_auth = true
             provider: None,
             model: None,
             api_key_env: None,
+            web_search_provider: None,
+            web_search_api_key_env: None,
             personality: None,
             memory_profile: None,
             system_prompt: None,
@@ -5351,6 +6989,8 @@ requires_openai_auth = true
             provider: None,
             model: None,
             api_key_env: None,
+            web_search_provider: None,
+            web_search_api_key_env: None,
             personality: None,
             memory_profile: None,
             system_prompt: None,
@@ -5364,19 +7004,33 @@ requires_openai_auth = true
     .expect("run scripted detected-setup onboarding with explicit starting-point selection");
 
     let joined = transcript.join("\n");
+    let (_, written_config) = mvp::config::load(Some(output_path.to_string_lossy().as_ref()))
+        .expect("load written config");
     assert!(
         joined.contains("choose detected starting point")
             && joined.contains("SELECT Starting point"),
         "the interactive flow should still show the starting-point selection stage before applying the chosen path: {transcript:#?}"
     );
     assert!(
-        joined.contains("starting point: Codex config at")
-            && joined.contains("selection-order-codex.toml"),
+        joined.contains("starting point: Codex config at"),
         "after choosing [2], the rest of onboarding should carry the displayed Codex option forward, not some internal candidate order: {transcript:#?}"
     );
     assert!(
         !joined.contains("starting point: your current environment"),
         "selection should stay aligned with the on-screen numbering when candidates are reordered for UX: {transcript:#?}"
+    );
+    assert_eq!(
+        written_config.provider.kind,
+        mvp::config::ProviderKind::Openai,
+        "choosing the second starting-point entry should apply the displayed Codex provider candidate"
+    );
+    assert_eq!(
+        written_config.provider.model, "openai/gpt-5.1-codex",
+        "choosing the second starting-point entry should keep the Codex model from the displayed candidate"
+    );
+    assert_eq!(
+        written_config.provider.base_url, "https://codex.example.com/v1",
+        "choosing the second starting-point entry should keep the Codex-compatible base url from the displayed candidate"
     );
 }
 
@@ -5407,6 +7061,8 @@ requires_openai_auth = true
             provider: None,
             model: None,
             api_key_env: None,
+            web_search_provider: None,
+            web_search_api_key_env: None,
             personality: None,
             memory_profile: None,
             system_prompt: None,
@@ -5445,9 +7101,13 @@ async fn onboard_current_setup_adjustments_preserve_unchanged_domain_actions_in_
     let output_path = unique_temp_path("current-adjusted-review-config.toml");
     let mut existing = mvp::config::LoongClawConfig::default();
     existing.provider.model = "gpt-4.1".to_owned();
-    existing.provider.api_key = Some("inline-secret".to_owned());
+    existing.provider.api_key = Some(loongclaw_contracts::SecretRef::Inline(
+        "inline-secret".to_owned(),
+    ));
     existing.telegram.enabled = true;
-    existing.telegram.bot_token = Some("123456:test-token".to_owned());
+    existing.telegram.bot_token = Some(loongclaw_contracts::SecretRef::Inline(
+        "123456:test-token".to_owned(),
+    ));
     mvp::config::write(output_path.to_str(), &existing, true).expect("write existing config");
 
     let transcript = run_scripted_onboard_flow(
@@ -5459,6 +7119,8 @@ async fn onboard_current_setup_adjustments_preserve_unchanged_domain_actions_in_
             provider: None,
             model: None,
             api_key_env: None,
+            web_search_provider: None,
+            web_search_api_key_env: None,
             personality: None,
             memory_profile: None,
             system_prompt: None,
@@ -5473,6 +7135,7 @@ async fn onboard_current_setup_adjustments_preserve_unchanged_domain_actions_in_
             String::new(),
             "custom review prompt".to_owned(),
             String::new(),
+            String::new(),
             "y".to_owned(),
             "y".to_owned(),
             "o".to_owned(),
@@ -5483,7 +7146,7 @@ async fn onboard_current_setup_adjustments_preserve_unchanged_domain_actions_in_
     .await
     .expect("run scripted current-setup onboarding with adjustments");
 
-    let review_lines = extract_review_section_lines(&transcript, "step 7 of 7 · review");
+    let review_lines = extract_review_section_lines(&transcript, "step 8 of 8 · review");
     let has_domain_action = |domain_label: &str, action_label: &str| {
         review_lines.iter().enumerate().any(|(index, line)| {
             line.contains(&format!("- {domain_label} ["))
@@ -5546,7 +7209,9 @@ async fn onboard_current_setup_adjustments_capture_personality_and_memory_profil
     let output_path = unique_temp_path("current-adjusted-personality-memory-config.toml");
     let mut existing = mvp::config::LoongClawConfig::default();
     existing.provider.model = "gpt-4.1".to_owned();
-    existing.provider.api_key = Some("inline-secret".to_owned());
+    existing.provider.api_key = Some(loongclaw_contracts::SecretRef::Inline(
+        "inline-secret".to_owned(),
+    ));
     mvp::config::write(output_path.to_str(), &existing, true).expect("write existing config");
 
     let transcript = run_scripted_onboard_flow(
@@ -5558,6 +7223,8 @@ async fn onboard_current_setup_adjustments_capture_personality_and_memory_profil
             provider: None,
             model: None,
             api_key_env: None,
+            web_search_provider: None,
+            web_search_api_key_env: None,
             personality: None,
             memory_profile: None,
             system_prompt: None,
@@ -5569,9 +7236,10 @@ async fn onboard_current_setup_adjustments_capture_personality_and_memory_profil
             provider_choice_input(mvp::config::ProviderKind::Openai),
             "gpt-4.1".to_owned(),
             "OPENAI_API_KEY".to_owned(),
-            "2".to_owned(),
+            "hermit".to_owned(),
             String::new(),
             "3".to_owned(),
+            String::new(),
             "y".to_owned(),
             "y".to_owned(),
             "o".to_owned(),
@@ -5584,15 +7252,15 @@ async fn onboard_current_setup_adjustments_capture_personality_and_memory_profil
 
     let joined = transcript.join("\n");
     assert!(
-        joined.contains("step 4 of 7 · personality"),
+        joined.contains("step 4 of 8 · personality"),
         "guided current-setup adjustments should expose a dedicated personality step: {transcript:#?}"
     );
     assert!(
-        joined.contains("step 5 of 7 · prompt addendum"),
+        joined.contains("step 5 of 8 · prompt addendum"),
         "guided current-setup adjustments should expose a dedicated prompt-addendum step: {transcript:#?}"
     );
     assert!(
-        joined.contains("step 6 of 7 · memory profile"),
+        joined.contains("step 6 of 8 · memory profile"),
         "guided current-setup adjustments should expose a dedicated memory-profile step: {transcript:#?}"
     );
 
@@ -5600,7 +7268,7 @@ async fn onboard_current_setup_adjustments_capture_personality_and_memory_profil
         .expect("load current-setup personality/memory config");
     assert_eq!(
         config.cli.personality,
-        Some(mvp::prompt::PromptPersonality::FriendlyCollab)
+        Some(mvp::prompt::PromptPersonality::Hermit)
     );
     assert_eq!(
         config.memory.profile,
@@ -5625,6 +7293,8 @@ fn onboard_interactive_flow_defaults_back_to_native_prompt_pack_even_from_inline
             provider: None,
             model: None,
             api_key_env: None,
+            web_search_provider: None,
+            web_search_api_key_env: None,
             personality: None,
             memory_profile: None,
             system_prompt: None,
@@ -5671,6 +7341,8 @@ requires_openai_auth = true
             provider: None,
             model: None,
             api_key_env: None,
+            web_search_provider: None,
+            web_search_api_key_env: None,
             personality: None,
             memory_profile: None,
             system_prompt: None,
@@ -5686,6 +7358,7 @@ requires_openai_auth = true
             "",
             "",
             "",
+            "",
             "y",
             "y",
         ],
@@ -5695,7 +7368,7 @@ requires_openai_auth = true
     .await
     .expect("run scripted detected-setup onboarding with adjustments");
 
-    let review_lines = extract_review_section_lines(&transcript, "step 7 of 7 · review");
+    let review_lines = extract_review_section_lines(&transcript, "step 8 of 8 · review");
     let has_domain_action = |domain_label: &str, action_label: &str| {
         review_lines.iter().enumerate().any(|(index, line)| {
             line.contains(&format!("- {domain_label} ["))
@@ -5745,7 +7418,9 @@ fn onboard_review_lines_include_starting_point_and_domain_preview() {
     config.provider.api_key_env = Some("OPENAI_API_KEY".to_owned());
     config.provider.model = "openai/gpt-5.1-codex".to_owned();
     config.telegram.enabled = true;
-    config.telegram.bot_token = Some("123456:test-token".to_owned());
+    config.telegram.bot_token = Some(loongclaw_contracts::SecretRef::Inline(
+        "123456:test-token".to_owned(),
+    ));
 
     let lines = loongclaw_daemon::onboard_cli::render_onboard_review_lines_with_guidance(
         &config,
@@ -5826,7 +7501,7 @@ fn onboard_review_lines_use_compact_header() {
         "review screen should retain a clear review heading under the brand block: {lines:#?}"
     );
     assert!(
-        lines.iter().any(|line| line == "step 7 of 7 · review"),
+        lines.iter().any(|line| line == "step 8 of 8 · review"),
         "review screen should include guided progress context inside the screen: {lines:#?}"
     );
 }
@@ -5851,7 +7526,7 @@ fn onboard_review_lines_include_core_setup_summary_for_fresh_setup() {
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("- credential source: ${OPENAI_CODEX_OAUTH_TOKEN}")),
+            .any(|line| line.contains("- credential source: OPENAI_CODEX_OAUTH_TOKEN")),
         "review should keep the provider-preferred credential env visible for fresh setup flows: {lines:#?}"
     );
     assert!(
@@ -5863,7 +7538,7 @@ fn onboard_review_lines_include_core_setup_summary_for_fresh_setup() {
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("- personality: calm_engineering")),
+            .any(|line| line.contains("- personality: classicist")),
         "review should surface the active native personality during onboarding: {lines:#?}"
     );
     assert!(
@@ -5872,12 +7547,26 @@ fn onboard_review_lines_include_core_setup_summary_for_fresh_setup() {
             .any(|line| line.contains("- memory profile: window_only")),
         "review should surface the selected memory profile during onboarding: {lines:#?}"
     );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("- web search: DuckDuckGo")),
+        "review should surface the selected web-search provider during onboarding: {lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("- web search credential: not required")),
+        "review should explain when the chosen web-search provider does not require credentials: {lines:#?}"
+    );
 }
 
 #[test]
 fn onboard_review_lines_prefer_oauth_env_over_api_key_env_when_both_are_configured() {
     let mut config = mvp::config::LoongClawConfig::default();
-    config.provider.oauth_access_token_env = Some("OPENAI_CODEX_OAUTH_TOKEN".to_owned());
+    config.provider.oauth_access_token = Some(loongclaw_contracts::SecretRef::Env {
+        env: "OPENAI_CODEX_OAUTH_TOKEN".to_owned(),
+    });
 
     let lines = loongclaw_daemon::onboard_cli::render_onboard_review_lines_with_guidance(
         &config,
@@ -5889,13 +7578,13 @@ fn onboard_review_lines_prefer_oauth_env_over_api_key_env_when_both_are_configur
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("- credential source: ${OPENAI_CODEX_OAUTH_TOKEN}")),
+            .any(|line| line.contains("- credential source: OPENAI_CODEX_OAUTH_TOKEN")),
         "review should reflect the higher-priority oauth credential path when both bindings exist: {lines:#?}"
     );
     assert!(
         lines
             .iter()
-            .all(|line| !line.contains("- credential source: ${OPENAI_API_KEY}")),
+            .all(|line| !line.contains("- credential source: OPENAI_API_KEY")),
         "review should not keep advertising the api key env as primary once oauth is configured: {lines:#?}"
     );
 }
@@ -5957,7 +7646,7 @@ fn current_setup_review_lines_use_quick_review_progress_copy() {
         "current-setup review should use quick-review progress copy: {lines:#?}"
     );
     assert!(
-        lines.iter().all(|line| line != "step 7 of 7 · review"),
+        lines.iter().all(|line| line != "step 8 of 8 · review"),
         "current-setup review should not reuse the guided step progress copy: {lines:#?}"
     );
 }
@@ -5978,7 +7667,7 @@ fn detected_setup_review_lines_use_quick_review_progress_copy() {
         "detected-setup review should use quick-review progress copy: {lines:#?}"
     );
     assert!(
-        lines.iter().all(|line| line != "step 7 of 7 · review"),
+        lines.iter().all(|line| line != "step 8 of 8 · review"),
         "detected-setup review should not reuse the guided step progress copy: {lines:#?}"
     );
 }
@@ -6012,7 +7701,9 @@ fn onboard_review_lines_compact_on_narrow_width() {
     let mut config = mvp::config::LoongClawConfig::default();
     config.provider.api_key_env = Some("OPENAI_API_KEY".to_owned());
     config.telegram.enabled = true;
-    config.telegram.bot_token = Some("123456:test-token".to_owned());
+    config.telegram.bot_token = Some(loongclaw_contracts::SecretRef::Inline(
+        "123456:test-token".to_owned(),
+    ));
 
     let lines = loongclaw_daemon::onboard_cli::render_onboard_review_lines_with_guidance(
         &config,
@@ -6093,7 +7784,7 @@ fn render_onboarding_success_summary_compacts_for_narrow_width() {
     assert!(
         lines
             .iter()
-            .any(|line| line == "- first answer: loongclaw ask --config")
+            .any(|line| line == "- first answer: loong ask --config")
             && lines
                 .iter()
                 .any(|line| line == "  '/tmp/loongclaw-config.toml' --message")
@@ -6110,10 +7801,10 @@ fn render_onboarding_success_summary_compacts_for_narrow_width() {
     assert!(
         lines
             .iter()
-            .any(|line| line == "- chat: loongclaw chat --config")
+            .any(|line| line == "- chat: loong chat --config")
             && lines
                 .iter()
-                .any(|line| line == "- telegram: loongclaw telegram-serve --config"),
+                .any(|line| line == "- Telegram: loong telegram-serve --config"),
         "narrow renderer should keep secondary chat and channel actions visible after the primary ask example: {lines:#?}"
     );
 }
@@ -6131,8 +7822,8 @@ fn onboarding_success_summary_surfaces_primary_handoff_before_saved_setup_detail
         loongclaw_daemon::onboard_cli::render_onboarding_success_summary_with_width(&summary, 80);
     let start_here_index = lines
         .iter()
-        .position(|line| line.starts_with("start here:"))
-        .expect("start here line should exist");
+        .position(|line| line == "start here")
+        .expect("start here heading should exist");
     let saved_setup_index = lines
         .iter()
         .position(|line| line == "saved setup")
@@ -6188,9 +7879,10 @@ fn onboarding_success_summary_uses_compact_header() {
         "success summary should retain a clear completion heading: {lines:#?}"
     );
     assert!(
-        lines
-            .join(" ")
-            .contains("start here: loongclaw ask --config '/tmp/loongclaw-config.toml' --message")
+        lines.iter().any(|line| line == "start here")
+            && lines.join(" ").contains(
+                "- first answer: loong ask --config '/tmp/loongclaw-config.toml' --message"
+            )
             && lines
                 .join(" ")
                 .contains("Summarize this repository and suggest the best next step."),
@@ -6205,7 +7897,7 @@ fn onboarding_success_summary_uses_compact_header() {
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("- personality: calm_engineering")),
+            .any(|line| line.contains("- personality: classicist")),
         "success summary should include the selected native personality: {lines:#?}"
     );
     assert!(
@@ -6230,12 +7922,12 @@ fn onboarding_success_summary_shell_quotes_config_paths_with_single_quotes() {
 
     assert!(
         rendered.contains(
-            "start here: loongclaw ask --config '/tmp/loongclaw'\"'\"'s config.toml' --message"
+            "- first answer: loong ask --config '/tmp/loongclaw'\"'\"'s config.toml' --message"
         ),
         "success summary should shell-quote single quotes in the primary ask handoff: {lines:#?}"
     );
     assert!(
-        rendered.contains("- chat: loongclaw chat --config '/tmp/loongclaw'\"'\"'s config.toml'"),
+        rendered.contains("- chat: loong chat --config '/tmp/loongclaw'\"'\"'s config.toml'"),
         "success summary should shell-quote single quotes in the secondary chat handoff: {lines:#?}"
     );
 }
@@ -6244,7 +7936,9 @@ fn onboarding_success_summary_shell_quotes_config_paths_with_single_quotes() {
 fn onboarding_success_summary_prefers_oauth_env_over_api_key_env_when_both_are_configured() {
     let path = PathBuf::from("/tmp/loongclaw-config.toml");
     let mut config = mvp::config::LoongClawConfig::default();
-    config.provider.oauth_access_token_env = Some("OPENAI_CODEX_OAUTH_TOKEN".to_owned());
+    config.provider.oauth_access_token = Some(loongclaw_contracts::SecretRef::Env {
+        env: "OPENAI_CODEX_OAUTH_TOKEN".to_owned(),
+    });
 
     let summary =
         loongclaw_daemon::onboard_cli::build_onboarding_success_summary(&path, &config, None);
@@ -6254,13 +7948,13 @@ fn onboarding_success_summary_prefers_oauth_env_over_api_key_env_when_both_are_c
     assert!(
         lines
             .iter()
-            .any(|line| line == "- credential source: ${OPENAI_CODEX_OAUTH_TOKEN}"),
+            .any(|line| line == "- credential source: OPENAI_CODEX_OAUTH_TOKEN"),
         "success summary should surface the primary oauth binding when oauth and api key envs both exist: {lines:#?}"
     );
     assert!(
         lines
             .iter()
-            .all(|line| line != "- credential source: ${OPENAI_API_KEY}"),
+            .all(|line| line != "- credential source: OPENAI_API_KEY"),
         "success summary should not keep the api key env as the primary credential line once oauth is configured: {lines:#?}"
     );
 }
@@ -6278,19 +7972,25 @@ fn onboarding_success_summary_reports_existing_config_kept() {
         provider_endpoint: None,
         credential: Some(loongclaw_daemon::onboard_cli::OnboardingCredentialSummary {
             label: "credential source",
-            value: "${OPENAI_API_KEY}".to_owned(),
+            value: "OPENAI_API_KEY".to_owned(),
         }),
         prompt_mode: "native prompt pack".to_owned(),
-        personality: Some("calm_engineering".to_owned()),
+        personality: Some("classicist".to_owned()),
         prompt_addendum: None,
         memory_profile: "window_only".to_owned(),
+        web_search_provider: "DuckDuckGo".to_owned(),
+        web_search_credential: Some(loongclaw_daemon::onboard_cli::OnboardingCredentialSummary {
+            label: "web search credential",
+            value: "not required".to_owned(),
+        }),
         memory_path: None,
         channels: vec!["cli".to_owned()],
+        suggested_channels: Vec::new(),
         domain_outcomes: Vec::new(),
         next_actions: vec![loongclaw_daemon::onboard_cli::OnboardingAction {
             kind: loongclaw_daemon::onboard_cli::OnboardingActionKind::Ask,
             label: "ask".to_owned(),
-            command: "loongclaw ask --config /tmp/loongclaw-config.toml --message \"Summarize this repository and suggest the best next step.\"".to_owned(),
+            command: "loong ask --config /tmp/loongclaw-config.toml --message \"Summarize this repository and suggest the best next step.\"".to_owned(),
         }],
     };
 
@@ -6344,6 +8044,29 @@ fn onboarding_success_summary_reports_active_provider_and_saved_profiles() {
 }
 
 #[test]
+fn onboarding_success_summary_reports_web_search_provider_and_credential() {
+    let path = PathBuf::from("/tmp/loongclaw-config.toml");
+    let summary = loongclaw_daemon::onboard_cli::build_onboarding_success_summary(
+        &path,
+        &mvp::config::LoongClawConfig::default(),
+        None,
+    );
+    let lines =
+        loongclaw_daemon::onboard_cli::render_onboarding_success_summary_with_width(&summary, 80);
+
+    assert!(
+        lines.iter().any(|line| line == "- web search: DuckDuckGo"),
+        "success summary should surface the selected web-search provider: {lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "- web search credential: not required"),
+        "success summary should explain when the selected web-search provider does not need a credential: {lines:#?}"
+    );
+}
+
+#[test]
 fn onboarding_success_summary_groups_domain_outcomes_by_decision() {
     let summary = loongclaw_daemon::onboard_cli::OnboardingSuccessSummary {
         import_source: Some("suggested starting point".to_owned()),
@@ -6356,14 +8079,20 @@ fn onboarding_success_summary_groups_domain_outcomes_by_decision() {
         provider_endpoint: None,
         credential: Some(loongclaw_daemon::onboard_cli::OnboardingCredentialSummary {
             label: "credential source",
-            value: "${OPENAI_API_KEY}".to_owned(),
+            value: "OPENAI_API_KEY".to_owned(),
         }),
         prompt_mode: "native prompt pack".to_owned(),
-        personality: Some("friendly_collab".to_owned()),
+        personality: Some("hermit".to_owned()),
         prompt_addendum: Some("Keep answers direct.".to_owned()),
         memory_profile: "profile_plus_window".to_owned(),
+        web_search_provider: "DuckDuckGo".to_owned(),
+        web_search_credential: Some(loongclaw_daemon::onboard_cli::OnboardingCredentialSummary {
+            label: "web search credential",
+            value: "not required".to_owned(),
+        }),
         memory_path: None,
         channels: vec!["cli".to_owned()],
+        suggested_channels: Vec::new(),
         domain_outcomes: vec![
             loongclaw_daemon::onboard_cli::OnboardingDomainOutcome {
                 kind: loongclaw_daemon::migration::types::SetupDomainKind::Provider,
@@ -6381,7 +8110,7 @@ fn onboarding_success_summary_groups_domain_outcomes_by_decision() {
         next_actions: vec![loongclaw_daemon::onboard_cli::OnboardingAction {
             kind: loongclaw_daemon::onboard_cli::OnboardingActionKind::Ask,
             label: "ask".to_owned(),
-            command: "loongclaw ask --config /tmp/loongclaw-config.toml --message \"Summarize this repository and suggest the best next step.\"".to_owned(),
+            command: "loong ask --config /tmp/loongclaw-config.toml --message \"Summarize this repository and suggest the best next step.\"".to_owned(),
         }],
     };
 
@@ -6421,14 +8150,20 @@ fn onboarding_success_summary_wraps_domain_outcomes_for_narrow_width() {
         provider_endpoint: None,
         credential: Some(loongclaw_daemon::onboard_cli::OnboardingCredentialSummary {
             label: "credential source",
-            value: "${OPENAI_API_KEY}".to_owned(),
+            value: "OPENAI_API_KEY".to_owned(),
         }),
         prompt_mode: "native prompt pack".to_owned(),
-        personality: Some("friendly_collab".to_owned()),
+        personality: Some("hermit".to_owned()),
         prompt_addendum: Some("Keep answers direct.".to_owned()),
         memory_profile: "profile_plus_window".to_owned(),
+        web_search_provider: "DuckDuckGo".to_owned(),
+        web_search_credential: Some(loongclaw_daemon::onboard_cli::OnboardingCredentialSummary {
+            label: "web search credential",
+            value: "not required".to_owned(),
+        }),
         memory_path: None,
         channels: vec!["cli".to_owned()],
+        suggested_channels: Vec::new(),
         domain_outcomes: vec![
             loongclaw_daemon::onboard_cli::OnboardingDomainOutcome {
                 kind: loongclaw_daemon::migration::types::SetupDomainKind::Provider,
@@ -6446,7 +8181,7 @@ fn onboarding_success_summary_wraps_domain_outcomes_for_narrow_width() {
         next_actions: vec![loongclaw_daemon::onboard_cli::OnboardingAction {
             kind: loongclaw_daemon::onboard_cli::OnboardingActionKind::Ask,
             label: "ask".to_owned(),
-            command: "loongclaw ask --config /tmp/loongclaw-config.toml --message \"Summarize this repository and suggest the best next step.\"".to_owned(),
+            command: "loong ask --config /tmp/loongclaw-config.toml --message \"Summarize this repository and suggest the best next step.\"".to_owned(),
         }],
     };
 
@@ -6484,7 +8219,7 @@ fn onboarding_success_summary_groups_secondary_channel_actions_after_primary_han
 
     assert!(
         rendered
-            .contains("start here: loongclaw ask --config '/tmp/loongclaw-config.toml' --message")
+            .contains("- first answer: loong ask --config '/tmp/loongclaw-config.toml' --message")
             && rendered.contains("Summarize this repository and suggest the best next step."),
         "wide success summary should call out a single primary ask action even when wrapping is needed: {lines:#?}"
     );
@@ -6493,19 +8228,19 @@ fn onboarding_success_summary_groups_secondary_channel_actions_after_primary_han
         "wide success summary should group secondary channel actions under a separate heading: {lines:#?}"
     );
     assert!(
-        rendered.contains("- chat: loongclaw chat --config '/tmp/loongclaw-config.toml'"),
+        rendered.contains("- chat: loong chat --config '/tmp/loongclaw-config.toml'"),
         "wide success summary should still surface interactive chat as a secondary follow-up: {lines:#?}"
-    );
-    assert!(
-        lines.iter().any(|line| line
-            == "- telegram: loongclaw telegram-serve --config '/tmp/loongclaw-config.toml'"),
-        "wide success summary should list telegram as a secondary action: {lines:#?}"
     );
     assert!(
         lines
             .iter()
             .any(|line| line
-                == "- feishu: loongclaw feishu-serve --config '/tmp/loongclaw-config.toml'"),
+                == "- Telegram: loong telegram-serve --config '/tmp/loongclaw-config.toml'"),
+        "wide success summary should list telegram as a secondary action: {lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| line
+            == "- Feishu/Lark: loong feishu-serve --config '/tmp/loongclaw-config.toml'"),
         "wide success summary should list feishu as a secondary action: {lines:#?}"
     );
 }
@@ -6528,15 +8263,177 @@ fn onboarding_success_summary_uses_channel_handoff_when_cli_is_disabled() {
         "structured actions should promote the first enabled channel when cli is disabled: {summary:#?}"
     );
     assert!(
-        lines.iter().any(|line| line
-            == "start here: loongclaw telegram-serve --config '/tmp/loongclaw-config.toml'"),
+        lines.iter().any(|line| line == "start here")
+            && lines.iter().any(|line| {
+                line == "- Telegram: loong telegram-serve --config '/tmp/loongclaw-config.toml'"
+            }),
         "success summary should guide users into the first enabled channel when cli is disabled: {lines:#?}"
     );
     assert!(
         lines
             .iter()
-            .all(|line| line != "start here: loongclaw chat --config '/tmp/loongclaw-config.toml'"),
+            .all(|line| line != "- chat: loong chat --config '/tmp/loongclaw-config.toml'"),
         "success summary should not keep chat as the primary handoff once cli is disabled: {lines:#?}"
+    );
+}
+
+#[test]
+fn onboarding_success_summary_uses_channel_catalog_handoff_when_cli_is_disabled_and_no_service_channels_are_enabled()
+ {
+    let mut config = mvp::config::LoongClawConfig::default();
+    config.cli.enabled = false;
+
+    let path = PathBuf::from("/tmp/loongclaw-config.toml");
+    let summary =
+        loongclaw_daemon::onboard_cli::build_onboarding_success_summary(&path, &config, None);
+    let lines =
+        loongclaw_daemon::onboard_cli::render_onboarding_success_summary_with_width(&summary, 80);
+
+    assert_eq!(
+        summary.next_actions[0].kind,
+        loongclaw_daemon::onboard_cli::OnboardingActionKind::Channel,
+        "channel catalog should become the primary handoff when cli and service channels are both unavailable: {summary:#?}"
+    );
+    assert_eq!(summary.next_actions[0].label, "channels");
+    assert!(
+        lines.iter().any(|line| line == "start here")
+            && lines.iter().any(|line| {
+                line == "- channels: loong channels --config '/tmp/loongclaw-config.toml'"
+            }),
+        "success summary should fall back to the channel catalog when no direct cli or service-channel handoff exists: {lines:#?}"
+    );
+}
+
+#[test]
+fn onboarding_success_summary_uses_doctor_handoff_for_plugin_backed_channels_when_cli_is_disabled()
+{
+    let mut config = mvp::config::LoongClawConfig::default();
+    config.cli.enabled = false;
+    config.weixin.enabled = true;
+    config.weixin.bridge_url = Some("https://bridge.example.test/weixin".to_owned());
+    config.weixin.bridge_access_token = Some(loongclaw_contracts::SecretRef::Inline(
+        "weixin-token".to_owned(),
+    ));
+    config.weixin.allowed_contact_ids = vec!["wxid_alice".to_owned()];
+
+    let path = PathBuf::from("/tmp/loongclaw-config.toml");
+    let summary =
+        loongclaw_daemon::onboard_cli::build_onboarding_success_summary(&path, &config, None);
+    let lines =
+        loongclaw_daemon::onboard_cli::render_onboarding_success_summary_with_width(&summary, 80);
+
+    assert_eq!(
+        summary.next_actions[0].kind,
+        loongclaw_daemon::onboard_cli::OnboardingActionKind::Doctor,
+        "plugin-backed channel setups should guide operators into diagnostics before the generic channel catalog: {summary:#?}"
+    );
+    assert_eq!(
+        summary.next_actions[0].label,
+        "verify weixin managed bridge"
+    );
+    assert_eq!(
+        summary.next_actions[0].command,
+        format!(
+            "{} doctor --config '/tmp/loongclaw-config.toml'",
+            super::active_cli_command_name()
+        )
+    );
+    assert_eq!(
+        summary.next_actions[1].kind,
+        loongclaw_daemon::onboard_cli::OnboardingActionKind::Channel,
+        "the generic channel catalog should remain available as a secondary fallback: {summary:#?}"
+    );
+    assert_eq!(summary.next_actions[1].label, "channels");
+    assert!(
+        lines.iter().any(|line| line == "start here")
+            && lines
+                .iter()
+                .any(|line| line.contains("verify weixin managed bridge"))
+            && lines.iter().any(|line| {
+                line.contains(
+                    format!("{} doctor --config", super::active_cli_command_name()).as_str(),
+                )
+            })
+            && lines
+                .iter()
+                .any(|line| line.contains("/tmp/loongclaw-config.toml")),
+        "success summary should render the managed bridge verification handoff as the primary action: {lines:#?}"
+    );
+}
+
+#[test]
+fn onboarding_success_summary_lists_doctor_followup_for_plugin_backed_channels_when_cli_is_enabled()
+{
+    let mut config = mvp::config::LoongClawConfig::default();
+    config.weixin.enabled = true;
+    config.weixin.bridge_url = Some("https://bridge.example.test/weixin".to_owned());
+    config.weixin.bridge_access_token = Some(loongclaw_contracts::SecretRef::Inline(
+        "weixin-token".to_owned(),
+    ));
+    config.weixin.allowed_contact_ids = vec!["wxid_alice".to_owned()];
+
+    let path = PathBuf::from("/tmp/loongclaw-config.toml");
+    let summary =
+        loongclaw_daemon::onboard_cli::build_onboarding_success_summary(&path, &config, None);
+    let lines =
+        loongclaw_daemon::onboard_cli::render_onboarding_success_summary_with_width(&summary, 100);
+    let ask_position = summary
+        .next_actions
+        .iter()
+        .position(|action| action.kind == loongclaw_daemon::onboard_cli::OnboardingActionKind::Ask);
+    let chat_position = summary.next_actions.iter().position(|action| {
+        action.kind == loongclaw_daemon::onboard_cli::OnboardingActionKind::Chat
+    });
+    let personalize_position = summary.next_actions.iter().position(|action| {
+        action.kind == loongclaw_daemon::onboard_cli::OnboardingActionKind::Personalize
+            && action.label == "working preferences"
+    });
+    let doctor_position = summary.next_actions.iter().position(|action| {
+        action.kind == loongclaw_daemon::onboard_cli::OnboardingActionKind::Doctor
+            && action.label == "verify weixin managed bridge"
+    });
+    let catalog_position = summary
+        .next_actions
+        .iter()
+        .position(|action| action.label == "channels");
+
+    assert_eq!(
+        ask_position,
+        Some(0),
+        "cli-enabled plugin-backed setups should keep the direct ask handoff first: {summary:#?}"
+    );
+    assert_eq!(
+        chat_position,
+        Some(1),
+        "cli-enabled plugin-backed setups should keep the chat handoff second: {summary:#?}"
+    );
+    let personalize_position = personalize_position.expect(
+        "cli-enabled plugin-backed setups should keep the working-preferences handoff visible before diagnostics",
+    );
+    let doctor_position =
+        doctor_position.expect("managed-bridge diagnostics should remain available");
+    let catalog_position =
+        catalog_position.expect("generic channel catalog handoff should remain available");
+    assert!(
+        personalize_position < doctor_position,
+        "working preferences should stay ahead of managed-bridge diagnostics in cli-enabled setups: {summary:#?}"
+    );
+    assert!(
+        doctor_position < catalog_position,
+        "managed-bridge diagnostics should still appear before the generic channel catalog: {summary:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| {
+            line.contains("verify weixin managed bridge")
+                && line.contains(
+                    format!(
+                        "{} doctor --config '/tmp/loongclaw-config.toml'",
+                        super::active_cli_command_name()
+                    )
+                    .as_str(),
+                )
+        }),
+        "success summary should surface the managed bridge verification follow-up in the secondary actions: {lines:#?}"
     );
 }
 
@@ -6690,9 +8587,11 @@ fn build_channel_onboarding_follow_up_lines_reports_manual_and_planned_channels(
     );
     assert!(lines.iter().any(|line| {
         line.contains("Telegram [telegram]")
+            && line.contains("selection_order=10")
+            && line.contains("selection_label=\"personal and group chat bot\"")
             && line.contains("strategy=manual_config")
-            && line.contains("status_command=\"loongclaw doctor\"")
-            && line.contains("repair_command=\"loongclaw doctor --fix\"")
+            && line.contains("status_command=\"loong doctor\"")
+            && line.contains("repair_command=\"loong doctor --fix\"")
     }));
     assert!(lines.iter().any(|line| {
         line.contains("Feishu/Lark [feishu]")
@@ -6701,8 +8600,38 @@ fn build_channel_onboarding_follow_up_lines_reports_manual_and_planned_channels(
     }));
     assert!(lines.iter().any(|line| {
         line.contains("Discord [discord]")
-            && line.contains("strategy=planned")
-            && line.contains("repair_command=-")
-            && line.contains("status_command=\"loongclaw channels --json\"")
+            && line.contains("selection_order=40")
+            && line.contains("selection_label=\"community server bot\"")
+            && line.contains("strategy=manual_config")
+            && line.contains("repair_command=\"loong doctor --fix\"")
+            && line.contains("status_command=\"loong doctor\"")
+            && line.contains("blurb=\"Shipped Discord outbound message surface")
+    }));
+    assert!(lines.iter().any(|line| {
+        line.contains("LINE [line]")
+            && line.contains("selection_order=60")
+            && line.contains("selection_label=\"consumer messaging bot\"")
+            && line.contains("strategy=manual_config")
+            && line.contains("repair_command=\"loong doctor --fix\"")
+            && line.contains("status_command=\"loong doctor\"")
+            && line.contains("blurb=\"Shipped LINE Messaging API outbound surface")
+    }));
+    assert!(lines.iter().any(|line| {
+        line.contains("Webhook [webhook]")
+            && line.contains("selection_order=110")
+            && line.contains("selection_label=\"generic http integration\"")
+            && line.contains("strategy=manual_config")
+            && line.contains("repair_command=\"loong doctor --fix\"")
+            && line.contains("status_command=\"loong doctor\"")
+            && line.contains("blurb=\"Shipped generic webhook outbound surface")
+    }));
+    assert!(lines.iter().any(|line| {
+        line.contains("Mattermost [mattermost]")
+            && line.contains("selection_order=150")
+            && line.contains("selection_label=\"self-hosted workspace bot\"")
+            && line.contains("strategy=manual_config")
+            && line.contains("repair_command=\"loong doctor --fix\"")
+            && line.contains("status_command=\"loong doctor\"")
+            && line.contains("blurb=\"Shipped Mattermost outbound surface")
     }));
 }

@@ -24,7 +24,10 @@ pub const DEFAULT_AGENT_ID: &str = "agent-dev-01";
 pub type NativeToolExecutor = fn(ToolCoreRequest) -> Option<Result<ToolCoreOutcome, String>>;
 
 pub fn tool_name_requires_native_tool_executor(tool_name: &str) -> bool {
-    matches!(tool_name, "claw.migrate" | "claw_migrate")
+    matches!(
+        tool_name,
+        "config.import" | "config_import" | "claw.migrate" | "claw_migrate"
+    )
 }
 
 pub fn spec_requires_native_tool_executor(spec: &RunnerSpec) -> bool {
@@ -42,11 +45,20 @@ pub fn spec_requires_native_tool_executor(spec: &RunnerSpec) -> bool {
         | OperationSpec::MemoryCore { .. }
         | OperationSpec::MemoryExtension { .. }
         | OperationSpec::ToolSearch { .. }
+        | OperationSpec::PluginInventory { .. }
+        | OperationSpec::PluginPreflight { .. }
         | OperationSpec::ProgrammaticToolCall { .. } => false,
     }
 }
 
 pub static BUNDLED_APPROVAL_RISK_PROFILE: OnceLock<ApprovalRiskProfile> = OnceLock::new();
+pub static BUNDLED_BRIDGE_SUPPORT_NATIVE_BALANCED: OnceLock<Result<BridgeSupportSpec, String>> =
+    OnceLock::new();
+pub static BUNDLED_BRIDGE_SUPPORT_OPENCLAW_ECOSYSTEM_BALANCED: OnceLock<
+    Result<BridgeSupportSpec, String>,
+> = OnceLock::new();
+pub static BUNDLED_PLUGIN_PREFLIGHT_POLICY: OnceLock<Result<PluginPreflightPolicyProfile, String>> =
+    OnceLock::new();
 pub static BUNDLED_SECURITY_SCAN_PROFILE: OnceLock<SecurityScanProfile> = OnceLock::new();
 #[cfg(any(test, feature = "test-hooks"))]
 pub static WEBHOOK_TEST_RETRY_STATE: OnceLock<Mutex<BTreeMap<String, usize>>> = OnceLock::new();

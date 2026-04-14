@@ -45,13 +45,29 @@ pub fn initialize_runtime_environment(
         "LOONGCLAW_SHELL_DEFAULT_MODE",
         config.tools.shell_default_mode.as_str(),
     );
+    let configured_file_root = config.tools.configured_file_root();
+    match configured_file_root {
+        Some(configured_file_root) => {
+            let configured_file_root_text = configured_file_root.display().to_string();
+            set_env_var("LOONGCLAW_FILE_ROOT", configured_file_root_text);
+        }
+        None => remove_env_var("LOONGCLAW_FILE_ROOT"),
+    }
+    let workspace_root = std::env::current_dir()
+        .ok()
+        .unwrap_or_else(|| config.tools.resolved_file_root());
+    let workspace_root = dunce::canonicalize(&workspace_root).unwrap_or(workspace_root);
     set_env_var(
-        "LOONGCLAW_FILE_ROOT",
-        config.tools.resolved_file_root().display().to_string(),
+        "LOONGCLAW_WORKSPACE_ROOT",
+        workspace_root.display().to_string(),
     );
     set_env_var(
         "LOONGCLAW_TOOL_SESSIONS_ENABLED",
         bool_env(config.tools.sessions.enabled),
+    );
+    set_env_var(
+        "LOONGCLAW_TOOL_SESSIONS_ALLOW_MUTATION",
+        bool_env(config.tools.sessions.allow_mutation),
     );
     set_env_var(
         "LOONGCLAW_TOOL_MESSAGES_ENABLED",
@@ -207,6 +223,8 @@ mod tests {
             "LOONGCLAW_SHELL_DENY",
             "LOONGCLAW_SHELL_DEFAULT_MODE",
             "LOONGCLAW_FILE_ROOT",
+            "LOONGCLAW_WORKSPACE_ROOT",
+            "LOONGCLAW_TOOL_SESSIONS_ALLOW_MUTATION",
             "LOONGCLAW_EXTERNAL_SKILLS_ENABLED",
             "LOONGCLAW_EXTERNAL_SKILLS_REQUIRE_DOWNLOAD_APPROVAL",
             "LOONGCLAW_EXTERNAL_SKILLS_ALLOWED_DOMAINS",
@@ -242,6 +260,7 @@ mod tests {
         config.memory.summary_max_chars = 900;
         config.memory.profile_note = Some("Imported NanoBot preferences".to_owned());
         config.tools.file_root = Some("/tmp/loongclaw-runtime-file-root".to_owned());
+        config.tools.sessions.allow_mutation = true;
         config.tools.browser.enabled = false;
         config.tools.browser.max_sessions = 4;
         config.tools.browser.max_links = 12;
@@ -285,6 +304,21 @@ mod tests {
         assert_eq!(
             std::env::var("LOONGCLAW_FILE_ROOT").ok().as_deref(),
             Some("/tmp/loongclaw-runtime-file-root")
+        );
+        let expected_workspace_root =
+            std::env::current_dir().expect("current_dir should resolve during runtime env tests");
+        let expected_workspace_root =
+            dunce::canonicalize(&expected_workspace_root).unwrap_or(expected_workspace_root);
+        let expected_workspace_root = expected_workspace_root.display().to_string();
+        assert_eq!(
+            std::env::var("LOONGCLAW_WORKSPACE_ROOT").ok().as_deref(),
+            Some(expected_workspace_root.as_str())
+        );
+        assert_eq!(
+            std::env::var("LOONGCLAW_TOOL_SESSIONS_ALLOW_MUTATION")
+                .ok()
+                .as_deref(),
+            Some("true")
         );
         assert_eq!(
             std::env::var("LOONGCLAW_EXTERNAL_SKILLS_ENABLED")
@@ -410,5 +444,17 @@ mod tests {
             std::env::var("LOONGCLAW_BROWSER_COMPANION_EXPECTED_VERSION").ok(),
             None
         );
+    }
+
+    #[test]
+    fn initialize_runtime_environment_leaves_file_root_unset_when_not_configured() {
+        let mut env = ScopedEnv::new();
+        clear_runtime_environment_exports(&mut env);
+        env.set("LOONGCLAW_FILE_ROOT", "/tmp/stale-root");
+        let config = LoongClawConfig::default();
+
+        initialize_runtime_environment(&config, None);
+
+        assert_eq!(std::env::var("LOONGCLAW_FILE_ROOT").ok(), None);
     }
 }

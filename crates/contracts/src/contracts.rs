@@ -13,8 +13,12 @@ pub enum Capability {
     FilesystemRead,
     FilesystemWrite,
     NetworkEgress,
-    ScheduleTask,
     ObserveTelemetry,
+    ControlRead,
+    ControlWrite,
+    ControlApprovals,
+    ControlPairing,
+    ControlAcp,
 }
 
 impl Capability {
@@ -27,8 +31,12 @@ impl Capability {
             Self::FilesystemRead => "filesystem_read",
             Self::FilesystemWrite => "filesystem_write",
             Self::NetworkEgress => "network_egress",
-            Self::ScheduleTask => "schedule_task",
             Self::ObserveTelemetry => "observe_telemetry",
+            Self::ControlRead => "control_read",
+            Self::ControlWrite => "control_write",
+            Self::ControlApprovals => "control_approvals",
+            Self::ControlPairing => "control_pairing",
+            Self::ControlAcp => "control_acp",
         }
     }
 
@@ -41,8 +49,12 @@ impl Capability {
             "filesystem_read" => Some(Self::FilesystemRead),
             "filesystem_write" => Some(Self::FilesystemWrite),
             "network_egress" => Some(Self::NetworkEgress),
-            "schedule_task" => Some(Self::ScheduleTask),
             "observe_telemetry" => Some(Self::ObserveTelemetry),
+            "control_read" => Some(Self::ControlRead),
+            "control_write" => Some(Self::ControlWrite),
+            "control_approvals" => Some(Self::ControlApprovals),
+            "control_pairing" => Some(Self::ControlPairing),
+            "control_acp" => Some(Self::ControlAcp),
             _ => None,
         }
     }
@@ -124,8 +136,12 @@ mod tests {
             (Capability::FilesystemRead, "filesystem_read"),
             (Capability::FilesystemWrite, "filesystem_write"),
             (Capability::NetworkEgress, "network_egress"),
-            (Capability::ScheduleTask, "schedule_task"),
             (Capability::ObserveTelemetry, "observe_telemetry"),
+            (Capability::ControlRead, "control_read"),
+            (Capability::ControlWrite, "control_write"),
+            (Capability::ControlApprovals, "control_approvals"),
+            (Capability::ControlPairing, "control_pairing"),
+            (Capability::ControlAcp, "control_acp"),
         ];
 
         for (capability, expected_name) in fixtures {
@@ -147,5 +163,6 @@ mod tests {
         assert_eq!(Capability::parse("totally_unknown"), None);
         assert_eq!(Capability::parse(""), None);
         assert_eq!(Capability::parse("   "), None);
+        assert_eq!(Capability::parse("schedule_task"), None);
     }
 }

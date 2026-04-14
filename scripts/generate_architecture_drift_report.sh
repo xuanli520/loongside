@@ -6,8 +6,9 @@ cd "$REPO_ROOT"
 . "$REPO_ROOT/scripts/architecture_budget_lib.sh"
 
 REPORT_MONTH="${LOONGCLAW_ARCH_REPORT_MONTH:-$(date +%Y-%m)}"
-OUTPUT_PATH="${1:-docs/releases/architecture-drift-${REPORT_MONTH}.md}"
+OUTPUT_PATH="${1:-docs/releases/support/architecture-drift-${REPORT_MONTH}.md}"
 EXPLICIT_BASELINE="${LOONGCLAW_ARCH_DRIFT_BASELINE_REPORT:-}"
+EXPLICIT_BASELINE_DIR="${LOONGCLAW_ARCH_DRIFT_BASELINE_DIR:-}"
 GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 derive_previous_month() {
@@ -30,11 +31,15 @@ resolve_baseline_path() {
     return 0
   fi
 
-  local output_dir
-  output_dir="$(dirname "$OUTPUT_PATH")"
   local previous_month
   previous_month="$(derive_previous_month "$REPORT_MONTH")"
-  printf '%s/architecture-drift-%s.md\n' "$output_dir" "$previous_month"
+  local baseline_dir
+  if [[ -n "$EXPLICIT_BASELINE_DIR" ]]; then
+    baseline_dir="$EXPLICIT_BASELINE_DIR"
+  else
+    baseline_dir="$(dirname "$OUTPUT_PATH")"
+  fi
+  printf '%s/architecture-drift-%s.md\n' "$baseline_dir" "$previous_month"
 }
 
 baseline_hotspot_value() {
@@ -78,6 +83,19 @@ format_percent_growth() {
   awk -v current="$current" -v previous="$previous" 'BEGIN { printf "%.1f%%", ((current - previous) / previous) * 100 }'
 }
 
+join_by_comma() {
+  local item
+  local output=""
+  for item in "$@"; do
+    [[ -z "$item" ]] && continue
+    if [[ -n "$output" ]]; then
+      output="${output}, "
+    fi
+    output="${output}${item}"
+  done
+  printf '%s\n' "$output"
+}
+
 growth_slo_status() {
   local current="$1"
   local previous="$2"
@@ -93,7 +111,9 @@ mkdir -p "$(dirname "$OUTPUT_PATH")"
 BASELINE_PATH="$(resolve_baseline_path)"
 if [[ -f "$BASELINE_PATH" ]]; then
   BASELINE_LABEL="$BASELINE_PATH"
+  BASELINE_AVAILABLE=1
 else
+  BASELINE_AVAILABLE=0
   if [[ -n "$EXPLICIT_BASELINE" ]]; then
     BASELINE_LABEL="missing: $BASELINE_PATH"
   else
@@ -109,9 +129,17 @@ hotspot_breach=0
 boundary_breach=0
 hotspot_count=0
 boundary_count=0
+breach_hotspots=()
+tight_hotspots=()
+watch_hotspots=()
+mixed_class_hotspots=()
+breach_hotspot_summary="none"
+tight_hotspot_summary="none"
+watch_hotspot_summary="none"
+mixed_class_hotspot_summary="none"
 hotspot_rows="$(architecture_hotspot_rows)" || exit 1
 
-while IFS='|' read -r key file lines max_lines line_status functions max_functions fn_status; do
+while IFS='|' read -r key file classes lines max_lines _line_status functions max_functions _fn_status peak_usage pressure; do
   [[ -z "$key" ]] && continue
   hotspot_count=$((hotspot_count + 1))
   prev_lines="$(baseline_hotspot_value "$BASELINE_PATH" "$key" lines || true)"
@@ -123,12 +151,42 @@ while IFS='|' read -r key file lines max_lines line_status functions max_functio
   fi
   line_headroom=$((max_lines - lines))
   fn_headroom=$((max_functions - functions))
-  printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
-    "$key" "$file" "$lines" "$max_lines" "$line_headroom" "$functions" "$max_functions" "$fn_headroom" \
-    "${prev_lines:-n/a}" "$line_growth" "$growth_status" "${prev_functions:-n/a}" >>"$tmp_hotspots"
+  case "$pressure" in
+    BREACH)
+      breach_hotspots+=("${key} (${peak_usage})")
+      ;;
+    TIGHT)
+      tight_hotspots+=("${key} (${peak_usage})")
+      ;;
+    WATCH)
+      watch_hotspots+=("${key} (${peak_usage})")
+      ;;
+  esac
+  if [[ "$classes" == *,* ]]; then
+    mixed_class_hotspots+=("$key")
+  fi
+  printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    "$key" "$classes" "$file" "$lines" "$max_lines" "$line_headroom" "$functions" "$max_functions" "$fn_headroom" \
+    "$peak_usage" "$pressure" "${prev_lines:-n/a}" "$line_growth" "$growth_status" "${prev_functions:-n/a}" >>"$tmp_hotspots"
 done <<EOF_HOTSPOTS
 ${hotspot_rows}
 EOF_HOTSPOTS
+
+if (( ${#breach_hotspots[@]} > 0 )); then
+  breach_hotspot_summary="$(join_by_comma "${breach_hotspots[@]}")"
+fi
+
+if (( ${#tight_hotspots[@]} > 0 )); then
+  tight_hotspot_summary="$(join_by_comma "${tight_hotspots[@]}")"
+fi
+
+if (( ${#watch_hotspots[@]} > 0 )); then
+  watch_hotspot_summary="$(join_by_comma "${watch_hotspots[@]}")"
+fi
+
+if (( ${#mixed_class_hotspots[@]} > 0 )); then
+  mixed_class_hotspot_summary="$(join_by_comma "${mixed_class_hotspots[@]}")"
+fi
 
 while IFS= read -r boundary_key; do
   [[ -z "$boundary_key" ]] && continue
@@ -156,6 +214,25 @@ fi
 {
   echo "# Architecture Drift Report ${REPORT_MONTH}"
   echo
+  echo "This report is a repository maintenance artifact for architecture-governance and"
+  echo "release review. It is not part of the primary public release trail."
+  echo
+  echo "## Route By Audience"
+  echo
+  echo "| If you are trying to... | Start here |"
+  echo "| --- | --- |"
+  echo "| read public release history | the top-level \`../vX.Y.Z*.md\` and \`../*-announcement.md\` files |"
+  echo "| inspect architecture-maintenance and release-governance evidence | this report |"
+  echo "| understand the release-support file boundary | [\`README.md\`](README.md) |"
+  echo
+  echo "## Read This File When"
+  echo
+  echo "- you are reviewing release-support architecture evidence for \`${REPORT_MONTH}\`"
+  echo "- you need the generated hotspot and boundary-check snapshot behind release"
+  echo "  governance"
+  echo "- you are validating whether release-support automation still matches the"
+  echo "  repository's current architecture boundaries"
+  echo
   echo "## Summary"
   echo "- Generated at: ${GENERATED_AT}"
   echo "- Report month: \`${REPORT_MONTH}\`"
@@ -165,13 +242,29 @@ fi
   echo "- SLO status: ${overall_status}"
   echo
   echo "## Hotspot Metrics"
-  echo "| Key | File | Lines | Max Lines | Line Headroom | Functions | Max Functions | Fn Headroom | Prev Lines | Line Growth | Growth SLO | Prev Functions |"
-  echo "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|"
-  while IFS='|' read -r key file lines max_lines line_headroom functions max_functions fn_headroom prev_lines line_growth growth_status prev_functions; do
-    echo "| ${key} | \`${file}\` | ${lines} | ${max_lines} | ${line_headroom} | ${functions} | ${max_functions} | ${fn_headroom} | ${prev_lines} | ${line_growth} | ${growth_status} | ${prev_functions} |"
-  done <"$tmp_hotspots"
+  echo
+  if [[ "$BASELINE_AVAILABLE" -eq 1 ]]; then
+    echo "| Key | Classes | File | Lines | Max Lines | Line Headroom | Functions | Max Functions | Fn Headroom | Peak Usage | Pressure | Prev Lines | Line Growth | Growth SLO | Prev Functions |"
+    echo "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---|---:|"
+    while IFS='|' read -r key classes file lines max_lines line_headroom functions max_functions fn_headroom peak_usage pressure prev_lines line_growth growth_status prev_functions; do
+      echo "| ${key} | \`${classes}\` | \`${file}\` | ${lines} | ${max_lines} | ${line_headroom} | ${functions} | ${max_functions} | ${fn_headroom} | ${peak_usage} | ${pressure} | ${prev_lines} | ${line_growth} | ${growth_status} | ${prev_functions} |"
+    done <"$tmp_hotspots"
+  else
+    echo "| Key | Classes | File | Lines | Max Lines | Line Headroom | Functions | Max Functions | Fn Headroom | Peak Usage | Pressure |"
+    echo "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|"
+    while IFS='|' read -r key classes file lines max_lines line_headroom functions max_functions fn_headroom peak_usage pressure _prev_lines _line_growth _growth_status _prev_functions; do
+      echo "| ${key} | \`${classes}\` | \`${file}\` | ${lines} | ${max_lines} | ${line_headroom} | ${functions} | ${max_functions} | ${fn_headroom} | ${peak_usage} | ${pressure} |"
+    done <"$tmp_hotspots"
+  fi
+  echo
+  echo "## Prioritization Signals"
+  echo "- BREACH hotspots (>100% of any tracked budget): ${breach_hotspot_summary}"
+  echo "- TIGHT hotspots (>=95% of any tracked budget): ${tight_hotspot_summary}"
+  echo "- WATCH hotspots (>=85% and <95% of any tracked budget): ${watch_hotspot_summary}"
+  echo "- Mixed-class hotspots (size plus operational density): ${mixed_class_hotspot_summary}"
   echo
   echo "## Boundary Checks"
+  echo
   echo "| Check | Status | Previous Status | Detail |"
   echo "|---|---|---|---|"
   while IFS='|' read -r key status previous_status detail; do
@@ -193,15 +286,23 @@ fi
   echo
   echo "## Refactor Budget Policy"
   echo "- Monthly drift report command: \`scripts/generate_architecture_drift_report.sh\`"
-  echo "- Release checklist budget field lives in \`docs/releases/TEMPLATE.md\`."
+  echo "- Release checklist budget field lives in \`docs/releases/support/TEMPLATE.md\`."
   echo "- Rule: each release must name at least one hotspot metric paid down or explicitly state why no paydown happened."
   echo
   echo "## Detail Links"
-  echo "- [Architecture gate](../../scripts/check_architecture_boundaries.sh)"
+  echo "- [Architecture gate](../../../scripts/check_architecture_boundaries.sh)"
   echo "- [Release template](TEMPLATE.md)"
-  echo "- [CI workflow](../../.github/workflows/ci.yml)"
+  echo "- [CI workflow](../../../.github/workflows/ci.yml)"
   echo
-  while IFS='|' read -r key _file lines _max_lines _line_headroom functions _max_functions _fn_headroom _prev_lines _line_growth _growth_status _prev_functions; do
+  echo "## Do Not Use This File For"
+  echo
+  echo "- public release-history reading that should start from \`vX.Y.Z*.md\`,"
+  echo "  \`*-announcement.md\`, \`CHANGELOG.md\`, or GitHub Releases"
+  echo "- temporary maintainer scratch notes or architecture experiments that should"
+  echo "  live outside the tracked release-doc path"
+  echo "- backlog planning packages that do not belong in the OSS repository"
+  echo
+  while IFS='|' read -r key _classes _file lines _max_lines _line_headroom functions _max_functions _fn_headroom _peak_usage _pressure _prev_lines _line_growth _growth_status _prev_functions; do
     echo "<!-- arch-hotspot key=${key} lines=${lines} functions=${functions} -->"
   done <"$tmp_hotspots"
   while IFS='|' read -r key status _previous_status _detail; do

@@ -8,7 +8,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO_ROOT/scripts/release_artifact_lib.sh"
 ERRORS=0
 WARNINGS=0
-PUBLIC_GITHUB_REPO="${LOONGCLAW_PUBLIC_REPO:-loongclaw-ai/loongclaw}"
+PUBLIC_GITHUB_REPO="${LOONG_PUBLIC_REPO:-eastreams/loong}"
 PUBLIC_GITHUB_BASE="https://github.com/${PUBLIC_GITHUB_REPO}"
 
 if [ -n "${LOONGCLAW_RELEASE_DOCS_STRICT:-}" ]; then
@@ -296,7 +296,7 @@ check_canonical_github_links() {
     fi
 }
 
-for release_doc in "$REPO_ROOT/docs/releases/TEMPLATE.md" "$REPO_ROOT"/docs/releases/v*.md; do
+for release_doc in "$REPO_ROOT/docs/releases/support/TEMPLATE.md" "$REPO_ROOT"/docs/releases/v*.md; do
     [ -f "$release_doc" ] || continue
     if grep -Fq "github.com/<org>/<repo>" "$release_doc"; then
         echo "FAIL: ${release_doc} still contains placeholder github.com/<org>/<repo>"
@@ -312,6 +312,11 @@ if [ ! -f "$ISSUE_TEMPLATE_CONFIG" ]; then
     ERRORS=$((ERRORS + 1))
 elif ! grep -Fq "${EXPECTED_ADVISORY_URL}" "$ISSUE_TEMPLATE_CONFIG"; then
     echo "FAIL: ${ISSUE_TEMPLATE_CONFIG} must reference canonical advisory URL ${EXPECTED_ADVISORY_URL}"
+    ERRORS=$((ERRORS + 1))
+fi
+
+# --- 6. Governance architecture doc consistency checks ---
+if ! "$REPO_ROOT/scripts/check_governance_docs_consistency.sh"; then
     ERRORS=$((ERRORS + 1))
 fi
 

@@ -1,4 +1,5 @@
 use super::*;
+use loongclaw_daemon::kernel::PluginCompatibilityMode;
 use std::sync::MutexGuard;
 
 struct ProcessStdioEnvironmentGuard {
@@ -75,6 +76,9 @@ async fn execute_spec_process_stdio_bridge_executes_when_enabled_and_allowed() {
             enabled: true,
             supported_bridges: vec![PluginBridgeKind::ProcessStdio],
             supported_adapter_families: Vec::new(),
+            supported_compatibility_modes: vec![PluginCompatibilityMode::Native],
+            supported_compatibility_shims: Vec::new(),
+            supported_compatibility_shim_profiles: Vec::new(),
             enforce_supported: true,
             policy_version: None,
             expected_checksum: None,
@@ -94,11 +98,13 @@ async fn execute_spec_process_stdio_bridge_executes_when_enabled_and_allowed() {
             allow_mcp_server_auto_apply: Some(false),
             allow_acp_bridge_auto_apply: Some(false),
             allow_acp_runtime_auto_apply: Some(false),
+            block_unverified_high_risk_auto_apply: None,
             enforce_ready_execution: Some(true),
             max_tasks: Some(10),
         }),
         auto_provision: None,
         hotfixes: Vec::new(),
+        plugin_setup_readiness: None,
         operation: OperationSpec::ConnectorLegacy {
             connector_name: "stdio-provider".to_owned(),
             operation: "invoke".to_owned(),
@@ -201,6 +207,9 @@ async fn execute_spec_process_stdio_bridge_blocks_when_command_not_allowlisted()
             enabled: true,
             supported_bridges: vec![PluginBridgeKind::ProcessStdio],
             supported_adapter_families: Vec::new(),
+            supported_compatibility_modes: vec![PluginCompatibilityMode::Native],
+            supported_compatibility_shims: Vec::new(),
+            supported_compatibility_shim_profiles: Vec::new(),
             enforce_supported: true,
             policy_version: None,
             expected_checksum: None,
@@ -220,11 +229,13 @@ async fn execute_spec_process_stdio_bridge_blocks_when_command_not_allowlisted()
             allow_mcp_server_auto_apply: Some(false),
             allow_acp_bridge_auto_apply: Some(false),
             allow_acp_runtime_auto_apply: Some(false),
+            block_unverified_high_risk_auto_apply: None,
             enforce_ready_execution: Some(true),
             max_tasks: Some(10),
         }),
         auto_provision: None,
         hotfixes: Vec::new(),
+        plugin_setup_readiness: None,
         operation: OperationSpec::ConnectorLegacy {
             connector_name: "stdio-provider".to_owned(),
             operation: "invoke".to_owned(),
@@ -311,6 +322,9 @@ async fn execute_spec_process_stdio_bridge_fails_on_invalid_json_line_response()
             enabled: true,
             supported_bridges: vec![PluginBridgeKind::ProcessStdio],
             supported_adapter_families: Vec::new(),
+            supported_compatibility_modes: vec![PluginCompatibilityMode::Native],
+            supported_compatibility_shims: Vec::new(),
+            supported_compatibility_shim_profiles: Vec::new(),
             enforce_supported: true,
             policy_version: None,
             expected_checksum: None,
@@ -330,11 +344,13 @@ async fn execute_spec_process_stdio_bridge_fails_on_invalid_json_line_response()
             allow_mcp_server_auto_apply: Some(false),
             allow_acp_bridge_auto_apply: Some(false),
             allow_acp_runtime_auto_apply: Some(false),
+            block_unverified_high_risk_auto_apply: None,
             enforce_ready_execution: Some(true),
             max_tasks: Some(10),
         }),
         auto_provision: None,
         hotfixes: Vec::new(),
+        plugin_setup_readiness: None,
         operation: OperationSpec::ConnectorLegacy {
             connector_name: "stdio-invalid-frame-provider".to_owned(),
             operation: "invoke".to_owned(),
@@ -363,6 +379,125 @@ async fn execute_spec_process_stdio_bridge_fails_on_invalid_json_line_response()
         report.outcome["outcome"]["payload"]["bridge_execution"]["runtime"]["transport_kind"],
         "json_line"
     );
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tokio::test]
+async fn execute_spec_process_stdio_bridge_strips_high_risk_env_vars_from_child_process() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let mut env = loongclaw_daemon::test_support::ScopedEnv::new();
+    env.set("CC", "malicious-cc");
+    env.set("PYTHONPATH", "/tmp/malicious-pythonpath");
+    env.set("LC_CHILD_TEST", "keep-me");
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be monotonic")
+        .as_nanos();
+    let plugin_root = std::env::temp_dir().join(format!(
+        "loongclaw-plugin-process-stdio-env-sanitized-{unique}"
+    ));
+    fs::create_dir_all(&plugin_root).expect("create plugin root");
+
+    fs::write(
+        plugin_root.join("stdio_plugin.py"),
+        r#"
+# LOONGCLAW_PLUGIN_START
+# {
+#   "plugin_id": "stdio-env-sanitized-plugin",
+#   "provider_id": "stdio-env-sanitized-provider",
+#   "connector_name": "stdio-env-sanitized-provider",
+#   "channel_id": "primary",
+#   "endpoint": "local://stdio-env-sanitized-provider",
+#   "capabilities": ["InvokeConnector"],
+#   "metadata": {
+#     "bridge_kind":"process_stdio",
+#     "command":"python3",
+#     "process_timeout_ms":"15000",
+#     "args_json":"[\"-c\",\"import json, os, sys; request=json.loads(sys.stdin.readline()); payload={'cc': os.environ.get('CC', 'unset'), 'pythonpath': os.environ.get('PYTHONPATH', 'unset'), 'lc_child_test': os.environ.get('LC_CHILD_TEST', 'unset'), 'path': 'set' if os.environ.get('PATH') else 'unset'}; response={'method': request['method'], 'id': request['id'], 'payload': payload}; sys.stdout.write(json.dumps(response)+'\\\\n'); sys.stdout.flush()\"]",
+#     "version":"1.0.0"
+#   }
+# }
+# LOONGCLAW_PLUGIN_END
+"#,
+    )
+    .expect("write stdio plugin");
+
+    let spec = RunnerSpec {
+        pack: VerticalPackManifest {
+            pack_id: "spec-process-stdio-env-sanitized".to_owned(),
+            domain: "ops".to_owned(),
+            version: "0.1.0".to_owned(),
+            default_route: ExecutionRoute {
+                harness_kind: HarnessKind::EmbeddedPi,
+                adapter: Some("pi-local".to_owned()),
+            },
+            allowed_connectors: BTreeSet::new(),
+            granted_capabilities: BTreeSet::new(),
+            metadata: BTreeMap::new(),
+        },
+        agent_id: "agent-process-stdio-env-sanitized".to_owned(),
+        ttl_s: 120,
+        approval: None,
+        defaults: None,
+        self_awareness: None,
+        plugin_scan: Some(PluginScanSpec {
+            enabled: true,
+            roots: vec![plugin_root.display().to_string()],
+        }),
+        bridge_support: Some(BridgeSupportSpec {
+            enabled: true,
+            supported_bridges: vec![PluginBridgeKind::ProcessStdio],
+            supported_adapter_families: Vec::new(),
+            supported_compatibility_modes: vec![PluginCompatibilityMode::Native],
+            supported_compatibility_shims: Vec::new(),
+            supported_compatibility_shim_profiles: Vec::new(),
+            enforce_supported: true,
+            policy_version: None,
+            expected_checksum: None,
+            expected_sha256: None,
+            execute_process_stdio: true,
+            execute_http_json: false,
+            allowed_process_commands: vec!["python3".to_owned()],
+            enforce_execution_success: true,
+            security_scan: None,
+        }),
+        bootstrap: Some(BootstrapSpec {
+            enabled: true,
+            allow_http_json_auto_apply: Some(false),
+            allow_process_stdio_auto_apply: Some(true),
+            allow_native_ffi_auto_apply: Some(false),
+            allow_wasm_component_auto_apply: Some(false),
+            allow_mcp_server_auto_apply: Some(false),
+            allow_acp_bridge_auto_apply: Some(false),
+            allow_acp_runtime_auto_apply: Some(false),
+            block_unverified_high_risk_auto_apply: None,
+            enforce_ready_execution: Some(true),
+            max_tasks: Some(10),
+        }),
+        auto_provision: None,
+        hotfixes: Vec::new(),
+        plugin_setup_readiness: None,
+        operation: OperationSpec::ConnectorLegacy {
+            connector_name: "stdio-env-sanitized-provider".to_owned(),
+            operation: "invoke".to_owned(),
+            required_capabilities: BTreeSet::from([Capability::InvokeConnector]),
+            payload: json!({"question":"ping"}),
+        },
+    };
+
+    let report = execute_spec(&spec, true).await;
+    let bridge_execution = &report.outcome["outcome"]["payload"]["bridge_execution"];
+    let response_payload = &bridge_execution["runtime"]["stdout_json"];
+
+    assert_eq!(report.operation_kind, "connector_legacy");
+    assert_eq!(report.outcome["outcome"]["status"], "ok");
+    assert_eq!(bridge_execution["status"], "executed");
+    assert_eq!(response_payload["cc"], "unset");
+    assert_eq!(response_payload["pythonpath"], "unset");
+    assert_eq!(response_payload["lc_child_test"], "keep-me");
+    assert_eq!(response_payload["path"], "set");
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -430,6 +565,9 @@ async fn execute_spec_process_stdio_bridge_fails_on_response_id_mismatch() {
             enabled: true,
             supported_bridges: vec![PluginBridgeKind::ProcessStdio],
             supported_adapter_families: Vec::new(),
+            supported_compatibility_modes: vec![PluginCompatibilityMode::Native],
+            supported_compatibility_shims: Vec::new(),
+            supported_compatibility_shim_profiles: Vec::new(),
             enforce_supported: true,
             policy_version: None,
             expected_checksum: None,
@@ -449,11 +587,13 @@ async fn execute_spec_process_stdio_bridge_fails_on_response_id_mismatch() {
             allow_mcp_server_auto_apply: Some(false),
             allow_acp_bridge_auto_apply: Some(false),
             allow_acp_runtime_auto_apply: Some(false),
+            block_unverified_high_risk_auto_apply: None,
             enforce_ready_execution: Some(true),
             max_tasks: Some(10),
         }),
         auto_provision: None,
         hotfixes: Vec::new(),
+        plugin_setup_readiness: None,
         operation: OperationSpec::ConnectorLegacy {
             connector_name: "stdio-mismatch-id-provider".to_owned(),
             operation: "invoke".to_owned(),
@@ -543,6 +683,9 @@ async fn execute_spec_process_stdio_bridge_fails_on_response_method_mismatch() {
             enabled: true,
             supported_bridges: vec![PluginBridgeKind::ProcessStdio],
             supported_adapter_families: Vec::new(),
+            supported_compatibility_modes: vec![PluginCompatibilityMode::Native],
+            supported_compatibility_shims: Vec::new(),
+            supported_compatibility_shim_profiles: Vec::new(),
             enforce_supported: true,
             policy_version: None,
             expected_checksum: None,
@@ -562,11 +705,13 @@ async fn execute_spec_process_stdio_bridge_fails_on_response_method_mismatch() {
             allow_mcp_server_auto_apply: Some(false),
             allow_acp_bridge_auto_apply: Some(false),
             allow_acp_runtime_auto_apply: Some(false),
+            block_unverified_high_risk_auto_apply: None,
             enforce_ready_execution: Some(true),
             max_tasks: Some(10),
         }),
         auto_provision: None,
         hotfixes: Vec::new(),
+        plugin_setup_readiness: None,
         operation: OperationSpec::ConnectorLegacy {
             connector_name: "stdio-mismatch-method-provider".to_owned(),
             operation: "invoke".to_owned(),
@@ -654,6 +799,9 @@ async fn execute_spec_process_stdio_bridge_blocks_when_protocol_authorization_fa
             enabled: true,
             supported_bridges: vec![PluginBridgeKind::ProcessStdio],
             supported_adapter_families: Vec::new(),
+            supported_compatibility_modes: vec![PluginCompatibilityMode::Native],
+            supported_compatibility_shims: Vec::new(),
+            supported_compatibility_shim_profiles: Vec::new(),
             enforce_supported: true,
             policy_version: None,
             expected_checksum: None,
@@ -673,11 +821,13 @@ async fn execute_spec_process_stdio_bridge_blocks_when_protocol_authorization_fa
             allow_mcp_server_auto_apply: Some(false),
             allow_acp_bridge_auto_apply: Some(false),
             allow_acp_runtime_auto_apply: Some(false),
+            block_unverified_high_risk_auto_apply: None,
             enforce_ready_execution: Some(true),
             max_tasks: Some(10),
         }),
         auto_provision: None,
         hotfixes: Vec::new(),
+        plugin_setup_readiness: None,
         operation: OperationSpec::ConnectorLegacy {
             connector_name: "stdio-authz-block-provider".to_owned(),
             operation: "invoke".to_owned(),
@@ -781,6 +931,9 @@ async fn execute_spec_process_stdio_bridge_fails_on_recv_timeout() {
             enabled: true,
             supported_bridges: vec![PluginBridgeKind::ProcessStdio],
             supported_adapter_families: Vec::new(),
+            supported_compatibility_modes: vec![PluginCompatibilityMode::Native],
+            supported_compatibility_shims: Vec::new(),
+            supported_compatibility_shim_profiles: Vec::new(),
             enforce_supported: true,
             policy_version: None,
             expected_checksum: None,
@@ -800,11 +953,13 @@ async fn execute_spec_process_stdio_bridge_fails_on_recv_timeout() {
             allow_mcp_server_auto_apply: Some(false),
             allow_acp_bridge_auto_apply: Some(false),
             allow_acp_runtime_auto_apply: Some(false),
+            block_unverified_high_risk_auto_apply: None,
             enforce_ready_execution: Some(true),
             max_tasks: Some(10),
         }),
         auto_provision: None,
         hotfixes: Vec::new(),
+        plugin_setup_readiness: None,
         operation: OperationSpec::ConnectorLegacy {
             connector_name: "stdio-timeout-provider".to_owned(),
             operation: "invoke".to_owned(),

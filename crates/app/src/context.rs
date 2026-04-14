@@ -13,7 +13,7 @@ use crate::config::{AuditMode, LoongClawConfig};
 const MVP_PACK_ID: &str = "dev-automation";
 
 /// Default token TTL (24 hours) for long-running MVP entry points.
-pub(crate) const DEFAULT_TOKEN_TTL_S: u64 = 86400;
+pub const DEFAULT_TOKEN_TTL_S: u64 = 86400;
 
 /// Kernel execution context for policy-gated MVP operations.
 ///
@@ -40,8 +40,8 @@ impl KernelContext {
 
 /// Bootstrap a minimal in-memory kernel suitable for tests.
 ///
-/// Registers a default pack manifest with `InvokeTool`, `MemoryRead`, and
-/// `MemoryWrite` capabilities, then issues a long-lived token for the given
+/// Registers a default pack manifest with the MVP tool, memory, filesystem,
+/// and public-web capabilities, then issues a long-lived token for the given
 /// `agent_id`.
 ///
 /// Production-facing runtime entrypoints should prefer
@@ -55,15 +55,16 @@ pub(crate) fn bootstrap_test_kernel_context(
         agent_id,
         ttl_s,
         Arc::new(InMemoryAuditSink::default()) as Arc<dyn AuditSink>,
+        &LoongClawConfig::default(),
     )
 }
 
-pub(crate) fn bootstrap_kernel_context_with_config(
+pub fn bootstrap_kernel_context_with_config(
     agent_id: &str,
     ttl_s: u64,
     config: &LoongClawConfig,
 ) -> Result<KernelContext, String> {
-    bootstrap_kernel_context_with_audit_sink(agent_id, ttl_s, build_audit_sink(config)?)
+    bootstrap_kernel_context_with_audit_sink(agent_id, ttl_s, build_audit_sink(config)?, config)
 }
 
 fn build_audit_sink(config: &LoongClawConfig) -> Result<Arc<dyn AuditSink>, String> {
@@ -100,6 +101,7 @@ fn bootstrap_kernel_context_with_audit_sink(
     agent_id: &str,
     ttl_s: u64,
     audit_sink: Arc<dyn AuditSink>,
+    config: &LoongClawConfig,
 ) -> Result<KernelContext, String> {
     let mut kernel = LoongClawKernel::with_runtime(
         StaticPolicyEngine::default(),
@@ -118,6 +120,7 @@ fn bootstrap_kernel_context_with_audit_sink(
         allowed_connectors: BTreeSet::new(),
         granted_capabilities: BTreeSet::from([
             Capability::InvokeTool,
+            Capability::NetworkEgress,
             Capability::MemoryRead,
             Capability::MemoryWrite,
             Capability::FilesystemRead,
@@ -140,17 +143,20 @@ fn bootstrap_kernel_context_with_audit_sink(
             .map_err(|e| format!("set default memory adapter failed: {e}"))?;
     }
 
-    kernel.register_core_tool_adapter(crate::tools::MvpToolAdapter::new());
+    let tool_rt =
+        crate::tools::runtime_config::ToolRuntimeConfig::from_loongclaw_config(config, None);
+    let file_root = tool_rt.file_root.clone();
+    kernel.register_core_tool_adapter(crate::tools::MvpToolAdapter::with_config(tool_rt));
     kernel
         .set_default_core_tool_adapter("mvp-tools")
         .map_err(|e| format!("set default tool adapter failed: {e}"))?;
 
     // Register policy extensions for unified security enforcement.
-    let tool_rt = crate::tools::runtime_config::get_tool_runtime_config();
+    let tool_policy_rt =
+        crate::tools::runtime_config::ToolRuntimeConfig::from_loongclaw_config(config, None);
     kernel.register_policy_extension(
-        crate::tools::shell_policy_ext::ToolPolicyExtension::from_config(tool_rt),
+        crate::tools::shell_policy_ext::ToolPolicyExtension::from_config(&tool_policy_rt),
     );
-    let file_root = tool_rt.file_root.clone();
     kernel.register_policy_extension(crate::tools::file_policy_ext::FilePolicyExtension::new(
         file_root,
     ));
@@ -222,6 +228,26 @@ mod tests {
         assert!(
             journal.contains("\"TokenIssued\"") || journal.contains("\"token_id\""),
             "fanout journal should capture token issuance"
+        );
+    }
+
+    #[test]
+    fn bootstrap_kernel_context_with_config_grants_network_egress() {
+        let mut config = LoongClawConfig::default();
+        config.audit.mode = AuditMode::InMemory;
+
+        let context = bootstrap_kernel_context_with_config("test-agent", 60, &config)
+            .expect("bootstrap with default config should succeed");
+
+        let allowed_capabilities = &context.token.allowed_capabilities;
+
+        assert!(
+            allowed_capabilities.contains(&Capability::InvokeTool),
+            "bootstrap token should retain invoke tool capability"
+        );
+        assert!(
+            allowed_capabilities.contains(&Capability::NetworkEgress),
+            "bootstrap token should grant network egress for kernel-bound web tools"
         );
     }
 }

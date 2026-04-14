@@ -3,6 +3,8 @@ use std::path::Path;
 
 use loongclaw_app as mvp;
 
+use crate::provider_credential_policy;
+
 use super::channels;
 use super::discovery::{build_import_candidate, resolve_channel_import_readiness_from_config};
 use super::provider_transport;
@@ -157,6 +159,9 @@ fn compose_provider_domain(
     } else {
         chosen.config.provider.clone()
     };
+    merged_config
+        .provider
+        .canonicalize_configured_auth_env_bindings();
     let mut supplemented_from = Vec::new();
     for candidate in candidates {
         if Some(candidate.source.as_str()) == base_source.as_deref() {
@@ -184,7 +189,8 @@ fn compose_provider_domain(
 
     Some(DomainPreview {
         kind: SetupDomainKind::Provider,
-        status: if merged_config.provider.authorization_header().is_some() {
+        status: if provider_credential_policy::provider_is_credential_ready(&merged_config.provider)
+        {
             PreviewStatus::Ready
         } else {
             PreviewStatus::NeedsReview
@@ -259,9 +265,10 @@ fn supplement_provider_config(
     if target.kind != source.kind {
         return false;
     }
+    target.canonicalize_configured_auth_env_bindings();
+    let mut source = source.clone();
+    source.canonicalize_configured_auth_env_bindings();
     let default_provider = mvp::config::ProviderConfig::default();
-    let target_has_auth = target.authorization_header().is_some();
-    let source_has_auth = source.authorization_header().is_some();
     let mut changed = false;
     if (target.model.trim().is_empty() || target.model.eq_ignore_ascii_case("auto"))
         && !source.model.trim().is_empty()
@@ -269,32 +276,51 @@ fn supplement_provider_config(
         target.model = source.model.clone();
         changed = true;
     }
-    changed |= provider_transport::supplement_provider_transport(target, source);
-    if (target.api_key.is_none() || (!target_has_auth && source_has_auth))
+    changed |= provider_transport::supplement_provider_transport(target, &source);
+    let target_has_auth_header =
+        provider_credential_policy::provider_has_configured_auth_header(target);
+    let target_has_auth =
+        provider_credential_policy::provider_has_locally_available_credentials(target);
+    let target_has_configured_auth =
+        target.api_key.is_some() || target.oauth_access_token.is_some() || target_has_auth_header;
+    let source_has_auth =
+        provider_credential_policy::provider_has_locally_available_credentials(&source);
+    if !target_has_auth_header
+        && (target.api_key.is_none() || (!target_has_auth && source_has_auth))
         && source.api_key.is_some()
+        && target.api_key != source.api_key
     {
         target.api_key = source.api_key.clone();
         changed = true;
     }
-    if (target.api_key_env.is_none() || (!target_has_auth && source_has_auth))
-        && source.api_key_env.is_some()
-        && target.api_key_env != source.api_key_env
-    {
-        target.api_key_env = source.api_key_env.clone();
-        changed = true;
-    }
-    if (target.oauth_access_token.is_none() || (!target_has_auth && source_has_auth))
+    if !target_has_auth_header
+        && (target.oauth_access_token.is_none() || (!target_has_auth && source_has_auth))
         && source.oauth_access_token.is_some()
+        && target.oauth_access_token != source.oauth_access_token
     {
         target.oauth_access_token = source.oauth_access_token.clone();
         changed = true;
     }
-    if (target.oauth_access_token_env.is_none() || (!target_has_auth && source_has_auth))
-        && source.oauth_access_token_env.is_some()
-        && target.oauth_access_token_env != source.oauth_access_token_env
-    {
-        target.oauth_access_token_env = source.oauth_access_token_env.clone();
-        changed = true;
+    let target_missing_auth_config = !target_has_configured_auth;
+    let should_materialize_source_env_binding = source_has_auth && target_missing_auth_config;
+    if should_materialize_source_env_binding {
+        let source_binding =
+            provider_credential_policy::provider_available_credential_env_binding(&source);
+        let target_binding =
+            provider_credential_policy::configured_provider_credential_env_binding(target);
+        let binding_changed = source_binding != target_binding;
+        let source_binding = if binding_changed {
+            source_binding
+        } else {
+            None
+        };
+        if let Some(source_binding) = source_binding {
+            provider_credential_policy::apply_provider_credential_env_binding(
+                target,
+                &source_binding,
+            );
+            changed = true;
+        }
     }
     if target.endpoint.is_none() && source.endpoint.is_some() {
         target.endpoint = source.endpoint.clone();
@@ -359,6 +385,143 @@ fn supplement_provider_config(
         }
     }
     changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn supplement_provider_config_canonicalizes_legacy_api_key_env_binding() {
+        let mut target =
+            mvp::config::ProviderConfig::fresh_for_kind(mvp::config::ProviderKind::Openai);
+        target.api_key = None;
+        target.set_api_key_env(None);
+
+        let mut source =
+            mvp::config::ProviderConfig::fresh_for_kind(mvp::config::ProviderKind::Openai);
+        source.set_api_key_env(Some("OPENAI_API_KEY".to_owned()));
+
+        let changed = supplement_provider_config(&mut target, &source);
+
+        assert!(changed);
+        assert_eq!(
+            target.api_key,
+            Some(loongclaw_contracts::SecretRef::Env {
+                env: "OPENAI_API_KEY".to_owned(),
+            })
+        );
+        assert_eq!(target.api_key_env, None);
+    }
+
+    #[test]
+    fn compose_provider_domain_canonicalizes_selected_current_provider() {
+        let mut merged_config = mvp::config::LoongClawConfig::default();
+        let mut current = ImportCandidate {
+            source_kind: ImportSourceKind::ExistingLoongClawConfig,
+            source: "current config".to_owned(),
+            config: mvp::config::LoongClawConfig::default(),
+            surfaces: Vec::new(),
+            domains: Vec::new(),
+            channel_candidates: Vec::new(),
+            workspace_guidance: Vec::new(),
+        };
+        current.config.provider =
+            mvp::config::ProviderConfig::fresh_for_kind(mvp::config::ProviderKind::Openai);
+        current
+            .config
+            .provider
+            .set_api_key_env(Some("OPENAI_API_KEY".to_owned()));
+        current.domains.push(DomainPreview {
+            kind: SetupDomainKind::Provider,
+            status: PreviewStatus::Ready,
+            decision: Some(PreviewDecision::KeepCurrent),
+            source: current.source.clone(),
+            summary: String::new(),
+        });
+
+        let domain = compose_provider_domain(&mut merged_config, &[current]);
+
+        assert!(domain.is_some());
+        assert_eq!(
+            merged_config.provider.api_key,
+            Some(loongclaw_contracts::SecretRef::Env {
+                env: "OPENAI_API_KEY".to_owned(),
+            })
+        );
+        assert_eq!(merged_config.provider.api_key_env, None);
+    }
+
+    #[test]
+    fn supplement_provider_config_accepts_x_api_key_source_credentials() {
+        let mut env = crate::test_support::ScopedEnv::new();
+        env.set("ANTHROPIC_API_KEY", "test-anthropic-key");
+        let mut target =
+            mvp::config::ProviderConfig::fresh_for_kind(mvp::config::ProviderKind::Anthropic);
+        target.api_key = None;
+        target.set_api_key_env(None);
+
+        let source =
+            mvp::config::ProviderConfig::fresh_for_kind(mvp::config::ProviderKind::Anthropic);
+
+        let changed = supplement_provider_config(&mut target, &source);
+
+        assert!(changed);
+        assert_eq!(
+            target.api_key,
+            Some(loongclaw_contracts::SecretRef::Env {
+                env: "ANTHROPIC_API_KEY".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn supplement_provider_config_preserves_explicit_target_auth_bindings() {
+        let mut env = crate::test_support::ScopedEnv::new();
+        env.set("OPENAI_API_KEY", "test-openai-key");
+
+        let mut target =
+            mvp::config::ProviderConfig::fresh_for_kind(mvp::config::ProviderKind::Openai);
+        target.api_key = Some(loongclaw_contracts::SecretRef::Env {
+            env: "TEAM_OPENAI_KEY".to_owned(),
+        });
+
+        let source = mvp::config::ProviderConfig::fresh_for_kind(mvp::config::ProviderKind::Openai);
+
+        let _changed = supplement_provider_config(&mut target, &source);
+
+        assert_eq!(
+            target.api_key,
+            Some(loongclaw_contracts::SecretRef::Env {
+                env: "TEAM_OPENAI_KEY".to_owned(),
+            })
+        );
+        assert_eq!(target.oauth_access_token, None);
+    }
+
+    #[test]
+    fn supplement_provider_config_preserves_target_auth_headers() {
+        let mut env = crate::test_support::ScopedEnv::new();
+        env.set("OPENAI_API_KEY", "test-openai-key");
+
+        let mut target =
+            mvp::config::ProviderConfig::fresh_for_kind(mvp::config::ProviderKind::Openai);
+        target.headers = std::collections::BTreeMap::from([(
+            "authorization".to_owned(),
+            "Bearer team-auth-header".to_owned(),
+        )]);
+
+        let source = mvp::config::ProviderConfig::fresh_for_kind(mvp::config::ProviderKind::Openai);
+
+        let _changed = supplement_provider_config(&mut target, &source);
+
+        assert_eq!(target.api_key, None);
+        assert_eq!(target.oauth_access_token, None);
+        assert_eq!(
+            target.header_value("authorization"),
+            Some("Bearer team-auth-header")
+        );
+    }
 }
 
 fn compose_cli_domain(
@@ -592,7 +755,11 @@ fn memory_summary(config: &mvp::config::MemoryConfig, supplemented_from: &[Strin
 fn tool_summary(config: &mvp::config::ToolConfig, supplemented_from: &[String]) -> String {
     let default = mvp::config::ToolConfig::default();
     let mut parts = Vec::new();
-    if config.file_root != default.file_root {
+    let configured_file_root = config.configured_file_root();
+    let default_configured_file_root = default.configured_file_root();
+    let explicit_file_root_changed = configured_file_root != default_configured_file_root;
+
+    if explicit_file_root_changed {
         parts.push(format!(
             "workspace root {}",
             config.resolved_file_root().display()
@@ -634,10 +801,13 @@ fn compose_channels_domain(
     candidates: &[ImportCandidate],
 ) -> (Vec<ChannelCandidate>, Option<DomainPreview>) {
     let mut chosen_channels = Vec::new();
+    let mut any_channel_conflicts = false;
     let mut any_channel_supplemented = false;
     let mut all_channels_from_current = true;
     let mut distinct_channel_sources = BTreeSet::new();
-    for channel_id in channels::registered_channel_ids() {
+    let ordered_channel_ids = ordered_candidate_channel_ids(candidates);
+
+    for channel_id in ordered_channel_ids {
         let Some(channel) = select_channel_candidate(channel_id, candidates) else {
             continue;
         };
@@ -645,25 +815,53 @@ fn compose_channels_domain(
             all_channels_from_current = false;
         }
         distinct_channel_sources.insert(channel.source.clone());
-        channels::apply_selected_channels(merged_config, &channel.config, &[channel.id]);
+        let selected_report = channels::apply_selected_channels_with_report(
+            merged_config,
+            &channel.config,
+            &[channel.id],
+        );
+        let mut selected_conflict = first_channel_apply_conflict(&selected_report);
         let mut supplemented_from = Vec::new();
-        for candidate in candidates {
-            if candidate.source == channel.source {
-                continue;
-            }
-            if candidate
-                .channel_candidates
-                .iter()
-                .any(|candidate_channel| candidate_channel.id == channel.id)
-                && channels::apply_selected_channels(
+        let mut supplemental_conflict = None;
+
+        if selected_conflict.is_none() {
+            for candidate in candidates {
+                if candidate.source == channel.source {
+                    continue;
+                }
+                let candidate_supplies_channel = candidate
+                    .channel_candidates
+                    .iter()
+                    .any(|candidate_channel| candidate_channel.id == channel.id);
+
+                if !candidate_supplies_channel {
+                    continue;
+                }
+
+                let supplement_report = channels::apply_selected_channels_with_report(
                     merged_config,
                     &candidate.config,
                     &[channel.id],
-                )
-            {
-                supplemented_from.push(candidate.source.clone());
+                );
+                let next_conflict = first_channel_apply_conflict(&supplement_report);
+
+                if let Some(conflict) = next_conflict {
+                    if supplemental_conflict.is_none() {
+                        supplemental_conflict = Some(conflict);
+                    }
+
+                    continue;
+                }
+
+                if supplement_report.changed {
+                    supplemented_from.push(candidate.source.clone());
+                }
             }
         }
+
+        let conflict_detected = selected_conflict.is_some() || supplemental_conflict.is_some();
+
+        any_channel_conflicts |= conflict_detected;
         any_channel_supplemented |= !supplemented_from.is_empty();
 
         let effective_source = if supplemented_from.is_empty() {
@@ -671,27 +869,46 @@ fn compose_channels_domain(
         } else {
             "multiple sources".to_owned()
         };
-        let mut final_channel = channels::collect_channel_previews(
-            merged_config,
-            &resolve_channel_import_readiness_from_config(merged_config),
-            &effective_source,
-        )
-        .into_iter()
-        .find(|preview| preview.candidate.id == channel.id)
-        .map(|preview| preview.candidate)
-        .unwrap_or(ChannelCandidate {
-            id: channel.id,
-            label: channel.label,
-            status: channel.status,
-            source: effective_source,
-            summary: channel.summary.clone(),
-        });
+        let preview_candidate = if selected_conflict.is_some() {
+            None
+        } else {
+            channels::collect_channel_previews(
+                merged_config,
+                &resolve_channel_import_readiness_from_config(merged_config),
+                &effective_source,
+            )
+            .into_iter()
+            .find(|preview| preview.candidate.id == channel.id)
+            .map(|preview| preview.candidate)
+        };
+        let mut final_channel = match preview_candidate {
+            Some(preview_candidate) => preview_candidate,
+            None => {
+                if let Some(conflict) = selected_conflict.take() {
+                    conflicted_channel_candidate(&channel, &effective_source, &conflict)
+                } else {
+                    ChannelCandidate {
+                        id: channel.id,
+                        label: channel.label,
+                        status: channel.status,
+                        source: effective_source.clone(),
+                        summary: channel.summary.clone(),
+                    }
+                }
+            }
+        };
+
         if !supplemented_from.is_empty() {
             final_channel.summary.push_str(" · supplemented from ");
             final_channel
                 .summary
                 .push_str(&supplemented_from.join(", "));
         }
+
+        if let Some(conflict) = supplemental_conflict.as_ref() {
+            append_channel_conflict_summary(&mut final_channel.summary, conflict);
+        }
+
         chosen_channels.push(final_channel);
     }
 
@@ -747,19 +964,79 @@ fn compose_channels_domain(
         Some(DomainPreview {
             kind: SetupDomainKind::Channels,
             status,
-            decision: Some(
-                if any_channel_supplemented || distinct_channel_sources.len() > 1 {
-                    PreviewDecision::Supplement
-                } else if all_channels_from_current {
-                    PreviewDecision::KeepCurrent
-                } else {
-                    PreviewDecision::UseDetected
-                },
-            ),
+            decision: Some(if any_channel_conflicts {
+                PreviewDecision::ReviewConflict
+            } else if any_channel_supplemented || distinct_channel_sources.len() > 1 {
+                PreviewDecision::Supplement
+            } else if all_channels_from_current {
+                PreviewDecision::KeepCurrent
+            } else {
+                PreviewDecision::UseDetected
+            }),
             source,
             summary,
         }),
     )
+}
+
+fn first_channel_apply_conflict(
+    report: &channels::ChannelApplyReport,
+) -> Option<channels::ChannelApplyConflict> {
+    let conflict = report.conflicts.first()?;
+
+    Some(conflict.clone())
+}
+
+fn conflicted_channel_candidate(
+    channel: &SelectedChannel,
+    effective_source: &str,
+    conflict: &channels::ChannelApplyConflict,
+) -> ChannelCandidate {
+    let mut summary = channel.summary.clone();
+
+    append_channel_conflict_summary(&mut summary, conflict);
+
+    ChannelCandidate {
+        id: channel.id,
+        label: channel.label,
+        status: PreviewStatus::NeedsReview,
+        source: effective_source.to_owned(),
+        summary,
+    }
+}
+
+fn append_channel_conflict_summary(
+    summary: &mut String,
+    conflict: &channels::ChannelApplyConflict,
+) {
+    let conflict_summary = channels::summarize_channel_apply_conflict(conflict);
+
+    if summary.is_empty() {
+        summary.push_str(&conflict_summary);
+        return;
+    }
+
+    summary.push_str(" · ");
+    summary.push_str(&conflict_summary);
+}
+
+fn ordered_candidate_channel_ids(candidates: &[ImportCandidate]) -> Vec<&'static str> {
+    let mut seen_channel_ids = BTreeSet::new();
+    let mut ordered_channel_ids = Vec::new();
+
+    for candidate in candidates {
+        for channel in &candidate.channel_candidates {
+            let inserted = seen_channel_ids.insert(channel.id);
+
+            if !inserted {
+                continue;
+            }
+
+            ordered_channel_ids.push(channel.id);
+        }
+    }
+
+    ordered_channel_ids
 }
 
 fn passive_domain_decision(

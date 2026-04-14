@@ -3,12 +3,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use clap::ValueEnum;
-use rand::Rng;
+use rand::RngExt;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use loongclaw_app as mvp;
 use loongclaw_spec::CliResult;
+
+const FEISHU_GROUP_MESSAGE_READ_SCOPE: &str = "im:message.group_msg";
+const FEISHU_GROUP_MESSAGE_READ_SCOPE_LEGACY: &str = "im:message.group_msg:readonly";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum FeishuAuthCapability {
@@ -52,12 +55,15 @@ pub struct FeishuDaemonContext {
     pub config_path: PathBuf,
     pub config: mvp::config::LoongClawConfig,
     pub resolved: mvp::config::ResolvedFeishuChannelConfig,
-    pub store: mvp::feishu::FeishuTokenStore,
+    pub store: mvp::channel::feishu::api::FeishuTokenStore,
 }
 
 impl FeishuDaemonContext {
-    pub fn build_client(&self) -> CliResult<mvp::feishu::FeishuClient> {
-        mvp::feishu::FeishuClient::from_configs(&self.resolved, &self.config.feishu_integration)
+    pub fn build_client(&self) -> CliResult<mvp::channel::feishu::api::FeishuClient> {
+        mvp::channel::feishu::api::FeishuClient::from_configs(
+            &self.resolved,
+            &self.config.feishu_integration,
+        )
     }
 
     pub fn account_id(&self) -> &str {
@@ -74,13 +80,14 @@ pub fn load_feishu_daemon_context(
     account: Option<&str>,
 ) -> CliResult<FeishuDaemonContext> {
     let (config_path, config) = mvp::config::load(config_path)?;
-    let resolved = mvp::feishu::resolve_requested_feishu_account(
+    let resolved = mvp::channel::feishu::api::resolve_requested_feishu_account(
         &config.feishu,
         account,
         "rerun with `--account <configured_account_id>` using one of those configured accounts",
     )?;
-    let store =
-        mvp::feishu::FeishuTokenStore::new(config.feishu_integration.resolved_sqlite_path());
+    let store = mvp::channel::feishu::api::FeishuTokenStore::new(
+        config.feishu_integration.resolved_sqlite_path(),
+    );
     Ok(FeishuDaemonContext {
         config_path,
         config,
@@ -134,12 +141,12 @@ pub fn resolve_scopes(
                 }
             }
             FeishuAuthCapability::DocWrite => {
-                for scope in mvp::feishu::FEISHU_DOC_WRITE_ACCEPTED_SCOPES {
+                for scope in mvp::channel::feishu::api::FEISHU_DOC_WRITE_ACCEPTED_SCOPES {
                     push_scope_if_missing(&mut scopes, scope);
                 }
             }
             FeishuAuthCapability::MessageWrite => {
-                for scope in mvp::feishu::FEISHU_MESSAGE_WRITE_RECOMMENDED_SCOPES {
+                for scope in mvp::channel::feishu::api::FEISHU_MESSAGE_WRITE_RECOMMENDED_SCOPES {
                     push_scope_if_missing(&mut scopes, scope);
                 }
             }
@@ -147,10 +154,10 @@ pub fn resolve_scopes(
                 for scope in default_scopes {
                     push_scope_if_missing(&mut scopes, scope);
                 }
-                for scope in mvp::feishu::FEISHU_DOC_WRITE_ACCEPTED_SCOPES {
+                for scope in mvp::channel::feishu::api::FEISHU_DOC_WRITE_ACCEPTED_SCOPES {
                     push_scope_if_missing(&mut scopes, scope);
                 }
-                for scope in mvp::feishu::FEISHU_MESSAGE_WRITE_RECOMMENDED_SCOPES {
+                for scope in mvp::channel::feishu::api::FEISHU_MESSAGE_WRITE_RECOMMENDED_SCOPES {
                     push_scope_if_missing(&mut scopes, scope);
                 }
             }
@@ -181,7 +188,10 @@ pub fn feishu_auth_start_command_hint(
     include_message_write: bool,
     include_doc_write: bool,
 ) -> String {
-    let mut parts = vec!["loongclaw feishu auth start".to_owned()];
+    let mut parts = vec![format!(
+        "{} feishu auth start",
+        mvp::config::active_cli_command_name()
+    )];
     let configured_account_id = configured_account_id.trim();
     if !configured_account_id.is_empty() {
         parts.push(format!("--account {configured_account_id}"));
@@ -196,7 +206,10 @@ pub fn feishu_auth_start_command_hint(
 }
 
 pub fn feishu_auth_select_command_hint(configured_account_id: &str) -> String {
-    let mut parts = vec!["loongclaw feishu auth select".to_owned()];
+    let mut parts = vec![format!(
+        "{} feishu auth select",
+        mvp::config::active_cli_command_name()
+    )];
     let configured_account_id = configured_account_id.trim();
     if !configured_account_id.is_empty() {
         parts.push(format!("--account {configured_account_id}"));
@@ -207,13 +220,14 @@ pub fn feishu_auth_select_command_hint(configured_account_id: &str) -> String {
 
 pub fn recommended_auth_start_command_for_grant(
     configured_account_id: &str,
-    grant: Option<&mvp::feishu::FeishuGrant>,
+    grant: Option<&mvp::channel::feishu::api::FeishuGrant>,
     now_s: i64,
     required_scopes: &[String],
 ) -> Option<String> {
-    let status = mvp::feishu::auth::summarize_grant_status(grant, now_s, required_scopes);
-    let doc_write_status = mvp::feishu::summarize_doc_write_scope_status(grant);
-    let write_status = mvp::feishu::summarize_message_write_scope_status(grant);
+    let status =
+        mvp::channel::feishu::api::auth::summarize_grant_status(grant, now_s, required_scopes);
+    let doc_write_status = mvp::channel::feishu::api::summarize_doc_write_scope_status(grant);
+    let write_status = mvp::channel::feishu::api::summarize_message_write_scope_status(grant);
     let needs_auth_start = !status.has_grant
         || status.refresh_token_expired
         || !status.missing_scopes.is_empty()
@@ -225,20 +239,21 @@ pub fn recommended_auth_start_command_for_grant(
 
     Some(feishu_auth_start_command_hint(
         configured_account_id,
-        grant.is_some() && !doc_write_status.ready,
         grant.is_some() && !write_status.ready,
+        grant.is_some() && !doc_write_status.ready,
     ))
 }
 
 pub fn build_grant_recommendations(
     configured_account_id: &str,
-    grant: Option<&mvp::feishu::FeishuGrant>,
+    grant: Option<&mvp::channel::feishu::api::FeishuGrant>,
     now_s: i64,
     required_scopes: &[String],
 ) -> FeishuGrantRecommendations {
-    let status = mvp::feishu::auth::summarize_grant_status(grant, now_s, required_scopes);
-    let doc_write_status = mvp::feishu::summarize_doc_write_scope_status(grant);
-    let write_status = mvp::feishu::summarize_message_write_scope_status(grant);
+    let status =
+        mvp::channel::feishu::api::auth::summarize_grant_status(grant, now_s, required_scopes);
+    let doc_write_status = mvp::channel::feishu::api::summarize_doc_write_scope_status(grant);
+    let write_status = mvp::channel::feishu::api::summarize_message_write_scope_status(grant);
 
     FeishuGrantRecommendations {
         auth_start_command: recommended_auth_start_command_for_grant(
@@ -258,7 +273,7 @@ pub fn build_grant_recommendations(
 
 pub fn build_account_recommendations(
     configured_account_id: &str,
-    inventory: &mvp::feishu::FeishuGrantInventory,
+    inventory: &mvp::channel::feishu::api::FeishuGrantInventory,
 ) -> FeishuAccountRecommendations {
     FeishuAccountRecommendations {
         auth_start_command: inventory
@@ -274,27 +289,30 @@ pub fn build_account_recommendations(
 }
 
 pub fn resolve_selected_grant(
-    store: &mvp::feishu::FeishuTokenStore,
+    store: &mvp::channel::feishu::api::FeishuTokenStore,
     account_id: &str,
     open_id: Option<&str>,
-) -> CliResult<Option<mvp::feishu::FeishuGrant>> {
-    let resolution = mvp::feishu::resolve_grant_selection(store, account_id, open_id)?;
+) -> CliResult<Option<mvp::channel::feishu::api::FeishuGrant>> {
+    let resolution =
+        mvp::channel::feishu::api::resolve_grant_selection(store, account_id, open_id)?;
     if let Some(grant) = resolution.selected_grant().cloned() {
         return Ok(Some(grant));
     }
 
     if resolution.selection_required() {
         let open_ids = resolution.available_open_ids().join(", ");
+        let cli = mvp::config::active_cli_command_name();
         return Err(format!(
-            "multiple stored Feishu grants exist for account `{account_id}` ({open_ids}); run `loongclaw feishu auth list` or pass `--open-id`"
+            "multiple stored Feishu grants exist for account `{account_id}` ({open_ids}); run `{cli} feishu auth list` or pass `--open-id`"
         ));
     }
 
     if resolution.missing_explicit_open_id().is_some() {
-        return Err(
-            mvp::feishu::describe_grant_selection_error(account_id, &resolution)
-                .unwrap_or_else(|| format!("no stored Feishu grant for account `{account_id}`")),
-        );
+        return Err(mvp::channel::feishu::api::describe_grant_selection_error(
+            account_id,
+            &resolution,
+        )
+        .unwrap_or_else(|| format!("no stored Feishu grant for account `{account_id}`")));
     }
 
     Ok(None)
@@ -308,7 +326,13 @@ fn random_urlsafe_token(bytes_len: usize) -> String {
 
 fn normalize_scope(raw: &str) -> Option<String> {
     let scope = raw.trim();
-    (!scope.is_empty()).then(|| scope.to_owned())
+    if scope.is_empty() {
+        return None;
+    }
+    Some(match scope {
+        FEISHU_GROUP_MESSAGE_READ_SCOPE_LEGACY => FEISHU_GROUP_MESSAGE_READ_SCOPE.to_owned(),
+        _ => scope.to_owned(),
+    })
 }
 
 fn push_scope_if_missing(scopes: &mut Vec<String>, raw: &str) {
@@ -325,9 +349,13 @@ fn push_scope_if_missing(scopes: &mut Vec<String>, raw: &str) {
 mod tests {
     use super::*;
 
-    fn sample_grant(account_id: &str, open_id: &str, now_s: i64) -> mvp::feishu::FeishuGrant {
-        mvp::feishu::FeishuGrant {
-            principal: mvp::feishu::FeishuUserPrincipal {
+    fn sample_grant(
+        account_id: &str,
+        open_id: &str,
+        now_s: i64,
+    ) -> mvp::channel::feishu::api::FeishuGrant {
+        mvp::channel::feishu::api::FeishuGrant {
+            principal: mvp::channel::feishu::api::FeishuUserPrincipal {
                 account_id: account_id.to_owned(),
                 open_id: open_id.to_owned(),
                 union_id: Some("on_456".to_owned()),
@@ -340,7 +368,7 @@ mod tests {
             },
             access_token: format!("u-token-{open_id}"),
             refresh_token: format!("r-token-{open_id}"),
-            scopes: mvp::feishu::FeishuGrantScopeSet::from_scopes([
+            scopes: mvp::channel::feishu::api::FeishuGrantScopeSet::from_scopes([
                 "offline_access",
                 "docx:document:readonly",
             ]),
@@ -359,8 +387,12 @@ mod tests {
         let mut config = mvp::config::LoongClawConfig::default();
         config.feishu.enabled = false;
         config.feishu.account_id = Some("feishu_main".to_owned());
-        config.feishu.app_id = Some("cli_a1b2c3".to_owned());
-        config.feishu.app_secret = Some("app-secret".to_owned());
+        config.feishu.app_id = Some(loongclaw_contracts::SecretRef::Inline(
+            "cli_a1b2c3".to_owned(),
+        ));
+        config.feishu.app_secret = Some(loongclaw_contracts::SecretRef::Inline(
+            "app-secret".to_owned(),
+        ));
         config.feishu_integration.sqlite_path =
             temp_dir.join("feishu.sqlite3").display().to_string();
         mvp::config::write(config_path.to_str(), &config, true).expect("write config");
@@ -376,7 +408,8 @@ mod tests {
         let temp_dir =
             std::env::temp_dir().join(format!("loongclaw-feishu-support-multi-{}", unix_ts_now()));
         std::fs::create_dir_all(&temp_dir).expect("create temp dir");
-        let store = mvp::feishu::FeishuTokenStore::new(temp_dir.join("feishu.sqlite3"));
+        let store =
+            mvp::channel::feishu::api::FeishuTokenStore::new(temp_dir.join("feishu.sqlite3"));
         let now_s = unix_ts_now();
         store
             .save_grant(&sample_grant("feishu_main", "ou_123", now_s))
@@ -388,7 +421,7 @@ mod tests {
         let error = resolve_selected_grant(&store, "feishu_main", None)
             .expect_err("multiple grants should require explicit selection");
 
-        assert!(error.contains("loongclaw feishu auth list"));
+        assert!(error.contains("loong feishu auth list"));
         assert!(error.contains("--open-id"));
         assert!(error.contains("ou_123"));
         assert!(error.contains("ou_456"));
@@ -401,7 +434,8 @@ mod tests {
             unix_ts_now()
         ));
         std::fs::create_dir_all(&temp_dir).expect("create temp dir");
-        let store = mvp::feishu::FeishuTokenStore::new(temp_dir.join("feishu.sqlite3"));
+        let store =
+            mvp::channel::feishu::api::FeishuTokenStore::new(temp_dir.join("feishu.sqlite3"));
         let now_s = unix_ts_now();
         store
             .save_grant(&sample_grant("feishu_main", "ou_123", now_s))
@@ -427,7 +461,8 @@ mod tests {
             unix_ts_now()
         ));
         std::fs::create_dir_all(&temp_dir).expect("create temp dir");
-        let store = mvp::feishu::FeishuTokenStore::new(temp_dir.join("feishu.sqlite3"));
+        let store =
+            mvp::channel::feishu::api::FeishuTokenStore::new(temp_dir.join("feishu.sqlite3"));
         let now_s = unix_ts_now();
         store
             .save_grant(&sample_grant("feishu_main", "ou_123", now_s))
@@ -456,7 +491,8 @@ mod tests {
             unix_ts_now()
         ));
         std::fs::create_dir_all(&temp_dir).expect("create temp dir");
-        let store = mvp::feishu::FeishuTokenStore::new(temp_dir.join("feishu.sqlite3"));
+        let store =
+            mvp::channel::feishu::api::FeishuTokenStore::new(temp_dir.join("feishu.sqlite3"));
         let now_s = unix_ts_now();
         store
             .save_grant(&sample_grant("feishu_main", "ou_123", now_s))
@@ -471,7 +507,7 @@ mod tests {
         let error = resolve_selected_grant(&store, "feishu_main", None)
             .expect_err("multiple grants should still require explicit selection");
 
-        assert!(error.contains("loongclaw feishu auth list"));
+        assert!(error.contains("loong feishu auth list"));
         assert_eq!(
             store
                 .load_selected_grant("feishu_main")
@@ -487,7 +523,8 @@ mod tests {
             unix_ts_now()
         ));
         std::fs::create_dir_all(&temp_dir).expect("create temp dir");
-        let store = mvp::feishu::FeishuTokenStore::new(temp_dir.join("feishu.sqlite3"));
+        let store =
+            mvp::channel::feishu::api::FeishuTokenStore::new(temp_dir.join("feishu.sqlite3"));
         let now_s = unix_ts_now();
         store
             .save_grant(&sample_grant("feishu_main", "ou_123", now_s))
@@ -522,6 +559,27 @@ mod tests {
                 .filter(|scope| scope.as_str() == "im:message")
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn resolve_scopes_normalizes_legacy_group_message_scope_alias() {
+        let scopes = resolve_scopes(
+            &[],
+            &[
+                "offline_access".to_owned(),
+                "im:message.group_msg:readonly".to_owned(),
+            ],
+            &[],
+            false,
+        );
+
+        assert_eq!(
+            scopes,
+            vec![
+                "offline_access".to_owned(),
+                "im:message.group_msg".to_owned()
+            ]
         );
     }
 
@@ -585,7 +643,7 @@ mod tests {
 
         assert_eq!(
             command.as_deref(),
-            Some("loongclaw feishu auth start --account feishu_main")
+            Some("loong feishu auth start --account feishu_main")
         );
     }
 
@@ -601,8 +659,52 @@ mod tests {
         assert_eq!(
             recommendations.auth_start_command.as_deref(),
             Some(
-                "loongclaw feishu auth start --account feishu_main --capability doc-write --capability message-write"
+                "loong feishu auth start --account feishu_main --capability doc-write --capability message-write"
             )
+        );
+    }
+
+    #[test]
+    fn build_grant_recommendations_marks_only_missing_doc_write_scope() {
+        let now_s = unix_ts_now();
+        let mut grant = sample_grant("feishu_main", "ou_123", now_s);
+
+        grant.scopes = mvp::channel::feishu::api::FeishuGrantScopeSet::from_scopes([
+            "offline_access",
+            "docx:document:readonly",
+            "im:message:readonly",
+            "im:message",
+        ]);
+
+        let recommendations = build_grant_recommendations("feishu_main", Some(&grant), now_s, &[]);
+
+        assert!(recommendations.missing_doc_write_scope);
+        assert!(!recommendations.missing_message_write_scope);
+        assert_eq!(
+            recommendations.auth_start_command.as_deref(),
+            Some("loong feishu auth start --account feishu_main --capability doc-write")
+        );
+    }
+
+    #[test]
+    fn build_grant_recommendations_marks_only_missing_message_write_scope() {
+        let now_s = unix_ts_now();
+        let mut grant = sample_grant("feishu_main", "ou_123", now_s);
+
+        grant.scopes = mvp::channel::feishu::api::FeishuGrantScopeSet::from_scopes([
+            "offline_access",
+            "docx:document:readonly",
+            "docx:document",
+            "im:message:readonly",
+        ]);
+
+        let recommendations = build_grant_recommendations("feishu_main", Some(&grant), now_s, &[]);
+
+        assert!(!recommendations.missing_doc_write_scope);
+        assert!(recommendations.missing_message_write_scope);
+        assert_eq!(
+            recommendations.auth_start_command.as_deref(),
+            Some("loong feishu auth start --account feishu_main --capability message-write")
         );
     }
 

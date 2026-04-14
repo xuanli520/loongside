@@ -5,16 +5,31 @@ use std::{
     path::PathBuf,
 };
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use serde::{Deserialize, Serialize};
 
 use crate::CliResult;
+use crate::mcp::McpConfig;
+use crate::secrets::DefaultSecretResolver;
+use loongclaw_contracts::{SecretRef, SecretResolver};
 
 use super::{
+    OnebotChannelConfig, QqbotChannelConfig, WeixinChannelConfig,
     audit::AuditConfig,
-    channels::{CliChannelConfig, FeishuChannelConfig, MatrixChannelConfig, TelegramChannelConfig},
+    channels::{
+        CliChannelConfig, DingtalkChannelConfig, DiscordChannelConfig, EmailChannelConfig,
+        FeishuChannelConfig, GoogleChatChannelConfig, ImessageChannelConfig, IrcChannelConfig,
+        LineChannelConfig, MatrixChannelConfig, MattermostChannelConfig,
+        NextcloudTalkChannelConfig, NostrChannelConfig, SignalChannelConfig, SlackChannelConfig,
+        SynologyChatChannelConfig, TeamsChannelConfig, TelegramChannelConfig, TlonChannelConfig,
+        TwitchChannelConfig, WebhookChannelConfig, WecomChannelConfig, WhatsappChannelConfig,
+    },
     conversation::ConversationConfig,
     feishu_integration::FeishuIntegrationConfig,
     memory::MemoryConfig,
+    outbound_http::OutboundHttpConfig,
     provider::{ProviderConfig, ProviderKind, ProviderProfileConfig},
     shared::{
         ConfigValidationIssue, ConfigValidationLocale, ConfigValidationSeverity,
@@ -22,11 +37,35 @@ use super::{
         format_config_validation_issues,
     },
     tools::{
-        DEFAULT_WEB_SEARCH_PROVIDER, ExternalSkillsConfig, ToolConfig,
-        WEB_SEARCH_BRAVE_API_KEY_ENV, WEB_SEARCH_PROVIDER_VALID_VALUES,
+        DEFAULT_WEB_SEARCH_PROVIDER, ExternalSkillsConfig, RuntimePluginsConfig, ToolConfig,
+        WEB_SEARCH_BRAVE_API_KEY_ENV, WEB_SEARCH_EXA_API_KEY_ENV, WEB_SEARCH_FIRECRAWL_API_KEY_ENV,
+        WEB_SEARCH_JINA_API_KEY_ENV, WEB_SEARCH_JINA_AUTH_TOKEN_ENV,
+        WEB_SEARCH_PERPLEXITY_API_KEY_ENV, WEB_SEARCH_PROVIDER_VALID_VALUES,
         WEB_SEARCH_TAVILY_API_KEY_ENV,
     },
 };
+use crate::secrets::{canonicalize_env_secret_reference, secret_ref_env_name};
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CONFIG_WRITE_FAILURE: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+pub struct ScopedTestConfigWriteFailure;
+
+#[cfg(test)]
+impl Drop for ScopedTestConfigWriteFailure {
+    fn drop(&mut self) {
+        TEST_CONFIG_WRITE_FAILURE.with(|flag| flag.set(false));
+    }
+}
+
+#[cfg(test)]
+pub fn inject_test_config_write_failure() -> ScopedTestConfigWriteFailure {
+    TEST_CONFIG_WRITE_FAILURE.with(|flag| flag.set(true));
+    ScopedTestConfigWriteFailure
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConfigValidationDiagnostic {
@@ -85,19 +124,97 @@ pub struct LoongClawConfig {
     #[serde(default)]
     pub matrix: MatrixChannelConfig,
     #[serde(default)]
+    pub wecom: WecomChannelConfig,
+    #[serde(default)]
+    pub weixin: WeixinChannelConfig,
+    #[serde(default)]
+    pub qqbot: QqbotChannelConfig,
+    #[serde(default)]
+    pub onebot: OnebotChannelConfig,
+    #[serde(default)]
+    pub discord: DiscordChannelConfig,
+    #[serde(default)]
+    pub line: LineChannelConfig,
+    #[serde(default)]
+    pub dingtalk: DingtalkChannelConfig,
+    #[serde(default)]
+    pub webhook: WebhookChannelConfig,
+    #[serde(default)]
+    pub slack: SlackChannelConfig,
+    #[serde(default)]
+    pub google_chat: GoogleChatChannelConfig,
+    #[serde(default)]
+    pub mattermost: MattermostChannelConfig,
+    #[serde(default)]
+    pub nextcloud_talk: NextcloudTalkChannelConfig,
+    #[serde(default)]
+    pub synology_chat: SynologyChatChannelConfig,
+    #[serde(default)]
+    pub irc: IrcChannelConfig,
+    #[serde(default)]
+    pub signal: SignalChannelConfig,
+    #[serde(default)]
+    pub twitch: TwitchChannelConfig,
+    #[serde(default)]
+    pub teams: TeamsChannelConfig,
+    #[serde(default)]
+    pub tlon: TlonChannelConfig,
+    #[serde(default)]
+    pub imessage: ImessageChannelConfig,
+    #[serde(default)]
+    pub nostr: NostrChannelConfig,
+    #[serde(default)]
+    pub whatsapp: WhatsappChannelConfig,
+    #[serde(default)]
+    pub email: EmailChannelConfig,
+    #[serde(default)]
     pub feishu_integration: FeishuIntegrationConfig,
     #[serde(default)]
     pub conversation: ConversationConfig,
+    #[serde(default, skip_serializing_if = "OutboundHttpConfig::is_default")]
+    pub outbound_http: OutboundHttpConfig,
     #[serde(default)]
     pub tools: ToolConfig,
     #[serde(default)]
     pub external_skills: ExternalSkillsConfig,
     #[serde(default)]
+    pub runtime_plugins: RuntimePluginsConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
+    #[serde(default)]
     pub memory: MemoryConfig,
     #[serde(default)]
     pub audit: AuditConfig,
+    #[serde(default, skip_serializing_if = "ControlPlaneConfig::is_default")]
+    pub control_plane: ControlPlaneConfig,
     #[serde(default)]
     pub acp: AcpConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ControlPlaneConfig {
+    #[serde(default)]
+    pub allow_remote: bool,
+    #[serde(default)]
+    pub shared_token: Option<SecretRef>,
+}
+
+impl ControlPlaneConfig {
+    fn is_default(config: &Self) -> bool {
+        *config == Self::default()
+    }
+
+    pub fn resolved_shared_token(&self) -> CliResult<Option<String>> {
+        let Some(secret_ref) = self.shared_token.as_ref() else {
+            return Ok(None);
+        };
+        let resolver = DefaultSecretResolver::default();
+        let resolved_value = resolver
+            .resolve(secret_ref)
+            .map_err(|error| format!("resolve control-plane shared token failed: {error}"))?;
+        let shared_token = resolved_value.map(|secret| secret.into_inner());
+        Ok(shared_token)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -970,27 +1087,397 @@ impl<'a> ProviderSelectorIndex<'a> {
     }
 }
 
-fn canonical_env_reference(env_name: &str) -> Option<String> {
-    let trimmed = env_name.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some(format!("${{{trimmed}}}"))
+fn canonicalize_provider_profile_for_encoding(profile: &mut ProviderProfileConfig) {
+    canonicalize_provider_secret_env_reference(
+        &mut profile.provider.api_key,
+        &mut profile.provider.api_key_env,
+    );
+    canonicalize_provider_secret_env_reference(
+        &mut profile.provider.oauth_access_token,
+        &mut profile.provider.oauth_access_token_env,
+    );
 }
 
-fn canonicalize_provider_profile_for_encoding(profile: &mut ProviderProfileConfig) {
-    if profile.provider.api_key.is_none()
-        && let Some(api_key_env) = profile.provider.api_key_env.as_deref()
-    {
-        profile.provider.api_key = canonical_env_reference(api_key_env);
+fn canonicalize_channel_configs_for_encoding(config: &mut LoongClawConfig) {
+    canonicalize_telegram_channel_for_encoding(&mut config.telegram);
+    canonicalize_feishu_channel_for_encoding(&mut config.feishu);
+    canonicalize_matrix_channel_for_encoding(&mut config.matrix);
+    canonicalize_wecom_channel_for_encoding(&mut config.wecom);
+    canonicalize_weixin_channel_for_encoding(&mut config.weixin);
+    canonicalize_qqbot_channel_for_encoding(&mut config.qqbot);
+    canonicalize_onebot_channel_for_encoding(&mut config.onebot);
+    canonicalize_discord_channel_for_encoding(&mut config.discord);
+    canonicalize_line_channel_for_encoding(&mut config.line);
+    canonicalize_dingtalk_channel_for_encoding(&mut config.dingtalk);
+    canonicalize_webhook_channel_for_encoding(&mut config.webhook);
+    canonicalize_email_channel_for_encoding(&mut config.email);
+    canonicalize_slack_channel_for_encoding(&mut config.slack);
+    canonicalize_google_chat_channel_for_encoding(&mut config.google_chat);
+    canonicalize_teams_channel_for_encoding(&mut config.teams);
+    canonicalize_tlon_channel_for_encoding(&mut config.tlon);
+    canonicalize_imessage_channel_for_encoding(&mut config.imessage);
+    canonicalize_nostr_channel_for_encoding(&mut config.nostr);
+    canonicalize_whatsapp_channel_for_encoding(&mut config.whatsapp);
+    canonicalize_mattermost_channel_for_encoding(&mut config.mattermost);
+    canonicalize_nextcloud_talk_channel_for_encoding(&mut config.nextcloud_talk);
+    canonicalize_synology_chat_channel_for_encoding(&mut config.synology_chat);
+    canonicalize_irc_channel_for_encoding(&mut config.irc);
+    canonicalize_twitch_channel_for_encoding(&mut config.twitch);
+}
+
+fn canonicalize_telegram_channel_for_encoding(config: &mut TelegramChannelConfig) {
+    canonicalize_env_secret_reference(&mut config.bot_token, &mut config.bot_token_env);
+    for account in config.accounts.values_mut() {
+        canonicalize_env_secret_reference(&mut account.bot_token, &mut account.bot_token_env);
     }
-    if profile.provider.oauth_access_token.is_none()
-        && let Some(oauth_env) = profile.provider.oauth_access_token_env.as_deref()
-    {
-        profile.provider.oauth_access_token = canonical_env_reference(oauth_env);
+}
+
+fn canonicalize_feishu_channel_for_encoding(config: &mut FeishuChannelConfig) {
+    canonicalize_env_secret_reference(&mut config.app_id, &mut config.app_id_env);
+    canonicalize_env_secret_reference(&mut config.app_secret, &mut config.app_secret_env);
+    canonicalize_env_secret_reference(
+        &mut config.verification_token,
+        &mut config.verification_token_env,
+    );
+    canonicalize_env_secret_reference(&mut config.encrypt_key, &mut config.encrypt_key_env);
+
+    for account in config.accounts.values_mut() {
+        canonicalize_env_secret_reference(&mut account.app_id, &mut account.app_id_env);
+        canonicalize_env_secret_reference(&mut account.app_secret, &mut account.app_secret_env);
+        canonicalize_env_secret_reference(
+            &mut account.verification_token,
+            &mut account.verification_token_env,
+        );
+        canonicalize_env_secret_reference(&mut account.encrypt_key, &mut account.encrypt_key_env);
     }
-    profile.provider.api_key_env = None;
-    profile.provider.oauth_access_token_env = None;
+}
+
+fn canonicalize_matrix_channel_for_encoding(config: &mut MatrixChannelConfig) {
+    canonicalize_env_secret_reference(&mut config.access_token, &mut config.access_token_env);
+    for account in config.accounts.values_mut() {
+        canonicalize_env_secret_reference(&mut account.access_token, &mut account.access_token_env);
+    }
+}
+
+fn canonicalize_wecom_channel_for_encoding(config: &mut WecomChannelConfig) {
+    canonicalize_env_secret_reference(&mut config.bot_id, &mut config.bot_id_env);
+    canonicalize_env_secret_reference(&mut config.secret, &mut config.secret_env);
+
+    for account in config.accounts.values_mut() {
+        canonicalize_env_secret_reference(&mut account.bot_id, &mut account.bot_id_env);
+        canonicalize_env_secret_reference(&mut account.secret, &mut account.secret_env);
+    }
+}
+
+fn canonicalize_weixin_channel_for_encoding(config: &mut WeixinChannelConfig) {
+    canonicalize_env_string_reference(&mut config.bridge_url, &mut config.bridge_url_env);
+    canonicalize_env_secret_reference(
+        &mut config.bridge_access_token,
+        &mut config.bridge_access_token_env,
+    );
+
+    for account in config.accounts.values_mut() {
+        canonicalize_env_string_reference(&mut account.bridge_url, &mut account.bridge_url_env);
+        canonicalize_env_secret_reference(
+            &mut account.bridge_access_token,
+            &mut account.bridge_access_token_env,
+        );
+    }
+}
+
+fn canonicalize_qqbot_channel_for_encoding(config: &mut QqbotChannelConfig) {
+    canonicalize_env_secret_reference(&mut config.app_id, &mut config.app_id_env);
+    canonicalize_env_secret_reference(&mut config.client_secret, &mut config.client_secret_env);
+
+    for account in config.accounts.values_mut() {
+        canonicalize_env_secret_reference(&mut account.app_id, &mut account.app_id_env);
+        canonicalize_env_secret_reference(
+            &mut account.client_secret,
+            &mut account.client_secret_env,
+        );
+    }
+}
+
+fn canonicalize_onebot_channel_for_encoding(config: &mut OnebotChannelConfig) {
+    canonicalize_env_string_reference(&mut config.websocket_url, &mut config.websocket_url_env);
+    canonicalize_env_secret_reference(&mut config.access_token, &mut config.access_token_env);
+
+    for account in config.accounts.values_mut() {
+        canonicalize_env_string_reference(
+            &mut account.websocket_url,
+            &mut account.websocket_url_env,
+        );
+        canonicalize_env_secret_reference(&mut account.access_token, &mut account.access_token_env);
+    }
+}
+
+fn canonicalize_discord_channel_for_encoding(config: &mut DiscordChannelConfig) {
+    canonicalize_env_secret_reference(&mut config.bot_token, &mut config.bot_token_env);
+
+    for account in config.accounts.values_mut() {
+        canonicalize_env_secret_reference(&mut account.bot_token, &mut account.bot_token_env);
+    }
+}
+
+fn canonicalize_line_channel_for_encoding(config: &mut LineChannelConfig) {
+    canonicalize_env_secret_reference(
+        &mut config.channel_access_token,
+        &mut config.channel_access_token_env,
+    );
+    canonicalize_env_secret_reference(&mut config.channel_secret, &mut config.channel_secret_env);
+
+    for account in config.accounts.values_mut() {
+        canonicalize_env_secret_reference(
+            &mut account.channel_access_token,
+            &mut account.channel_access_token_env,
+        );
+        canonicalize_env_secret_reference(
+            &mut account.channel_secret,
+            &mut account.channel_secret_env,
+        );
+    }
+}
+
+fn canonicalize_dingtalk_channel_for_encoding(config: &mut DingtalkChannelConfig) {
+    canonicalize_env_secret_reference(&mut config.webhook_url, &mut config.webhook_url_env);
+    canonicalize_env_secret_reference(&mut config.secret, &mut config.secret_env);
+
+    for account in config.accounts.values_mut() {
+        canonicalize_env_secret_reference(&mut account.webhook_url, &mut account.webhook_url_env);
+        canonicalize_env_secret_reference(&mut account.secret, &mut account.secret_env);
+    }
+}
+
+fn canonicalize_webhook_channel_for_encoding(config: &mut WebhookChannelConfig) {
+    canonicalize_env_secret_reference(&mut config.endpoint_url, &mut config.endpoint_url_env);
+    canonicalize_env_secret_reference(&mut config.auth_token, &mut config.auth_token_env);
+    canonicalize_env_secret_reference(&mut config.signing_secret, &mut config.signing_secret_env);
+
+    for account in config.accounts.values_mut() {
+        canonicalize_env_secret_reference(&mut account.endpoint_url, &mut account.endpoint_url_env);
+        canonicalize_env_secret_reference(&mut account.auth_token, &mut account.auth_token_env);
+        canonicalize_env_secret_reference(
+            &mut account.signing_secret,
+            &mut account.signing_secret_env,
+        );
+    }
+}
+
+fn canonicalize_email_channel_for_encoding(config: &mut EmailChannelConfig) {
+    canonicalize_env_secret_reference(&mut config.smtp_username, &mut config.smtp_username_env);
+    canonicalize_env_secret_reference(&mut config.smtp_password, &mut config.smtp_password_env);
+    canonicalize_env_secret_reference(&mut config.imap_username, &mut config.imap_username_env);
+    canonicalize_env_secret_reference(&mut config.imap_password, &mut config.imap_password_env);
+
+    for account in config.accounts.values_mut() {
+        canonicalize_env_secret_reference(
+            &mut account.smtp_username,
+            &mut account.smtp_username_env,
+        );
+        canonicalize_env_secret_reference(
+            &mut account.smtp_password,
+            &mut account.smtp_password_env,
+        );
+        canonicalize_env_secret_reference(
+            &mut account.imap_username,
+            &mut account.imap_username_env,
+        );
+        canonicalize_env_secret_reference(
+            &mut account.imap_password,
+            &mut account.imap_password_env,
+        );
+    }
+}
+
+fn canonicalize_slack_channel_for_encoding(config: &mut SlackChannelConfig) {
+    canonicalize_env_secret_reference(&mut config.bot_token, &mut config.bot_token_env);
+
+    for account in config.accounts.values_mut() {
+        canonicalize_env_secret_reference(&mut account.bot_token, &mut account.bot_token_env);
+    }
+}
+
+fn canonicalize_google_chat_channel_for_encoding(config: &mut GoogleChatChannelConfig) {
+    canonicalize_env_secret_reference(&mut config.webhook_url, &mut config.webhook_url_env);
+
+    for account in config.accounts.values_mut() {
+        canonicalize_env_secret_reference(&mut account.webhook_url, &mut account.webhook_url_env);
+    }
+}
+
+fn canonicalize_teams_channel_for_encoding(config: &mut TeamsChannelConfig) {
+    canonicalize_env_secret_reference(&mut config.webhook_url, &mut config.webhook_url_env);
+    canonicalize_env_secret_reference(&mut config.app_id, &mut config.app_id_env);
+    canonicalize_env_secret_reference(&mut config.app_password, &mut config.app_password_env);
+
+    for account in config.accounts.values_mut() {
+        canonicalize_env_secret_reference(&mut account.webhook_url, &mut account.webhook_url_env);
+        canonicalize_env_secret_reference(&mut account.app_id, &mut account.app_id_env);
+        canonicalize_env_secret_reference(&mut account.app_password, &mut account.app_password_env);
+    }
+}
+
+fn canonicalize_tlon_channel_for_encoding(config: &mut TlonChannelConfig) {
+    canonicalize_optional_env_name(&mut config.ship_env);
+    canonicalize_optional_env_name(&mut config.url_env);
+    canonicalize_env_secret_reference(&mut config.code, &mut config.code_env);
+
+    for account in config.accounts.values_mut() {
+        canonicalize_optional_env_name(&mut account.ship_env);
+        canonicalize_optional_env_name(&mut account.url_env);
+        canonicalize_env_secret_reference(&mut account.code, &mut account.code_env);
+    }
+}
+
+fn canonicalize_imessage_channel_for_encoding(config: &mut ImessageChannelConfig) {
+    canonicalize_env_secret_reference(&mut config.bridge_token, &mut config.bridge_token_env);
+
+    for account in config.accounts.values_mut() {
+        canonicalize_env_secret_reference(&mut account.bridge_token, &mut account.bridge_token_env);
+    }
+}
+
+fn canonicalize_nostr_channel_for_encoding(config: &mut NostrChannelConfig) {
+    canonicalize_optional_env_name(&mut config.relay_urls_env);
+    canonicalize_env_secret_reference(&mut config.private_key, &mut config.private_key_env);
+
+    for account in config.accounts.values_mut() {
+        canonicalize_optional_env_name(&mut account.relay_urls_env);
+        canonicalize_env_secret_reference(&mut account.private_key, &mut account.private_key_env);
+    }
+}
+
+fn canonicalize_whatsapp_channel_for_encoding(config: &mut WhatsappChannelConfig) {
+    canonicalize_env_secret_reference(&mut config.access_token, &mut config.access_token_env);
+    canonicalize_env_secret_reference(&mut config.verify_token, &mut config.verify_token_env);
+    canonicalize_env_secret_reference(&mut config.app_secret, &mut config.app_secret_env);
+
+    for account in config.accounts.values_mut() {
+        canonicalize_env_secret_reference(&mut account.access_token, &mut account.access_token_env);
+        canonicalize_env_secret_reference(&mut account.verify_token, &mut account.verify_token_env);
+        canonicalize_env_secret_reference(&mut account.app_secret, &mut account.app_secret_env);
+    }
+}
+
+fn canonicalize_mattermost_channel_for_encoding(config: &mut MattermostChannelConfig) {
+    canonicalize_env_secret_reference(&mut config.bot_token, &mut config.bot_token_env);
+
+    for account in config.accounts.values_mut() {
+        canonicalize_env_secret_reference(&mut account.bot_token, &mut account.bot_token_env);
+    }
+}
+
+fn canonicalize_nextcloud_talk_channel_for_encoding(config: &mut NextcloudTalkChannelConfig) {
+    canonicalize_env_secret_reference(&mut config.shared_secret, &mut config.shared_secret_env);
+
+    for account in config.accounts.values_mut() {
+        canonicalize_env_secret_reference(
+            &mut account.shared_secret,
+            &mut account.shared_secret_env,
+        );
+    }
+}
+
+fn canonicalize_synology_chat_channel_for_encoding(config: &mut SynologyChatChannelConfig) {
+    canonicalize_env_secret_reference(&mut config.token, &mut config.token_env);
+    canonicalize_env_secret_reference(&mut config.incoming_url, &mut config.incoming_url_env);
+
+    for account in config.accounts.values_mut() {
+        canonicalize_env_secret_reference(&mut account.token, &mut account.token_env);
+        canonicalize_env_secret_reference(&mut account.incoming_url, &mut account.incoming_url_env);
+    }
+}
+
+fn canonicalize_irc_channel_for_encoding(config: &mut IrcChannelConfig) {
+    canonicalize_optional_env_name(&mut config.server_env);
+    canonicalize_optional_env_name(&mut config.nickname_env);
+    canonicalize_env_secret_reference(&mut config.password, &mut config.password_env);
+
+    for account in config.accounts.values_mut() {
+        canonicalize_optional_env_name(&mut account.server_env);
+        canonicalize_optional_env_name(&mut account.nickname_env);
+        canonicalize_env_secret_reference(&mut account.password, &mut account.password_env);
+    }
+}
+
+fn canonicalize_twitch_channel_for_encoding(config: &mut TwitchChannelConfig) {
+    canonicalize_env_secret_reference(&mut config.access_token, &mut config.access_token_env);
+    for account in config.accounts.values_mut() {
+        canonicalize_env_secret_reference(&mut account.access_token, &mut account.access_token_env);
+    }
+}
+
+fn canonicalize_optional_env_name(env_name: &mut Option<String>) {
+    let normalized_env_name = env_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    *env_name = normalized_env_name;
+}
+
+fn canonicalize_provider_secret_env_reference(
+    inline_secret: &mut Option<loongclaw_contracts::SecretRef>,
+    env_name: &mut Option<String>,
+) {
+    if let Some(explicit_env_name) = secret_ref_env_name(inline_secret.as_ref()) {
+        *inline_secret = Some(loongclaw_contracts::SecretRef::Env {
+            env: explicit_env_name,
+        });
+        *env_name = None;
+        return;
+    }
+
+    if inline_secret
+        .as_ref()
+        .is_some_and(loongclaw_contracts::SecretRef::is_configured)
+    {
+        *env_name = None;
+        return;
+    }
+
+    let normalized_env_name = env_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    if let Some(normalized_env_name) = normalized_env_name {
+        *inline_secret = Some(loongclaw_contracts::SecretRef::Env {
+            env: normalized_env_name,
+        });
+    }
+    *env_name = None;
+}
+
+fn canonicalize_env_string_reference(value: &mut Option<String>, env_name: &mut Option<String>) {
+    let explicit_env_name = value
+        .as_deref()
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+        .and_then(|raw| {
+            let secret_ref = loongclaw_contracts::SecretRef::Inline(raw.to_owned());
+            secret_ref_env_name(Some(&secret_ref))
+        });
+    let Some(explicit_env_name) = explicit_env_name else {
+        return;
+    };
+
+    let configured_env_name = env_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|configured| !configured.is_empty());
+
+    match configured_env_name {
+        None => {
+            *env_name = Some(explicit_env_name);
+            *value = None;
+        }
+        Some(configured_env_name) if configured_env_name == explicit_env_name => {
+            *env_name = Some(explicit_env_name);
+            *value = None;
+        }
+        Some(_) => {}
+    }
 }
 
 fn normalize_acp_agent_id(raw: &str) -> Option<String> {
@@ -1086,10 +1573,11 @@ impl LoongClawConfig {
         if let Some(report) = selection_report {
             issues.extend(report.validation_issues());
         }
-        issues.extend(super::channels::collect_channel_validation_issues(self));
+        issues.extend(crate::channel::collect_channel_validation_issues(self));
         issues.extend(self.feishu_integration.validate());
         issues.extend(self.memory.validate());
         issues.extend(self.tools.validate());
+        issues.extend(self.runtime_plugins.validate());
         issues
     }
 
@@ -1135,11 +1623,11 @@ impl LoongClawConfig {
     }
 
     pub fn enabled_channel_ids(&self) -> Vec<String> {
-        super::channels::enabled_channel_ids(self)
+        crate::channel::enabled_channel_ids(self, None)
     }
 
     pub fn enabled_service_channel_ids(&self) -> Vec<String> {
-        super::channels::enabled_service_channel_ids(self)
+        crate::channel::enabled_channel_ids(self, Some(crate::channel::ChannelRuntimeKind::Service))
     }
 
     pub fn active_provider_id(&self) -> Option<&str> {
@@ -1431,6 +1919,7 @@ impl LoongClawConfig {
             .last_provider
             .as_deref()
             .and_then(normalize_provider_profile_id);
+        canonicalize_channel_configs_for_encoding(&mut cloned);
         cloned
     }
 }
@@ -1544,8 +2033,9 @@ pub fn load(path: Option<&str>) -> CliResult<(PathBuf, LoongClawConfig)> {
     let config_path = path.map(expand_path).unwrap_or_else(default_config_path);
     let raw = fs::read_to_string(&config_path).map_err(|error| {
         format!(
-            "failed to read config {}: {error}. run `loongclaw onboard` first",
-            config_path.display()
+            "failed to read config {}: {error}. run `{} onboard` first",
+            config_path.display(),
+            crate::config::active_cli_command_name(),
         )
     })?;
     parse_toml_config(&raw).map(|config| (config_path, config))
@@ -1572,8 +2062,9 @@ pub fn validate_file_with_locale(
     let config_path = path.map(expand_path).unwrap_or_else(default_config_path);
     let raw = fs::read_to_string(&config_path).map_err(|error| {
         format!(
-            "failed to read config {}: {error}. run `loongclaw onboard` first",
-            config_path.display()
+            "failed to read config {}: {error}. run `{} onboard` first",
+            config_path.display(),
+            crate::config::active_cli_command_name(),
         )
     })?;
     let (config, selection_report) = parse_toml_config_components(&raw)?;
@@ -1632,6 +2123,13 @@ pub fn write(path: Option<&str>, config: &LoongClawConfig, force: bool) -> CliRe
     }
 
     let encoded = encode_toml_config(config)?;
+    #[cfg(any(test, debug_assertions))]
+    if config_write_failure_injected(&output_path) {
+        return Err(format!(
+            "failed to write config file {}: injected test failure",
+            output_path.display()
+        ));
+    }
     fs::write(&output_path, encoded).map_err(|error| {
         format!(
             "failed to write config file {}: {error}",
@@ -1651,6 +2149,22 @@ pub fn default_config_path() -> PathBuf {
 
 pub fn default_loongclaw_home() -> PathBuf {
     shared_default_loongclaw_home()
+}
+
+#[cfg(any(test, debug_assertions))]
+fn config_write_failure_injected(output_path: &Path) -> bool {
+    #[cfg(test)]
+    if TEST_CONFIG_WRITE_FAILURE.with(Cell::get) {
+        return true;
+    }
+
+    let configured_path = std::env::var_os("LOONGCLAW_TEST_FAIL_CONFIG_WRITE_PATH");
+    let Some(configured_path) = configured_path else {
+        return false;
+    };
+
+    let configured_path = PathBuf::from(configured_path);
+    configured_path == output_path
 }
 
 #[cfg(feature = "config-toml")]
@@ -1689,9 +2203,9 @@ fn encode_toml_config(_config: &LoongClawConfig) -> CliResult<String> {
 
 fn template_secret_usage_comment() -> &'static str {
     "# Secret configuration notes:\n\
-# - Preferred provider credential form: `providers.<profile_id>.api_key = \"${PROVIDER_API_KEY}\"`.\n\
-# - `providers.<profile_id>.api_key` also accepts direct literals and explicit env refs like `$VAR`, `env:VAR`, and `%VAR%`.\n\
-# - Legacy `*_env` fields stay supported for compatibility, but new configs should prefer the non-`_env` fields.\n\
+# - Preferred provider credential form: `providers.<profile_id>.api_key = { env = \"PROVIDER_API_KEY\" }`.\n\
+# - `providers.<profile_id>.api_key` still accepts direct literals and explicit env refs like `$VAR`, `env:VAR`, and `%VAR%`.\n\
+# - Legacy `*_env` provider fields still load, but LoongClaw now writes provider env refs back into the main secret field.\n\
 \n"
 }
 
@@ -1702,6 +2216,10 @@ fn template_web_search_usage_comment() -> String {
 # - The default provider is `{DEFAULT_WEB_SEARCH_PROVIDER}`.\n\
 # - Brave credentials can use `tools.web_search.brave_api_key = \"${{{WEB_SEARCH_BRAVE_API_KEY_ENV}}}\"` or the `{WEB_SEARCH_BRAVE_API_KEY_ENV}` environment variable.\n\
 # - Tavily credentials can use `tools.web_search.tavily_api_key = \"${{{WEB_SEARCH_TAVILY_API_KEY_ENV}}}\"` or the `{WEB_SEARCH_TAVILY_API_KEY_ENV}` environment variable.\n\
+# - Perplexity credentials can use `tools.web_search.perplexity_api_key = \"${{{WEB_SEARCH_PERPLEXITY_API_KEY_ENV}}}\"` or the `{WEB_SEARCH_PERPLEXITY_API_KEY_ENV}` environment variable.\n\
+# - Exa credentials can use `tools.web_search.exa_api_key = \"${{{WEB_SEARCH_EXA_API_KEY_ENV}}}\"` or the `{WEB_SEARCH_EXA_API_KEY_ENV}` environment variable.\n\
+# - Firecrawl credentials can use `tools.web_search.firecrawl_api_key = \"${{{WEB_SEARCH_FIRECRAWL_API_KEY_ENV}}}\"` or the `{WEB_SEARCH_FIRECRAWL_API_KEY_ENV}` environment variable.\n\
+# - Jina credentials can use `tools.web_search.jina_api_key = \"${{{WEB_SEARCH_JINA_API_KEY_ENV}}}\"` or the `{WEB_SEARCH_JINA_API_KEY_ENV}` / `{WEB_SEARCH_JINA_AUTH_TOKEN_ENV}` environment variable.\n\
 \n"
     )
 }
@@ -1710,6 +2228,11 @@ fn template_web_search_usage_comment() -> String {
 mod tests {
     use super::*;
     use crate::config::ProviderKind;
+    use crate::config::{
+        ONEBOT_ACCESS_TOKEN_ENV, ONEBOT_WEBSOCKET_URL_ENV, QQBOT_APP_ID_ENV,
+        QQBOT_CLIENT_SECRET_ENV, WEIXIN_BRIDGE_ACCESS_TOKEN_ENV, WEIXIN_BRIDGE_URL_ENV,
+    };
+    use loongclaw_contracts::SecretRef;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn unique_config_path(prefix: &str) -> PathBuf {
@@ -1772,7 +2295,7 @@ bot_token_env = "123456789:telegram-inline-secret-literal"
 
     #[test]
     #[cfg(feature = "config-toml")]
-    fn write_template_prefers_generic_provider_api_key_reference_example() {
+    fn write_template_prefers_generic_provider_api_key_env_secret_ref_example() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock before unix epoch")
@@ -1785,8 +2308,8 @@ bot_token_env = "123456789:telegram-inline-secret-literal"
             .expect("write template should succeed");
 
         let raw = std::fs::read_to_string(&config_path).expect("read template");
-        assert!(raw.contains("providers.<profile_id>.api_key = \"${PROVIDER_API_KEY}\""));
-        assert!(!raw.contains("provider.api_key_env = \"PROVIDER_API_KEY\""));
+        assert!(raw.contains("providers.<profile_id>.api_key = { env = \"PROVIDER_API_KEY\" }"));
+        assert!(!raw.contains("providers.<profile_id>.api_key_env = \"PROVIDER_API_KEY\""));
 
         std::fs::remove_file(&config_path).ok();
         std::fs::remove_dir_all(&temp_dir).ok();
@@ -1812,6 +2335,11 @@ bot_token_env = "123456789:telegram-inline-secret-literal"
         assert!(raw.contains(WEB_SEARCH_PROVIDER_VALID_VALUES));
         assert!(raw.contains(WEB_SEARCH_BRAVE_API_KEY_ENV));
         assert!(raw.contains(WEB_SEARCH_TAVILY_API_KEY_ENV));
+        assert!(raw.contains(WEB_SEARCH_PERPLEXITY_API_KEY_ENV));
+        assert!(raw.contains(WEB_SEARCH_EXA_API_KEY_ENV));
+        assert!(raw.contains(WEB_SEARCH_FIRECRAWL_API_KEY_ENV));
+        assert!(raw.contains(WEB_SEARCH_JINA_API_KEY_ENV));
+        assert!(raw.contains(WEB_SEARCH_JINA_AUTH_TOKEN_ENV));
 
         std::fs::remove_file(&config_path).ok();
         std::fs::remove_dir_all(&temp_dir).ok();
@@ -1895,6 +2423,45 @@ bot_token_env = "123456789:telegram-inline-secret-literal"
 
     #[test]
     #[cfg(feature = "config-toml")]
+    fn write_template_includes_plugin_backed_bridge_channel_defaults() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let temp_dir =
+            std::env::temp_dir().join(format!("loongclaw-template-plugin-bridges-{unique}"));
+        std::fs::create_dir_all(&temp_dir).expect("create temp directory");
+        let config_path = temp_dir.join("config.toml");
+
+        write_template(Some(config_path.to_string_lossy().as_ref()), true)
+            .expect("write template should succeed");
+
+        let raw = std::fs::read_to_string(&config_path).expect("read template");
+
+        assert!(raw.contains("[weixin]"));
+        assert!(raw.contains(format!("bridge_url_env = \"{WEIXIN_BRIDGE_URL_ENV}\"").as_str()));
+        assert!(raw.contains(
+            format!("bridge_access_token_env = \"{WEIXIN_BRIDGE_ACCESS_TOKEN_ENV}\"").as_str()
+        ));
+
+        assert!(raw.contains("[qqbot]"));
+        assert!(raw.contains(format!("app_id_env = \"{QQBOT_APP_ID_ENV}\"").as_str()));
+        assert!(
+            raw.contains(format!("client_secret_env = \"{QQBOT_CLIENT_SECRET_ENV}\"").as_str())
+        );
+
+        assert!(raw.contains("[onebot]"));
+        assert!(
+            raw.contains(format!("websocket_url_env = \"{ONEBOT_WEBSOCKET_URL_ENV}\"").as_str())
+        );
+        assert!(raw.contains(format!("access_token_env = \"{ONEBOT_ACCESS_TOKEN_ENV}\"").as_str()));
+
+        std::fs::remove_file(&config_path).ok();
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    #[cfg(feature = "config-toml")]
     fn validate_file_returns_structured_diagnostics() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1938,6 +2505,38 @@ api_key_env = "$OPENAI_API_KEY"
             Some(&"config.env_pointer.dollar_prefix".to_owned())
         );
         assert!(diagnostics[0].message.contains("without `$`"));
+
+        std::fs::remove_file(&config_path).ok();
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    #[cfg(feature = "config-toml")]
+    fn validate_file_returns_typed_secret_ref_env_diagnostics() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let temp_dir =
+            std::env::temp_dir().join(format!("loongclaw-config-typed-env-diagnostics-{unique}"));
+        std::fs::create_dir_all(&temp_dir).expect("create temp directory");
+        let config_path = temp_dir.join("config.toml");
+        let raw = r#"
+[provider]
+api_key = { env = "$OPENAI_API_KEY" }
+"#;
+        std::fs::write(&config_path, raw).expect("write test config");
+
+        let (_, diagnostics) = validate_file(Some(config_path.to_string_lossy().as_ref()))
+            .expect("validate_file should parse and return diagnostics");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].severity, "error");
+        assert_eq!(diagnostics[0].code, "config.env_pointer.dollar_prefix");
+        assert_eq!(diagnostics[0].field_path, "providers.openai.api_key.env");
+        assert!(
+            diagnostics[0].message.contains("without `$`"),
+            "expected dollar-prefix guidance for typed env refs"
+        );
 
         std::fs::remove_file(&config_path).ok();
         std::fs::remove_dir_all(&temp_dir).ok();
@@ -2032,7 +2631,7 @@ api_key_env = "$OPENAI_API_KEY"
         let path_string = missing.display().to_string();
 
         let error = load(Some(&path_string)).expect_err("missing config should fail");
-        assert!(error.contains("run `loongclaw onboard` first"));
+        assert!(error.contains("run `loong onboard` first"));
     }
 
     #[test]
@@ -2122,7 +2721,7 @@ api_key_env = "{secret}"
         let path_string = path.display().to_string();
         let mut config = LoongClawConfig::default();
         config.cli.prompt_pack_id = Some("loongclaw-core-v1".to_owned());
-        config.cli.personality = Some(crate::prompt::PromptPersonality::AutonomousExecutor);
+        config.cli.personality = Some(crate::prompt::PromptPersonality::CyberRadical);
 
         write(Some(&path_string), &config, true).expect("config write should pass");
         let (_, loaded) = load(Some(&path_string)).expect("config load should pass");
@@ -2133,7 +2732,53 @@ api_key_env = "{secret}"
         );
         assert_eq!(
             loaded.cli.personality,
-            Some(crate::prompt::PromptPersonality::AutonomousExecutor)
+            Some(crate::prompt::PromptPersonality::CyberRadical)
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    #[cfg(feature = "config-toml")]
+    fn load_accepts_legacy_prompt_personality_ids() {
+        let path = unique_config_path("loongclaw-legacy-prompt-config");
+        let path_string = path.display().to_string();
+        let mut config = LoongClawConfig::default();
+        config.cli.prompt_pack_id = Some("loongclaw-core-v1".to_owned());
+        config.cli.personality = Some(crate::prompt::PromptPersonality::Hermit);
+
+        write(Some(&path_string), &config, true).expect("config write should pass");
+
+        let raw = fs::read_to_string(&path).expect("read config text");
+        let serialized_personality = "personality = \"hermit\"";
+        let legacy_personality = "personality = \"friendly_collab\"";
+        let fixture_contains_serialized_personality = raw.contains(serialized_personality);
+
+        assert!(
+            fixture_contains_serialized_personality,
+            "serialized personality fixture changed unexpectedly: {raw}"
+        );
+
+        let legacy_raw = raw.replacen(serialized_personality, legacy_personality, 1);
+        let replacement_happened = legacy_raw != raw;
+        let legacy_personality_written = legacy_raw.contains(legacy_personality);
+
+        assert!(
+            replacement_happened,
+            "fixture rewrite failed; serialized personality format changed"
+        );
+        assert!(
+            legacy_personality_written,
+            "fixture rewrite did not persist the legacy personality alias"
+        );
+
+        fs::write(&path, legacy_raw).expect("write legacy config text");
+
+        let (_, loaded) = load(Some(&path_string)).expect("config load should pass");
+
+        assert_eq!(
+            loaded.cli.personality,
+            Some(crate::prompt::PromptPersonality::Hermit)
         );
 
         let _ = fs::remove_file(path);
@@ -2161,6 +2806,67 @@ api_key_env = "{secret}"
             loaded.memory.profile_note.as_deref(),
             Some("Imported NanoBot preferences")
         );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    #[cfg(feature = "config-toml")]
+    fn write_persists_typed_personalization_metadata() {
+        let path = unique_config_path("loongclaw-personalization-config");
+        let path_string = path.display().to_string();
+        let mut config = LoongClawConfig::default();
+        let personalization = crate::config::PersonalizationConfig {
+            preferred_name: Some("Chum".to_owned()),
+            response_density: Some(crate::config::ResponseDensity::Thorough),
+            initiative_level: Some(crate::config::InitiativeLevel::HighInitiative),
+            standing_boundaries: Some("Ask before destructive actions.".to_owned()),
+            timezone: Some("Asia/Shanghai".to_owned()),
+            locale: Some("zh-CN".to_owned()),
+            prompt_state: crate::config::PersonalizationPromptState::Configured,
+            schema_version: 1,
+            updated_at_epoch_seconds: Some(1_775_095_200),
+        };
+
+        config.memory.profile = crate::config::MemoryProfile::ProfilePlusWindow;
+        config.memory.personalization = Some(personalization);
+
+        write(Some(&path_string), &config, true).expect("config write should pass");
+
+        let load_result = load(Some(&path_string));
+        let (_, loaded) = load_result.expect("config load should pass");
+        let loaded_personalization = loaded
+            .memory
+            .personalization
+            .expect("typed personalization should persist");
+        let preferred_name = loaded_personalization.preferred_name.as_deref();
+        let response_density = loaded_personalization.response_density;
+        let initiative_level = loaded_personalization.initiative_level;
+        let standing_boundaries = loaded_personalization.standing_boundaries.as_deref();
+        let timezone = loaded_personalization.timezone.as_deref();
+        let locale = loaded_personalization.locale.as_deref();
+        let prompt_state = loaded_personalization.prompt_state;
+        let schema_version = loaded_personalization.schema_version;
+        let updated_at_epoch_seconds = loaded_personalization.updated_at_epoch_seconds;
+
+        assert_eq!(preferred_name, Some("Chum"));
+        assert_eq!(
+            response_density,
+            Some(crate::config::ResponseDensity::Thorough)
+        );
+        assert_eq!(
+            initiative_level,
+            Some(crate::config::InitiativeLevel::HighInitiative)
+        );
+        assert_eq!(standing_boundaries, Some("Ask before destructive actions."));
+        assert_eq!(timezone, Some("Asia/Shanghai"));
+        assert_eq!(locale, Some("zh-CN"));
+        assert_eq!(
+            prompt_state,
+            crate::config::PersonalizationPromptState::Configured
+        );
+        assert_eq!(schema_version, 1);
+        assert_eq!(updated_at_epoch_seconds, Some(1_775_095_200));
 
         let _ = fs::remove_file(path);
     }
@@ -2414,7 +3120,7 @@ model = "gpt-5"
 
     #[test]
     #[cfg(feature = "config-toml")]
-    fn write_default_config_omits_legacy_provider_api_key_env_field() {
+    fn write_default_config_does_not_eagerly_persist_provider_api_key_env_field() {
         let path = unique_config_path("loongclaw-config-runtime-default");
         let path_string = path.display().to_string();
 
@@ -2423,6 +3129,7 @@ model = "gpt-5"
 
         let raw = fs::read_to_string(&path).expect("read written config");
         assert!(!raw.contains("api_key_env = \"OPENAI_API_KEY\""));
+        assert!(!raw.contains("api_key = \"${OPENAI_API_KEY}\""));
 
         let _ = fs::remove_file(path);
     }
@@ -2467,7 +3174,7 @@ model = "gpt-5"
 
     #[test]
     #[cfg(feature = "config-toml")]
-    fn write_canonicalizes_provider_env_pointers_to_inline_env_references() {
+    fn write_persists_provider_env_pointers_as_secret_refs() {
         let path = unique_config_path("loongclaw-config-runtime-canonical-provider-env");
         let path_string = path.display().to_string();
         let mut config = LoongClawConfig::default();
@@ -2476,8 +3183,218 @@ model = "gpt-5"
         write(Some(&path_string), &config, true).expect("config write should pass");
 
         let raw = fs::read_to_string(&path).expect("read written config");
-        assert!(raw.contains("api_key = \"${OPENAI_API_KEY}\""));
-        assert!(!raw.contains("api_key_env = "));
+        assert!(raw.contains("api_key"));
+        assert!(raw.contains("env = \"OPENAI_API_KEY\""));
+        assert!(!raw.contains("api_key_env = \"OPENAI_API_KEY\""));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    #[cfg(feature = "config-toml")]
+    fn write_migrates_inline_provider_env_references_to_secret_refs() {
+        let path = unique_config_path("loongclaw-config-runtime-inline-provider-env");
+        let path_string = path.display().to_string();
+        let mut config = LoongClawConfig::default();
+        let inline_references = [
+            "${TEAM_OPENAI_KEY}",
+            "$TEAM_OPENAI_KEY",
+            "env:TEAM_OPENAI_KEY",
+            "%TEAM_OPENAI_KEY%",
+        ];
+
+        for inline_reference in inline_references {
+            config.provider.api_key = Some(SecretRef::Inline(inline_reference.to_owned()));
+
+            write(Some(&path_string), &config, true).expect("config write should pass");
+
+            let raw = fs::read_to_string(&path).expect("read written config");
+            assert!(
+                raw.contains("api_key") && raw.contains("env = \"TEAM_OPENAI_KEY\""),
+                "expected api_key secret-ref writeback for {inline_reference}"
+            );
+            assert!(
+                !raw.contains(inline_reference),
+                "expected inline env reference removal for {inline_reference}"
+            );
+        }
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    #[cfg(feature = "config-toml")]
+    fn write_canonicalizes_matching_provider_env_name_fields_into_secret_refs() {
+        let path = unique_config_path("loongclaw-config-runtime-trimmed-provider-env");
+        let path_string = path.display().to_string();
+        let mut config = LoongClawConfig::default();
+        config.provider.api_key = Some(SecretRef::Inline("${TEAM_OPENAI_KEY}".to_owned()));
+        config.provider.api_key_env = Some(" TEAM_OPENAI_KEY ".to_owned());
+
+        write(Some(&path_string), &config, true).expect("config write should pass");
+
+        let raw = fs::read_to_string(&path).expect("read written config");
+        assert!(raw.contains("api_key"));
+        assert!(raw.contains("env = \"TEAM_OPENAI_KEY\""));
+        assert!(!raw.contains("api_key_env = \"TEAM_OPENAI_KEY\""));
+        assert!(!raw.contains("api_key = \"${TEAM_OPENAI_KEY}\""));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    #[cfg(feature = "config-toml")]
+    fn write_canonicalizes_matching_wecom_env_name_fields() {
+        let path = unique_config_path("loongclaw-config-runtime-trimmed-wecom-env");
+        let path_string = path.display().to_string();
+        let mut config = LoongClawConfig::default();
+        config.wecom.bot_id = Some(SecretRef::Inline("${WECOM_BOT_ID}".to_owned()));
+        config.wecom.bot_id_env = Some(" WECOM_BOT_ID ".to_owned());
+        config.wecom.secret = Some(SecretRef::Inline("${WECOM_SECRET}".to_owned()));
+        config.wecom.secret_env = Some(" WECOM_SECRET ".to_owned());
+
+        write(Some(&path_string), &config, true).expect("config write should pass");
+
+        let raw = fs::read_to_string(&path).expect("read written config");
+        assert!(raw.contains("bot_id_env = \"WECOM_BOT_ID\""));
+        assert!(raw.contains("secret_env = \"WECOM_SECRET\""));
+        assert!(!raw.contains("bot_id_env = \" WECOM_BOT_ID \""));
+        assert!(!raw.contains("secret_env = \" WECOM_SECRET \""));
+        assert!(!raw.contains("bot_id = \"${WECOM_BOT_ID}\""));
+        assert!(!raw.contains("secret = \"${WECOM_SECRET}\""));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    #[cfg(feature = "config-toml")]
+    fn write_canonicalizes_matching_config_backed_channel_env_name_fields() {
+        let path = unique_config_path("loongclaw-config-runtime-trimmed-config-backed-env");
+        let path_string = path.display().to_string();
+        let mut config = LoongClawConfig::default();
+        let mut ops_nostr_account = crate::config::NostrAccountConfig::default();
+
+        config.discord.bot_token = Some(SecretRef::Inline("${DISCORD_BOT_TOKEN}".to_owned()));
+        config.discord.bot_token_env = Some(" DISCORD_BOT_TOKEN ".to_owned());
+
+        config.slack.bot_token = Some(SecretRef::Inline("${SLACK_BOT_TOKEN}".to_owned()));
+        config.slack.bot_token_env = Some(" SLACK_BOT_TOKEN ".to_owned());
+
+        config.nostr.relay_urls_env = Some(" NOSTR_RELAY_URLS ".to_owned());
+        config.nostr.private_key = Some(SecretRef::Inline("${NOSTR_PRIVATE_KEY}".to_owned()));
+        config.nostr.private_key_env = Some(" NOSTR_PRIVATE_KEY ".to_owned());
+
+        ops_nostr_account.relay_urls_env = Some(" OPS_NOSTR_RELAY_URLS ".to_owned());
+        ops_nostr_account.private_key =
+            Some(SecretRef::Inline("${OPS_NOSTR_PRIVATE_KEY}".to_owned()));
+        ops_nostr_account.private_key_env = Some(" OPS_NOSTR_PRIVATE_KEY ".to_owned());
+        config
+            .nostr
+            .accounts
+            .insert("ops".to_owned(), ops_nostr_account);
+
+        config.whatsapp.access_token =
+            Some(SecretRef::Inline("${WHATSAPP_ACCESS_TOKEN}".to_owned()));
+        config.whatsapp.access_token_env = Some(" WHATSAPP_ACCESS_TOKEN ".to_owned());
+        config.whatsapp.verify_token =
+            Some(SecretRef::Inline("${WHATSAPP_VERIFY_TOKEN}".to_owned()));
+        config.whatsapp.verify_token_env = Some(" WHATSAPP_VERIFY_TOKEN ".to_owned());
+        config.whatsapp.app_secret = Some(SecretRef::Inline("${WHATSAPP_APP_SECRET}".to_owned()));
+        config.whatsapp.app_secret_env = Some(" WHATSAPP_APP_SECRET ".to_owned());
+
+        write(Some(&path_string), &config, true).expect("config write should pass");
+
+        let raw = fs::read_to_string(&path).expect("read written config");
+
+        assert!(raw.contains("bot_token_env = \"DISCORD_BOT_TOKEN\""));
+        assert!(raw.contains("bot_token_env = \"SLACK_BOT_TOKEN\""));
+        assert!(raw.contains("relay_urls_env = \"NOSTR_RELAY_URLS\""));
+        assert!(raw.contains("private_key_env = \"NOSTR_PRIVATE_KEY\""));
+        assert!(raw.contains("relay_urls_env = \"OPS_NOSTR_RELAY_URLS\""));
+        assert!(raw.contains("private_key_env = \"OPS_NOSTR_PRIVATE_KEY\""));
+        assert!(raw.contains("access_token_env = \"WHATSAPP_ACCESS_TOKEN\""));
+        assert!(raw.contains("verify_token_env = \"WHATSAPP_VERIFY_TOKEN\""));
+        assert!(raw.contains("app_secret_env = \"WHATSAPP_APP_SECRET\""));
+
+        assert!(!raw.contains("bot_token = \"${DISCORD_BOT_TOKEN}\""));
+        assert!(!raw.contains("bot_token = \"${SLACK_BOT_TOKEN}\""));
+        assert!(!raw.contains("relay_urls_env = \" NOSTR_RELAY_URLS \""));
+        assert!(!raw.contains("private_key = \"${NOSTR_PRIVATE_KEY}\""));
+        assert!(!raw.contains("private_key = \"${OPS_NOSTR_PRIVATE_KEY}\""));
+        assert!(!raw.contains("access_token = \"${WHATSAPP_ACCESS_TOKEN}\""));
+        assert!(!raw.contains("verify_token = \"${WHATSAPP_VERIFY_TOKEN}\""));
+        assert!(!raw.contains("app_secret = \"${WHATSAPP_APP_SECRET}\""));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    #[cfg(feature = "config-toml")]
+    fn write_canonicalizes_matching_plugin_backed_channel_env_name_fields() {
+        let path = unique_config_path("loongclaw-config-runtime-trimmed-plugin-bridge-env");
+        let path_string = path.display().to_string();
+        let mut config = LoongClawConfig::default();
+
+        config.weixin.bridge_url = Some("${WEIXIN_BRIDGE_URL}".to_owned());
+        config.weixin.bridge_url_env = Some(" WEIXIN_BRIDGE_URL ".to_owned());
+        config.weixin.bridge_access_token = Some(SecretRef::Inline(
+            "${WEIXIN_BRIDGE_ACCESS_TOKEN}".to_owned(),
+        ));
+        config.weixin.bridge_access_token_env = Some(" WEIXIN_BRIDGE_ACCESS_TOKEN ".to_owned());
+
+        config.qqbot.app_id = Some(SecretRef::Inline("${QQBOT_APP_ID}".to_owned()));
+        config.qqbot.app_id_env = Some(" QQBOT_APP_ID ".to_owned());
+        config.qqbot.client_secret = Some(SecretRef::Inline("${QQBOT_CLIENT_SECRET}".to_owned()));
+        config.qqbot.client_secret_env = Some(" QQBOT_CLIENT_SECRET ".to_owned());
+
+        config.onebot.websocket_url = Some("${ONEBOT_WEBSOCKET_URL}".to_owned());
+        config.onebot.websocket_url_env = Some(" ONEBOT_WEBSOCKET_URL ".to_owned());
+        config.onebot.access_token = Some(SecretRef::Inline("${ONEBOT_ACCESS_TOKEN}".to_owned()));
+        config.onebot.access_token_env = Some(" ONEBOT_ACCESS_TOKEN ".to_owned());
+
+        write(Some(&path_string), &config, true).expect("config write should pass");
+
+        let raw = fs::read_to_string(&path).expect("read written config");
+
+        assert!(raw.contains(format!("bridge_url_env = \"{WEIXIN_BRIDGE_URL_ENV}\"").as_str()));
+        assert!(raw.contains(
+            format!("bridge_access_token_env = \"{WEIXIN_BRIDGE_ACCESS_TOKEN_ENV}\"").as_str()
+        ));
+        assert!(raw.contains(format!("app_id_env = \"{QQBOT_APP_ID_ENV}\"").as_str()));
+        assert!(
+            raw.contains(format!("client_secret_env = \"{QQBOT_CLIENT_SECRET_ENV}\"").as_str())
+        );
+        assert!(
+            raw.contains(format!("websocket_url_env = \"{ONEBOT_WEBSOCKET_URL_ENV}\"").as_str())
+        );
+        assert!(raw.contains(format!("access_token_env = \"{ONEBOT_ACCESS_TOKEN_ENV}\"").as_str()));
+
+        assert!(!raw.contains("bridge_url = \"${WEIXIN_BRIDGE_URL}\""));
+        assert!(!raw.contains("bridge_access_token = \"${WEIXIN_BRIDGE_ACCESS_TOKEN}\""));
+        assert!(!raw.contains("app_id = \"${QQBOT_APP_ID}\""));
+        assert!(!raw.contains("client_secret = \"${QQBOT_CLIENT_SECRET}\""));
+        assert!(!raw.contains("websocket_url = \"${ONEBOT_WEBSOCKET_URL}\""));
+        assert!(!raw.contains("access_token = \"${ONEBOT_ACCESS_TOKEN}\""));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    #[cfg(feature = "config-toml")]
+    fn write_preserves_provider_env_binding_when_inline_secret_is_blank() {
+        let path = unique_config_path("loongclaw-config-runtime-blank-inline-provider-env");
+        let path_string = path.display().to_string();
+        let mut config = LoongClawConfig::default();
+        config.provider.api_key = Some(SecretRef::Inline("   ".to_owned()));
+        config.provider.api_key_env = Some("TEAM_OPENAI_KEY".to_owned());
+
+        write(Some(&path_string), &config, true).expect("config write should pass");
+
+        let raw = fs::read_to_string(&path).expect("read written config");
+        assert!(raw.contains("api_key"));
+        assert!(raw.contains("env = \"TEAM_OPENAI_KEY\""));
+        assert!(!raw.contains("api_key = \"   \""));
+        assert!(!raw.contains("api_key_env = \"TEAM_OPENAI_KEY\""));
 
         let _ = fs::remove_file(path);
     }
@@ -2822,7 +3739,10 @@ model = "gpt-5"
         assert!(!loaded.external_skills.enabled);
         assert!(loaded.external_skills.require_download_approval);
         assert!(loaded.external_skills.allowed_domains.is_empty());
-        assert!(loaded.external_skills.blocked_domains.is_empty());
+        assert_eq!(
+            loaded.external_skills.blocked_domains,
+            vec!["*.clawhub.io".to_owned()]
+        );
         assert!(loaded.external_skills.install_root.is_none());
         assert!(!loaded.external_skills.auto_expose_installed);
 
@@ -2881,5 +3801,17 @@ model = "gpt-5"
         let parsed = toml::from_str::<LoongClawConfig>(&encoded).expect("parse encoded config");
 
         assert_eq!(parsed.audit, config.audit);
+    }
+
+    #[test]
+    #[cfg(feature = "config-toml")]
+    fn outbound_http_config_round_trips_private_host_override() {
+        let mut config = LoongClawConfig::default();
+        config.outbound_http.allow_private_hosts = true;
+
+        let encoded = encode_toml_config(&config).expect("encode config");
+        let parsed = toml::from_str::<LoongClawConfig>(&encoded).expect("parse encoded config");
+
+        assert!(parsed.outbound_http.allow_private_hosts);
     }
 }

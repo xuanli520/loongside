@@ -17,6 +17,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static IMPORT_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+fn normalized_path_text(value: &str) -> String {
+    value.replace('\\', "/")
+}
+
 fn assert_compact_loongclaw_header(lines: &[String], context: &str) {
     assert!(
         lines
@@ -39,10 +43,24 @@ fn unique_temp_dir(label: &str) -> PathBuf {
         .expect("system time before unix epoch")
         .as_nanos();
     let counter = IMPORT_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!(
+    let temp_dir = std::env::temp_dir();
+    let canonical_temp_dir = dunce::canonicalize(&temp_dir).unwrap_or(temp_dir);
+    canonical_temp_dir.join(format!(
         "loongclaw-import-{label}-{}-{nanos}-{counter}",
         std::process::id(),
     ))
+}
+
+fn isolated_import_runtime_env_guard(temp_root: &std::path::Path) -> ImportEnvironmentGuard {
+    let home = temp_root.join("home");
+    std::fs::create_dir_all(&home).expect("create fake home dir");
+    let sqlite_path = temp_root.join("memory.sqlite3");
+    let home_text = home.to_string_lossy().to_string();
+    let sqlite_path_text = sqlite_path.to_string_lossy().to_string();
+    ImportEnvironmentGuard::set(&[
+        ("HOME", Some(home_text.as_str())),
+        ("LOONGCLAW_SQLITE_PATH", Some(sqlite_path_text.as_str())),
+    ])
 }
 
 struct ImportEnvironmentGuard {
@@ -54,6 +72,15 @@ impl ImportEnvironmentGuard {
     fn set(pairs: &[(&str, Option<&str>)]) -> Self {
         let lock = super::lock_daemon_test_environment();
         let mut saved = Vec::new();
+        let home_override = pairs
+            .iter()
+            .find_map(|(key, value)| (*key == "HOME").then_some(*value))
+            .flatten()
+            .map(std::path::PathBuf::from);
+        let explicit_home_override = pairs
+            .iter()
+            .any(|(key, _)| *key == "LOONG_HOME" || *key == "LOONGCLAW_HOME");
+
         for (key, value) in pairs {
             saved.push(((*key).to_owned(), std::env::var_os(key)));
             match value {
@@ -62,6 +89,17 @@ impl ImportEnvironmentGuard {
                 },
                 None => unsafe {
                     std::env::remove_var(key);
+                },
+            }
+        }
+        if !explicit_home_override {
+            saved.push(("LOONG_HOME".to_owned(), std::env::var_os("LOONG_HOME")));
+            match home_override {
+                Some(home) => unsafe {
+                    std::env::set_var("LOONG_HOME", home.join(mvp::config::HOME_DIR_NAME))
+                },
+                None => unsafe {
+                    std::env::remove_var("LOONG_HOME");
                 },
             }
         }
@@ -95,7 +133,9 @@ fn sample_import_candidate() -> loongclaw_daemon::migration::types::ImportCandid
     let mut config = mvp::config::LoongClawConfig::default();
     config.provider.kind = mvp::config::ProviderKind::Openrouter;
     config.provider.model = "openrouter/openai/gpt-5.1".to_owned();
-    config.provider.api_key_env = Some("OPENROUTER_API_KEY".to_owned());
+    config
+        .provider
+        .set_api_key_env_binding(Some("OPENROUTER_API_KEY".to_owned()));
     config.cli.system_prompt = "Imported CLI prompt".to_owned();
     config.telegram.enabled = true;
     config.telegram.bot_token_env = Some("TELEGRAM_BOT_TOKEN".to_owned());
@@ -175,7 +215,10 @@ fn import_candidate_with_provider(
     candidate.config.provider.base_url = profile.base_url.to_owned();
     candidate.config.provider.chat_completions_path = profile.chat_completions_path.to_owned();
     candidate.config.provider.model = model.to_owned();
-    candidate.config.provider.api_key_env = Some(credential_env.to_owned());
+    candidate
+        .config
+        .provider
+        .set_api_key_env_binding(Some(credential_env.to_owned()));
     candidate.domains.retain(|domain| {
         domain.kind != loongclaw_daemon::migration::types::SetupDomainKind::Provider
     });
@@ -568,7 +611,7 @@ fn import_cli_apply_summary_wraps_long_path_and_domains_for_narrow_width() {
     assert!(
         lines
             .iter()
-            .any(|line| line == "next step: loongclaw ask --config '/tmp/shared"),
+            .any(|line| line == "next step: loong ask --config '/tmp/shared"),
         "apply summary should keep the ask-next-step label visible before wrapping long command paths: {lines:#?}"
     );
     assert!(
@@ -619,14 +662,14 @@ fn import_cli_apply_summary_includes_registry_channel_actions() {
 
     assert!(
         lines.iter().any(|line| {
-            line == "also available: chat · loongclaw chat --config '/tmp/loongclaw-config.toml'"
+            line == "also available: chat · loong chat --config '/tmp/loongclaw-config.toml'"
         }),
         "apply summary should surface interactive chat immediately after the primary ask step: {lines:#?}"
     );
     assert!(
         lines.iter().any(|line| {
             line
-                == "also available: telegram · loongclaw telegram-serve --config '/tmp/loongclaw-config.toml'"
+                == "also available: Telegram · loong telegram-serve --config '/tmp/loongclaw-config.toml'"
         }),
         "apply summary should continue surfacing registry-driven channel handoff commands after ask/chat: {lines:#?}"
     );
@@ -647,19 +690,19 @@ fn import_cli_apply_summary_shell_quotes_config_paths_with_single_quotes() {
 
     assert!(
         rendered.contains(
-            "next step: loongclaw ask --config '/tmp/loongclaw'\"'\"'s config.toml' --message 'Summarize this repository and suggest the best next step.'"
+            "next step: loong ask --config '/tmp/loongclaw'\"'\"'s config.toml' --message 'Summarize this repository and suggest the best next step.'"
         ),
         "apply summary should shell-quote single quotes in the primary ask command and keep the suggested message shell-safe: {lines:#?}"
     );
     assert!(
         rendered.contains(
-            "also available: chat · loongclaw chat --config '/tmp/loongclaw'\"'\"'s config.toml'"
+            "also available: chat · loong chat --config '/tmp/loongclaw'\"'\"'s config.toml'"
         ),
         "apply summary should shell-quote single quotes in the secondary chat command: {lines:#?}"
     );
     assert!(
         rendered.contains(
-            "also available: telegram · loongclaw telegram-serve --config '/tmp/loongclaw'\"'\"'s config.toml'"
+            "also available: Telegram · loong telegram-serve --config '/tmp/loongclaw'\"'\"'s config.toml'"
         ),
         "apply summary should shell-quote single quotes in channel handoff commands: {lines:#?}"
     );
@@ -680,15 +723,89 @@ fn import_cli_apply_summary_uses_channel_handoff_when_cli_is_disabled() {
 
     assert!(
         lines.iter().any(|line| {
-            line == "next step: loongclaw telegram-serve --config '/tmp/loongclaw-config.toml'"
+            line == "next step: loong telegram-serve --config '/tmp/loongclaw-config.toml'"
         }),
         "apply summary should not hand users to CLI chat when the imported config has cli disabled: {lines:#?}"
     );
     assert!(
         lines
             .iter()
-            .all(|line| !line.starts_with("next step: loongclaw ask --config")),
+            .all(|line| !line.starts_with("next step: loong ask --config")),
         "ask should not remain the primary handoff when cli is disabled: {lines:#?}"
+    );
+}
+
+#[test]
+fn import_cli_apply_summary_prefers_managed_bridge_doctor_handoff_when_preflight_blocks() {
+    let install_root = unique_temp_dir("import-apply-managed-bridge-handoff");
+    let mut metadata =
+        compatible_managed_bridge_metadata("wechat_clawbot_ilink_bridge", "weixin_reply_loop");
+    let removed_transport_family = metadata.remove("transport_family");
+    let setup = managed_bridge_setup_with_guidance(
+        "channel",
+        vec!["WEIXIN_BRIDGE_URL"],
+        vec!["weixin.bridge_url"],
+        vec!["https://example.test/docs/weixin-bridge"],
+        Some("finish bridge setup before first use"),
+    );
+    let manifest = managed_bridge_manifest_with_setup("weixin", metadata, Some(setup));
+    let mut candidate = sample_import_candidate();
+    let mut resolved = mvp::config::LoongClawConfig::default();
+
+    std::fs::create_dir_all(&install_root).expect("create managed bridge install root");
+    write_managed_bridge_manifest(install_root.as_path(), "weixin-bridge", &manifest);
+    assert_eq!(
+        removed_transport_family.as_deref(),
+        Some("wechat_clawbot_ilink_bridge")
+    );
+
+    candidate.source = "Codex config at ~/.codex/config.toml".to_owned();
+    candidate.domains.retain(|domain| {
+        domain.kind != loongclaw_daemon::migration::types::SetupDomainKind::Provider
+    });
+    candidate.channel_candidates = vec![loongclaw_daemon::migration::types::ChannelCandidate {
+        id: "weixin",
+        label: "weixin",
+        status: loongclaw_daemon::migration::types::PreviewStatus::NeedsReview,
+        source: "Codex config at ~/.codex/config.toml".to_owned(),
+        summary: "managed bridge needs review".to_owned(),
+    }];
+
+    resolved.weixin.enabled = true;
+    resolved.weixin.bridge_url = Some("https://bridge.example.test/weixin".to_owned());
+    resolved.weixin.bridge_access_token = Some(loongclaw_contracts::SecretRef::Inline(
+        "weixin-token".to_owned(),
+    ));
+    resolved.weixin.allowed_contact_ids = vec!["wxid_alice".to_owned()];
+    resolved.external_skills.install_root = Some(install_root.display().to_string());
+
+    let lines = loongclaw_daemon::import_cli::render_import_apply_summary_lines_for_width(
+        std::path::Path::new("/tmp/loongclaw-config.toml"),
+        &candidate,
+        &[loongclaw_daemon::migration::types::SetupDomainKind::Channels],
+        &resolved,
+        false,
+        160,
+    );
+
+    assert!(
+        lines.iter().any(|line| {
+            line == &format!(
+                "next step: {} doctor --config '/tmp/loongclaw-config.toml'",
+                super::active_cli_command_name()
+            )
+        }),
+        "managed bridge doctor handoff should become the primary next step when plugin bridge preflight is unresolved: {lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| {
+            line
+                == &format!(
+                    "also available: first answer · {} ask --config '/tmp/loongclaw-config.toml' --message 'Summarize this repository and suggest the best next step.'",
+                    super::active_cli_command_name()
+                )
+        }),
+        "the default ask handoff should remain available after the managed bridge doctor step: {lines:#?}"
     );
 }
 
@@ -992,8 +1109,12 @@ fn import_cli_render_preview_keeps_provider_choice_transport_visible_on_wide_wid
 #[test]
 fn import_cli_json_preview_redacts_config_secrets() {
     let mut candidate = sample_import_candidate();
-    candidate.config.provider.api_key = Some("super-secret-provider-key".to_owned());
-    candidate.config.telegram.bot_token = Some("123456:telegram-secret".to_owned());
+    candidate.config.provider.api_key = Some(loongclaw_contracts::SecretRef::Inline(
+        "super-secret-provider-key".to_owned(),
+    ));
+    candidate.config.telegram.bot_token = Some(loongclaw_contracts::SecretRef::Inline(
+        "123456:telegram-secret".to_owned(),
+    ));
 
     let payload = loongclaw_daemon::import_cli::render_import_preview_json(&[candidate])
         .expect("json preview should render");
@@ -1242,11 +1363,11 @@ model = "deepseek-chat"
         "runtime import should explain that the Codex source filter still matched multiple configs: {error}"
     );
     assert!(
-        error.contains(".codex/config.toml"),
+        normalized_path_text(&error).contains(".codex/config.toml"),
         "runtime import should surface the base Codex config path: {error}"
     );
     assert!(
-        error.contains(".codex/agents/loongclaw/config.toml"),
+        normalized_path_text(&error).contains(".codex/agents/loongclaw/config.toml"),
         "runtime import should surface the agent-scoped Codex config path: {error}"
     );
 }
@@ -1308,9 +1429,15 @@ model = "deepseek-chat"
     );
     assert_eq!(imported.provider.model, "deepseek-chat");
     assert_eq!(
-        imported.provider.api_key.as_deref(),
-        Some("${DEEPSEEK_API_KEY}"),
-        "source-path-selected provider should retain its provider-specific credential binding in canonical inline-env form"
+        imported.provider.api_key,
+        Some(loongclaw_contracts::SecretRef::Env {
+            env: "DEEPSEEK_API_KEY".to_owned(),
+        }),
+        "source-path-selected provider should keep its credential binding in the canonical api_key field"
+    );
+    assert_eq!(
+        imported.provider.api_key_env, None,
+        "source-path-selected provider should not keep the legacy api_key_env field once the canonical api_key binding is persisted"
     );
     assert_eq!(
         imported.provider.authorization_header().as_deref(),
@@ -1418,13 +1545,15 @@ requires_openai_auth = true
         mvp::config::ProviderWireApi::Responses
     );
     assert_eq!(
-        imported.provider.api_key.as_deref(),
-        Some("${OPENAI_API_KEY}"),
-        "codex import should persist OpenAI auth in canonical inline-env form"
+        imported.provider.api_key,
+        Some(loongclaw_contracts::SecretRef::Env {
+            env: "OPENAI_API_KEY".to_owned(),
+        }),
+        "codex import should keep OpenAI auth in the canonical api_key field"
     );
-    assert!(
-        imported.provider.api_key_env.is_none(),
-        "codex import should not keep the legacy api_key_env pointer once the canonical inline-env reference is written"
+    assert_eq!(
+        imported.provider.api_key_env, None,
+        "codex import should not keep the legacy api_key_env field once the canonical api_key binding is persisted"
     );
 
     let models = mvp::provider::fetch_available_models(&imported)
@@ -1911,7 +2040,13 @@ fn import_cli_provider_selection_accepts_manual_choice_for_unresolved_recommende
 
     assert_eq!(provider.kind, mvp::config::ProviderKind::Deepseek);
     assert_eq!(provider.model, "deepseek-chat");
-    assert_eq!(provider.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
+    assert_eq!(
+        provider.api_key,
+        Some(loongclaw_contracts::SecretRef::Env {
+            env: "DEEPSEEK_API_KEY".to_owned(),
+        })
+    );
+    assert_eq!(provider.api_key_env, None);
 }
 
 #[test]
@@ -2166,6 +2301,7 @@ async fn import_cli_apply_recommended_import_retains_multiple_same_kind_provider
     let temp_root = unique_temp_dir("same-kind-provider-profiles");
     std::fs::create_dir_all(&temp_root).expect("create temp dir");
     let output_path = temp_root.join("config.toml");
+    let _env_guard = isolated_import_runtime_env_guard(&temp_root);
 
     let mut recommended = sample_import_candidate();
     recommended.source_kind = loongclaw_daemon::migration::types::ImportSourceKind::RecommendedPlan;
@@ -2266,6 +2402,7 @@ async fn import_cli_apply_supplements_existing_provider_profiles_without_replaci
     let temp_root = unique_temp_dir("provider-profile-supplement");
     std::fs::create_dir_all(&temp_root).expect("create temp dir");
     let output_path = temp_root.join("config.toml");
+    let _env_guard = isolated_import_runtime_env_guard(&temp_root);
 
     let mut base = mvp::config::LoongClawConfig::default();
     base.provider.kind = mvp::config::ProviderKind::Openai;
@@ -2367,5 +2504,83 @@ fn import_cli_apply_summary_reports_active_provider_and_saved_profiles() {
             .iter()
             .any(|line| line.contains("- saved provider profiles: openai, deepseek")),
         "import apply summary should show retained provider profiles after supplementing: {lines:#?}"
+    );
+}
+
+#[test]
+fn import_cli_apply_candidate_rejects_conflicting_plugin_bridge_install_root() {
+    let temp_root = unique_temp_dir("plugin-bridge-install-root-conflict");
+    let output_path = temp_root.join("config.toml");
+    let current_install_root = temp_root.join("managed-skills-current");
+    let detected_install_root = temp_root.join("managed-skills-detected");
+    let base: mvp::config::LoongClawConfig = serde_json::from_value(json!({
+        "external_skills": {
+            "install_root": current_install_root.display().to_string()
+        }
+    }))
+    .expect("deserialize base config");
+    let candidate_config: mvp::config::LoongClawConfig = serde_json::from_value(json!({
+        "weixin": {
+            "enabled": true,
+            "bridge_url": "https://bridge.example.test/weixin",
+            "bridge_access_token": "weixin-token",
+            "allowed_contact_ids": ["wxid_alice"]
+        },
+        "external_skills": {
+            "install_root": detected_install_root.display().to_string()
+        }
+    }))
+    .expect("deserialize candidate config");
+    let candidate = loongclaw_daemon::migration::types::ImportCandidate {
+        source_kind: loongclaw_daemon::migration::types::ImportSourceKind::CodexConfig,
+        source: "Codex config at ~/.codex/config.toml".to_owned(),
+        config: candidate_config,
+        surfaces: Vec::new(),
+        domains: vec![loongclaw_daemon::migration::types::DomainPreview {
+            kind: loongclaw_daemon::migration::types::SetupDomainKind::Channels,
+            status: loongclaw_daemon::migration::types::PreviewStatus::Ready,
+            decision: Some(loongclaw_daemon::migration::types::PreviewDecision::UseDetected),
+            source: "Codex config at ~/.codex/config.toml".to_owned(),
+            summary: "weixin Ready".to_owned(),
+        }],
+        channel_candidates: vec![loongclaw_daemon::migration::types::ChannelCandidate {
+            id: "weixin",
+            label: "weixin",
+            status: loongclaw_daemon::migration::types::PreviewStatus::Ready,
+            source: "Codex config at ~/.codex/config.toml".to_owned(),
+            summary: "managed bridge ready".to_owned(),
+        }],
+        workspace_guidance: Vec::new(),
+    };
+
+    std::fs::create_dir_all(&temp_root).expect("create temp root");
+    mvp::config::write(Some(output_path.to_string_lossy().as_ref()), &base, true)
+        .expect("write base config");
+
+    let error = loongclaw_daemon::import_cli::apply_import_candidate(
+        &output_path,
+        true,
+        std::slice::from_ref(&candidate),
+        &candidate,
+        None,
+    )
+    .expect_err("conflicting managed bridge roots should fail import apply");
+
+    assert!(
+        error.contains("managed bridge install_root conflict"),
+        "import apply should surface the managed bridge install root conflict: {error}"
+    );
+
+    let (_, reloaded) = mvp::config::load(Some(output_path.to_string_lossy().as_ref()))
+        .expect("reload config after rejected import");
+
+    assert!(
+        !reloaded.weixin.enabled,
+        "rejected import should leave the conflicting plugin-backed channel disabled"
+    );
+    assert_eq!(
+        reloaded.external_skills.install_root.as_deref(),
+        Some(current_install_root.to_string_lossy().as_ref()),
+        "rejected import should preserve the original managed bridge install root"
     );
 }

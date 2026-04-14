@@ -11,6 +11,12 @@ use serde_json::{Value, json};
 
 #[cfg(feature = "tool-websearch")]
 const MAX_QUERY_LENGTH: usize = 500;
+#[cfg(feature = "tool-websearch")]
+const FIRECRAWL_SEARCH_ENDPOINT: &str = "https://api.firecrawl.dev/v2/search";
+#[cfg(feature = "tool-websearch")]
+const FIRECRAWL_SOURCE_WEB: &str = "web";
+#[cfg(feature = "tool-websearch")]
+const FIRECRAWL_MARKDOWN_SNIPPET_MAX_CHARS: usize = 800;
 
 pub(super) fn execute_web_search_tool_with_config(
     request: ToolCoreRequest,
@@ -90,7 +96,7 @@ fn execute_web_search_tool_enabled(
             crate::config::WEB_SEARCH_PROVIDER_DUCKDUCKGO => {
                 search_duckduckgo(query, max_results, config.web_search.timeout_seconds).await
             }
-            "brave" => {
+            crate::config::WEB_SEARCH_PROVIDER_BRAVE => {
                 search_brave(
                     query,
                     max_results,
@@ -99,12 +105,48 @@ fn execute_web_search_tool_enabled(
                 )
                 .await
             }
-            "tavily" => {
+            crate::config::WEB_SEARCH_PROVIDER_TAVILY => {
                 search_tavily(
                     query,
                     max_results,
                     config.web_search.timeout_seconds,
                     config.web_search.tavily_api_key.as_deref(),
+                )
+                .await
+            }
+            crate::config::WEB_SEARCH_PROVIDER_PERPLEXITY => {
+                search_perplexity(
+                    query,
+                    max_results,
+                    config.web_search.timeout_seconds,
+                    config.web_search.perplexity_api_key.as_deref(),
+                )
+                .await
+            }
+            crate::config::WEB_SEARCH_PROVIDER_EXA => {
+                search_exa(
+                    query,
+                    max_results,
+                    config.web_search.timeout_seconds,
+                    config.web_search.exa_api_key.as_deref(),
+                )
+                .await
+            }
+            crate::config::WEB_SEARCH_PROVIDER_FIRECRAWL => {
+                search_firecrawl(
+                    query,
+                    max_results,
+                    config.web_search.timeout_seconds,
+                    config.web_search.firecrawl_api_key.as_deref(),
+                )
+                .await
+            }
+            crate::config::WEB_SEARCH_PROVIDER_JINA => {
+                search_jina(
+                    query,
+                    max_results,
+                    config.web_search.timeout_seconds,
+                    config.web_search.jina_api_key.as_deref(),
                 )
                 .await
             }
@@ -416,6 +458,439 @@ fn parse_tavily_response(json: &Value, query: &str, max_results: usize) -> Resul
 }
 
 #[cfg(feature = "tool-websearch")]
+async fn search_perplexity(
+    query: &str,
+    max_results: usize,
+    timeout_seconds: u64,
+    api_key: Option<&str>,
+) -> Result<Value, String> {
+    let api_key = api_key
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "Perplexity API key not configured. Set tools.web_search.perplexity_api_key in config or {} environment variable.",
+                crate::config::WEB_SEARCH_PERPLEXITY_API_KEY_ENV
+            )
+        })?;
+
+    let client =
+        super::web_http::build_ssrf_safe_client(false, timeout_seconds, "LoongClaw-WebSearch/0.1")?;
+
+    let response = client
+        .post("https://api.perplexity.ai/search")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {api_key}"))
+        .json(&json!({
+            "query": query,
+            "max_results": max_results,
+        }))
+        .send()
+        .await
+        .map_err(|error| format_request_error("Perplexity request failed", &error))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Perplexity returned status {}", response.status()));
+    }
+
+    let json: Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse Perplexity response: {e}"))?;
+
+    parse_perplexity_response(&json, query, max_results)
+}
+
+#[cfg(feature = "tool-websearch")]
+fn parse_perplexity_response(
+    json: &Value,
+    query: &str,
+    max_results: usize,
+) -> Result<Value, String> {
+    let results = json
+        .get("results")
+        .and_then(|r| r.as_array())
+        .ok_or("Invalid Perplexity API response format")?;
+
+    let results: Vec<Value> = results
+        .iter()
+        .take(max_results)
+        .map(|r| {
+            json!({
+                "title": r.get("title").and_then(|t| t.as_str()).unwrap_or(""),
+                "url": r.get("url").and_then(|u| u.as_str()).unwrap_or(""),
+                "snippet": r.get("snippet").and_then(|s| s.as_str()).unwrap_or("")
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "query": query,
+        "provider": "perplexity",
+        "results": results
+    }))
+}
+
+#[cfg(feature = "tool-websearch")]
+async fn search_exa(
+    query: &str,
+    max_results: usize,
+    timeout_seconds: u64,
+    api_key: Option<&str>,
+) -> Result<Value, String> {
+    let api_key = api_key
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "Exa API key not configured. Set tools.web_search.exa_api_key in config or {} environment variable.",
+                crate::config::WEB_SEARCH_EXA_API_KEY_ENV
+            )
+        })?;
+
+    let client =
+        super::web_http::build_ssrf_safe_client(false, timeout_seconds, "LoongClaw-WebSearch/0.1")?;
+
+    let response = client
+        .post("https://api.exa.ai/search")
+        .header("Content-Type", "application/json")
+        .header("x-api-key", api_key)
+        .json(&json!({
+            "query": query,
+            "numResults": max_results,
+            "contents": {
+                "highlights": {
+                    "maxCharacters": 800
+                }
+            }
+        }))
+        .send()
+        .await
+        .map_err(|error| format_request_error("Exa request failed", &error))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Exa returned status {}", response.status()));
+    }
+
+    let json: Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse Exa response: {e}"))?;
+
+    parse_exa_response(&json, query, max_results)
+}
+
+#[cfg(feature = "tool-websearch")]
+fn parse_exa_response(json: &Value, query: &str, max_results: usize) -> Result<Value, String> {
+    let results = json
+        .get("results")
+        .and_then(|r| r.as_array())
+        .ok_or("Invalid Exa API response format")?;
+
+    let results: Vec<Value> = results
+        .iter()
+        .take(max_results)
+        .map(|r| {
+            let snippet = r
+                .get("highlights")
+                .and_then(|value| value.as_array())
+                .and_then(|highlights| {
+                    let combined = highlights
+                        .iter()
+                        .filter_map(|entry| entry.as_str())
+                        .map(str::trim)
+                        .filter(|entry| !entry.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    (!combined.is_empty()).then_some(combined)
+                })
+                .or_else(|| {
+                    r.get("summary")
+                        .and_then(|summary| summary.as_str())
+                        .map(str::trim)
+                        .filter(|summary| !summary.is_empty())
+                        .map(str::to_owned)
+                })
+                .or_else(|| {
+                    r.get("text")
+                        .and_then(|text| text.as_str())
+                        .map(str::trim)
+                        .filter(|text| !text.is_empty())
+                        .map(str::to_owned)
+                })
+                .unwrap_or_default();
+
+            json!({
+                "title": r.get("title").and_then(|t| t.as_str()).unwrap_or(""),
+                "url": r.get("url").and_then(|u| u.as_str()).unwrap_or(""),
+                "snippet": snippet
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "query": query,
+        "provider": "exa",
+        "results": results
+    }))
+}
+
+#[cfg(feature = "tool-websearch")]
+async fn search_firecrawl(
+    query: &str,
+    max_results: usize,
+    timeout_seconds: u64,
+    api_key: Option<&str>,
+) -> Result<Value, String> {
+    let trimmed_api_key = api_key.and_then(trim_non_empty);
+    let missing_api_key_message = format!(
+        "Firecrawl API key not configured. Set tools.web_search.firecrawl_api_key in config or {} environment variable.",
+        crate::config::WEB_SEARCH_FIRECRAWL_API_KEY_ENV
+    );
+    let api_key = trimmed_api_key.ok_or(missing_api_key_message)?;
+
+    let user_agent = "LoongClaw-WebSearch/0.1";
+    let private_hosts_allowed = false;
+    let client = super::web_http::build_ssrf_safe_client(
+        private_hosts_allowed,
+        timeout_seconds,
+        user_agent,
+    )?;
+
+    let content_type_header = "Content-Type";
+    let authorization_header = "Authorization";
+    let bearer_token = format!("Bearer {api_key}");
+    let request_body = json!({
+        "query": query,
+        "limit": max_results,
+        "sources": [FIRECRAWL_SOURCE_WEB],
+    });
+
+    let response = client
+        .post(FIRECRAWL_SEARCH_ENDPOINT)
+        .header(content_type_header, "application/json")
+        .header(authorization_header, bearer_token)
+        .json(&request_body)
+        .send()
+        .await
+        .map_err(|error| format_request_error("Firecrawl request failed", &error))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let message = format!("Firecrawl returned status {status}");
+        return Err(message);
+    }
+
+    let parsed_json = response
+        .json()
+        .await
+        .map_err(|error| format!("Failed to parse Firecrawl response: {error}"))?;
+
+    parse_firecrawl_response(&parsed_json, query, max_results)
+}
+
+#[cfg(feature = "tool-websearch")]
+fn parse_firecrawl_response(
+    json: &Value,
+    query: &str,
+    max_results: usize,
+) -> Result<Value, String> {
+    let data = json.get("data");
+    let web_results = data.and_then(|value| value.get("web"));
+    let web_results = web_results.and_then(Value::as_array);
+    let results = web_results.ok_or("Invalid Firecrawl API response format")?;
+
+    let mut normalized_results = Vec::new();
+
+    for result in results.iter().take(max_results) {
+        let title = firecrawl_result_title(result);
+        let url = firecrawl_result_url(result);
+        let snippet = firecrawl_result_snippet(result);
+
+        let normalized_result = json!({
+            "title": title,
+            "url": url,
+            "snippet": snippet,
+        });
+        normalized_results.push(normalized_result);
+    }
+
+    let normalized_payload = json!({
+        "query": query,
+        "provider": "firecrawl",
+        "results": normalized_results
+    });
+
+    Ok(normalized_payload)
+}
+
+#[cfg(feature = "tool-websearch")]
+fn firecrawl_result_title(result: &Value) -> &str {
+    let direct_title = result.get("title");
+    let direct_title = direct_title.and_then(Value::as_str);
+    if let Some(title) = direct_title {
+        return title;
+    }
+
+    let metadata = result.get("metadata");
+    let metadata = metadata.and_then(Value::as_object);
+    let metadata_title = metadata.and_then(|value| value.get("title"));
+    let metadata_title = metadata_title.and_then(Value::as_str);
+    metadata_title.unwrap_or("")
+}
+
+#[cfg(feature = "tool-websearch")]
+fn firecrawl_result_url(result: &Value) -> &str {
+    let direct_url = result.get("url");
+    let direct_url = direct_url.and_then(Value::as_str);
+    if let Some(url) = direct_url {
+        return url;
+    }
+
+    let metadata = result.get("metadata");
+    let metadata = metadata.and_then(Value::as_object);
+
+    let metadata_url = metadata.and_then(|value| value.get("url"));
+    let metadata_url = metadata_url.and_then(Value::as_str);
+    if let Some(url) = metadata_url {
+        return url;
+    }
+
+    let source_url = metadata.and_then(|value| value.get("sourceURL"));
+    let source_url = source_url.and_then(Value::as_str);
+    source_url.unwrap_or("")
+}
+
+#[cfg(feature = "tool-websearch")]
+fn firecrawl_result_snippet(result: &Value) -> String {
+    let direct_description = result.get("description");
+    let direct_description = direct_description.and_then(Value::as_str);
+    let direct_description = direct_description.and_then(trim_non_empty);
+    if let Some(description) = direct_description {
+        return description.to_owned();
+    }
+
+    let metadata = result.get("metadata");
+    let metadata = metadata.and_then(Value::as_object);
+    let metadata_description = metadata.and_then(|value| value.get("description"));
+    let metadata_description = metadata_description.and_then(Value::as_str);
+    let metadata_description = metadata_description.and_then(trim_non_empty);
+    if let Some(description) = metadata_description {
+        return description.to_owned();
+    }
+
+    let markdown = result.get("markdown");
+    let markdown = markdown.and_then(Value::as_str);
+    let markdown = markdown.unwrap_or_default();
+    compact_firecrawl_markdown_snippet(markdown)
+}
+
+#[cfg(feature = "tool-websearch")]
+fn compact_firecrawl_markdown_snippet(markdown: &str) -> String {
+    let normalized_words = markdown.split_whitespace().collect::<Vec<_>>();
+    let normalized = normalized_words.join(" ");
+    let normalized = normalized.trim();
+    if normalized.is_empty() {
+        return String::new();
+    }
+
+    let total_chars = normalized.chars().count();
+    let mut snippet = normalized
+        .chars()
+        .take(FIRECRAWL_MARKDOWN_SNIPPET_MAX_CHARS)
+        .collect::<String>();
+
+    if total_chars > FIRECRAWL_MARKDOWN_SNIPPET_MAX_CHARS {
+        snippet.push_str("...");
+    }
+
+    snippet
+}
+
+#[cfg(feature = "tool-websearch")]
+fn trim_non_empty(raw: &str) -> Option<&str> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    Some(trimmed)
+}
+
+#[cfg(feature = "tool-websearch")]
+/// Jina returns a single grounded digest, not a list of ranked result items.
+/// The runtime therefore synthesizes one result entry and ignores
+/// `_max_results`, which is kept only to align the provider function shape.
+async fn search_jina(
+    query: &str,
+    _max_results: usize,
+    timeout_seconds: u64,
+    api_key: Option<&str>,
+) -> Result<Value, String> {
+    let api_key = api_key
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "Jina API key not configured. Set tools.web_search.jina_api_key in config or {} / {} environment variable.",
+                crate::config::WEB_SEARCH_JINA_API_KEY_ENV,
+                crate::config::WEB_SEARCH_JINA_AUTH_TOKEN_ENV
+            )
+        })?;
+
+    let url = reqwest::Url::parse_with_params("https://s.jina.ai/", &[("q", query)])
+        .map_err(|e| format!("Failed to build Jina Search URL: {e}"))?;
+
+    let client =
+        super::web_http::build_ssrf_safe_client(false, timeout_seconds, "LoongClaw-WebSearch/0.1")?;
+
+    let response = client
+        .get(url)
+        .header("Accept", "text/plain")
+        .header("Authorization", format!("Bearer {api_key}"))
+        .send()
+        .await
+        .map_err(|error| format_request_error("Jina request failed", &error))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Jina returned status {}", response.status()));
+    }
+
+    let text = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read Jina response: {e}"))?;
+
+    parse_jina_response(&text, query)
+}
+
+#[cfg(feature = "tool-websearch")]
+fn parse_jina_response(text: &str, query: &str) -> Result<Value, String> {
+    let snippet = text.trim();
+    if snippet.is_empty() {
+        return Ok(json!({
+            "query": query,
+            "provider": "jina",
+            "results": []
+        }));
+    }
+
+    let source_url = reqwest::Url::parse_with_params("https://s.jina.ai/", &[("q", query)])
+        .map(|url| url.to_string())
+        .unwrap_or_else(|_| "https://s.jina.ai/".to_owned());
+
+    Ok(json!({
+        "query": query,
+        "provider": "jina",
+        "results": [{
+            "title": format!("Jina Search digest for {query}"),
+            "url": source_url,
+            "snippet": snippet
+        }]
+    }))
+}
+
+#[cfg(feature = "tool-websearch")]
 fn format_request_error(prefix: &str, error: &reqwest::Error) -> String {
     let kind = if error.is_timeout() {
         "timeout"
@@ -622,6 +1097,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_perplexity_response_extracts_results() {
+        let json = json!({
+            "results": [
+                {
+                    "title": "Perplexity result",
+                    "url": "https://example.com/perplexity",
+                    "snippet": "Grounded snippet"
+                }
+            ]
+        });
+        let result = parse_perplexity_response(&json, "test", 5).unwrap();
+        assert_eq!(result["provider"], "perplexity");
+        assert_eq!(result["results"][0]["title"], "Perplexity result");
+    }
+
+    #[test]
+    fn parse_perplexity_response_rejects_invalid_format() {
+        let json = json!({"items": []});
+        let error = parse_perplexity_response(&json, "test", 5)
+            .expect_err("should reject invalid Perplexity format");
+        assert!(error.contains("Invalid Perplexity API response format"));
+    }
+
+    #[test]
     fn parse_brave_response_extracts_results() {
         let json = json!({
             "web": {
@@ -650,6 +1149,109 @@ mod tests {
         let error =
             parse_brave_response(&json, "test", 5).expect_err("should reject invalid format");
         assert!(error.contains("Invalid Brave API response format"));
+    }
+
+    #[test]
+    fn parse_exa_response_extracts_results() {
+        let json = json!({
+            "results": [
+                {
+                    "title": "Exa result",
+                    "url": "https://example.com/exa",
+                    "highlights": ["Primary highlight", "Second highlight"]
+                }
+            ]
+        });
+        let result = parse_exa_response(&json, "test", 5).unwrap();
+        assert_eq!(result["provider"], "exa");
+        assert!(
+            result["results"][0]["snippet"]
+                .as_str()
+                .unwrap()
+                .contains("Primary highlight")
+        );
+    }
+
+    #[test]
+    fn parse_exa_response_rejects_invalid_format() {
+        let json = json!({"items": []});
+        let error =
+            parse_exa_response(&json, "test", 5).expect_err("should reject invalid Exa format");
+        assert!(error.contains("Invalid Exa API response format"));
+    }
+
+    #[test]
+    fn parse_firecrawl_response_extracts_results() {
+        let json = json!({
+            "success": true,
+            "data": {
+                "web": [{
+                    "title": "Firecrawl result",
+                    "description": "Grounded snippet",
+                    "url": "https://example.com/firecrawl",
+                    "markdown": "# ignored"
+                }]
+            }
+        });
+
+        let result = parse_firecrawl_response(&json, "test", 5).unwrap();
+        let provider = result["provider"].as_str();
+        let title = result["results"][0]["title"].as_str();
+        let url = result["results"][0]["url"].as_str();
+        let snippet = result["results"][0]["snippet"].as_str();
+
+        assert_eq!(provider, Some("firecrawl"));
+        assert_eq!(title, Some("Firecrawl result"));
+        assert_eq!(url, Some("https://example.com/firecrawl"));
+        assert_eq!(snippet, Some("Grounded snippet"));
+    }
+
+    #[test]
+    fn parse_firecrawl_response_falls_back_to_metadata_and_markdown() {
+        let json = json!({
+            "success": true,
+            "data": {
+                "web": [{
+                    "metadata": {
+                        "title": "Metadata title",
+                        "sourceURL": "https://example.com/source",
+                        "description": ""
+                    },
+                    "markdown": "line one\n\nline two"
+                }]
+            }
+        });
+
+        let result = parse_firecrawl_response(&json, "test", 5).unwrap();
+        let title = result["results"][0]["title"].as_str();
+        let url = result["results"][0]["url"].as_str();
+        let snippet = result["results"][0]["snippet"].as_str();
+
+        assert_eq!(title, Some("Metadata title"));
+        assert_eq!(url, Some("https://example.com/source"));
+        assert_eq!(snippet, Some("line one line two"));
+    }
+
+    #[test]
+    fn parse_firecrawl_response_rejects_invalid_format() {
+        let json = json!({"data": {"images": []}});
+        let error = parse_firecrawl_response(&json, "test", 5)
+            .expect_err("should reject invalid Firecrawl format");
+
+        assert!(error.contains("Invalid Firecrawl API response format"));
+    }
+
+    #[test]
+    fn parse_jina_response_builds_aggregate_result() {
+        let result = parse_jina_response("Result 1\nhttps://example.com", "test").unwrap();
+        assert_eq!(result["provider"], "jina");
+        assert_eq!(result["results"][0]["title"], "Jina Search digest for test");
+    }
+
+    #[test]
+    fn parse_jina_response_handles_empty_body() {
+        let result = parse_jina_response("  ", "test").unwrap();
+        assert!(result["results"].as_array().unwrap().is_empty());
     }
 
     #[test]
@@ -727,6 +1329,63 @@ mod tests {
         .expect_err("should require tavily API key");
         assert!(
             error.contains("Tavily API key not configured"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn web_search_perplexity_requires_api_key() {
+        let config = test_config();
+        let error = execute_web_search_tool_with_config(
+            request(json!({"query": "test", "provider": "perplexity"})),
+            &config,
+        )
+        .expect_err("should require perplexity API key");
+        assert!(
+            error.contains("Perplexity API key not configured"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn web_search_exa_requires_api_key() {
+        let config = test_config();
+        let error = execute_web_search_tool_with_config(
+            request(json!({"query": "test", "provider": "exa"})),
+            &config,
+        )
+        .expect_err("should require exa API key");
+        assert!(
+            error.contains("Exa API key not configured"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn web_search_firecrawl_requires_api_key() {
+        let config = test_config();
+        let error = execute_web_search_tool_with_config(
+            request(json!({"query": "test", "provider": "firecrawl"})),
+            &config,
+        )
+        .expect_err("should require firecrawl API key");
+
+        assert!(
+            error.contains("Firecrawl API key not configured"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn web_search_jina_requires_api_key() {
+        let config = test_config();
+        let error = execute_web_search_tool_with_config(
+            request(json!({"query": "test", "provider": "jina"})),
+            &config,
+        )
+        .expect_err("should require jina API key");
+        assert!(
+            error.contains("Jina API key not configured"),
             "unexpected error: {error}"
         );
     }

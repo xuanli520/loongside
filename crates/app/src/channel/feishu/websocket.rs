@@ -14,11 +14,11 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::CliResult;
 use crate::KernelContext;
-use crate::channel::runtime_state::ChannelOperationRuntimeTracker;
+use crate::channel::feishu::api::{FeishuClient, FeishuWsEndpointClientConfig};
+use crate::channel::{ChannelServeStopHandle, runtime::state::ChannelOperationRuntimeTracker};
 use crate::config::{
     ChannelDefaultAccountSelectionSource, LoongClawConfig, ResolvedFeishuChannelConfig,
 };
-use crate::feishu::{FeishuClient, FeishuWsEndpointClientConfig};
 
 use super::adapter::FeishuAdapter;
 use super::webhook::{FeishuParsedActionResponse, FeishuWebhookState, handle_feishu_parsed_action};
@@ -182,6 +182,7 @@ pub(super) async fn run_feishu_websocket_channel(
     default_account_source: ChannelDefaultAccountSelectionSource,
     kernel_ctx: KernelContext,
     runtime: Arc<ChannelOperationRuntimeTracker>,
+    stop: ChannelServeStopHandle,
 ) -> CliResult<()> {
     let mut adapter = FeishuAdapter::new(resolved)?;
     adapter.refresh_tenant_token().await?;
@@ -208,14 +209,20 @@ pub(super) async fn run_feishu_websocket_channel(
     }
 
     loop {
-        let endpoint = match client.get_websocket_endpoint().await {
+        let endpoint = match tokio::select! {
+            _ = stop.wait() => return Ok(()),
+            endpoint = client.get_websocket_endpoint() => endpoint,
+        } {
             Ok(endpoint) => endpoint,
             Err(error) => {
                 #[allow(clippy::print_stderr)]
                 {
                     eprintln!("warning: feishu websocket endpoint discovery failed: {error}");
                 }
-                tokio::time::sleep(Duration::from_secs(DEFAULT_WS_RECONNECT_INTERVAL_S)).await;
+                tokio::select! {
+                    _ = stop.wait() => return Ok(()),
+                    _ = tokio::time::sleep(Duration::from_secs(DEFAULT_WS_RECONNECT_INTERVAL_S)) => {}
+                }
                 continue;
             }
         };
@@ -227,14 +234,19 @@ pub(super) async fn run_feishu_websocket_channel(
                 .max(1),
         );
 
-        if let Err(error) = run_feishu_websocket_session(&state, &endpoint.url, &ws_config).await {
+        if let Err(error) =
+            run_feishu_websocket_session(&state, &endpoint.url, &ws_config, stop.clone()).await
+        {
             #[allow(clippy::print_stderr)]
             {
                 eprintln!("warning: feishu websocket session ended: {error}");
             }
         }
 
-        tokio::time::sleep(reconnect_interval).await;
+        tokio::select! {
+            _ = stop.wait() => return Ok(()),
+            _ = tokio::time::sleep(reconnect_interval) => {}
+        }
     }
 }
 
@@ -242,6 +254,7 @@ async fn run_feishu_websocket_session(
     state: &FeishuWebhookState,
     url: &str,
     ws_config: &FeishuWsEndpointClientConfig,
+    stop: ChannelServeStopHandle,
 ) -> CliResult<()> {
     let parsed_url = reqwest::Url::parse(url)
         .map_err(|error| format!("parse Feishu websocket URL failed: {error}"))?;
@@ -260,15 +273,19 @@ async fn run_feishu_websocket_session(
     // Install the same process default once so websocket TLS does not panic when other crates
     // also link rustls with aws-lc-rs enabled.
     ensure_feishu_websocket_rustls_provider();
-    let (mut stream, _) = connect_async(parsed_url.as_str())
-        .await
-        .map_err(|error| format!("connect Feishu websocket failed: {error}"))?;
+    let connect_result = tokio::select! {
+        _ = stop.wait() => return Ok(()),
+        result = connect_async(parsed_url.as_str()) => result,
+    };
+    let (mut stream, _) =
+        connect_result.map_err(|error| format!("connect Feishu websocket failed: {error}"))?;
     let mut ping_interval = tokio::time::interval(Duration::from_secs(ping_interval_s));
     ping_interval.tick().await;
     let mut fragments = FeishuWsFragments::default();
 
     loop {
         tokio::select! {
+            _ = stop.wait() => return Ok(()),
             _ = ping_interval.tick() => {
                 let ping_frame = FeishuWsFrame {
                     seq_id: 0,
@@ -289,7 +306,7 @@ async fn run_feishu_websocket_session(
                     .encode(&mut bytes)
                     .map_err(|error| format!("encode Feishu websocket ping frame failed: {error}"))?;
                 stream
-                    .send(Message::Binary(bytes))
+                    .send(Message::Binary(bytes.into()))
                     .await
                     .map_err(|error| format!("send Feishu websocket ping failed: {error}"))?;
             }
@@ -343,7 +360,7 @@ async fn run_feishu_websocket_session(
                         let response_bytes = encode_ws_response_frame(&mut frame, &response)?;
                         let deferred_updates = response.deferred_updates;
                         stream
-                            .send(Message::Binary(response_bytes))
+                            .send(Message::Binary(response_bytes.into()))
                             .await
                             .map_err(|error| format!("send Feishu websocket response failed: {error}"))?;
                         state.dispatch_deferred_updates(deferred_updates);
@@ -424,6 +441,7 @@ fn map_parse_error_status(error: &str) -> StatusCode {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -436,11 +454,14 @@ mod tests {
     use futures_util::{SinkExt, StreamExt};
     use serde_json::{Value, json};
     use tokio::net::TcpListener;
-    use tokio::sync::Mutex;
+    use tokio::sync::{Mutex, Notify};
     use tokio_tungstenite::accept_async;
 
     use super::*;
     use crate::channel::ChannelPlatform;
+
+    const MOCK_PROVIDER_MARKDOWN_REPLY: &str = "## structured inbound ack\n\n- rendered";
+    const FEISHU_WEBSOCKET_TEST_STACK_SIZE_BYTES: usize = 16 * 1024 * 1024;
     use crate::config::{FeishuChannelServeMode, LoongClawConfig, ProviderConfig};
     use crate::context::{DEFAULT_TOKEN_TTL_S, bootstrap_test_kernel_context};
 
@@ -464,6 +485,28 @@ mod tests {
                 .expect("clock")
                 .as_nanos()
         ))
+    }
+
+    fn run_feishu_websocket_test_on_large_stack<F, Fut>(thread_name: &str, operation: F)
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let join_handle = std::thread::Builder::new()
+            .name(thread_name.to_owned())
+            .stack_size(FEISHU_WEBSOCKET_TEST_STACK_SIZE_BYTES)
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("build feishu websocket test runtime");
+                runtime.block_on(operation());
+            })
+            .expect("spawn feishu websocket large-stack test thread");
+        match join_handle.join() {
+            Ok(()) => {}
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
     }
 
     async fn spawn_mock_http_server(router: Router) -> (String, tokio::task::JoinHandle<()>) {
@@ -495,6 +538,20 @@ mod tests {
         });
     }
 
+    async fn wait_for_request_count(
+        requests: &Arc<Mutex<Vec<MockRequest>>>,
+        expected_len: usize,
+    ) -> Vec<MockRequest> {
+        for _ in 0..50 {
+            let snapshot = requests.lock().await.clone();
+            if snapshot.len() >= expected_len {
+                return snapshot;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        requests.lock().await.clone()
+    }
+
     async fn spawn_mock_provider_server(
         requests: Arc<Mutex<Vec<MockRequest>>>,
     ) -> (String, tokio::task::JoinHandle<()>) {
@@ -510,7 +567,7 @@ mod tests {
                         Json(json!({
                             "choices": [{
                                 "message": {
-                                    "content": "structured inbound ack"
+                                    "content": MOCK_PROVIDER_MARKDOWN_REPLY
                                 }
                             }]
                         }))
@@ -561,6 +618,24 @@ mod tests {
                         }
                     }
                 }),
+            )
+            .route(
+                "/open-apis/im/v1/messages/{message_id}/reactions",
+                post({
+                    let state = state.clone();
+                    move |request| {
+                        let state = state.clone();
+                        async move {
+                            record_request(State(state), request).await;
+                            Json(json!({
+                                "code": 0,
+                                "data": {
+                                    "reaction_id": "reaction_websocket_1"
+                                }
+                            }))
+                        }
+                    }
+                }),
             );
         spawn_mock_http_server(router).await
     }
@@ -572,7 +647,9 @@ mod tests {
         let mut config = LoongClawConfig {
             provider: ProviderConfig {
                 base_url: provider_base_url.to_owned(),
-                api_key: Some("test-provider-key".to_owned()),
+                api_key: Some(loongclaw_contracts::SecretRef::Inline(
+                    "test-provider-key".to_owned(),
+                )),
                 model: "test-model".to_owned(),
                 ..ProviderConfig::default()
             },
@@ -581,8 +658,12 @@ mod tests {
         config.memory.sqlite_path = temp_dir.join("memory.sqlite3").display().to_string();
         config.feishu.enabled = true;
         config.feishu.account_id = Some("feishu_main".to_owned());
-        config.feishu.app_id = Some("cli_a1b2c3".to_owned());
-        config.feishu.app_secret = Some("secret-123".to_owned());
+        config.feishu.app_id = Some(loongclaw_contracts::SecretRef::Inline(
+            "cli_a1b2c3".to_owned(),
+        ));
+        config.feishu.app_secret = Some(loongclaw_contracts::SecretRef::Inline(
+            "secret-123".to_owned(),
+        ));
         config.feishu.base_url = Some(feishu_base_url.to_owned());
         config.feishu.mode = Some(FeishuChannelServeMode::Websocket);
         config.feishu.receive_id_type = "chat_id".to_owned();
@@ -634,7 +715,7 @@ mod tests {
                 .encode(&mut bytes)
                 .map_err(|error| format!("encode websocket frame failed: {error}"))?;
             stream
-                .send(Message::Binary(bytes))
+                .send(Message::Binary(bytes.into()))
                 .await
                 .map_err(|error| format!("send websocket frame failed: {error}"))?;
 
@@ -711,8 +792,14 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn feishu_websocket_fragments_refresh_ttl_when_new_chunks_arrive() {
+    #[test]
+    fn feishu_websocket_fragments_refresh_ttl_when_new_chunks_arrive() {
+        run_feishu_websocket_test_on_large_stack("feishu-websocket-fragments", || async move {
+            feishu_websocket_fragments_refresh_ttl_when_new_chunks_arrive_impl().await;
+        });
+    }
+
+    async fn feishu_websocket_fragments_refresh_ttl_when_new_chunks_arrive_impl() {
         let mut fragments = FeishuWsFragments::default();
         assert_eq!(
             fragments.combine("evt_ws_fragments", 3, 0, b"hel".to_vec()),
@@ -739,8 +826,14 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn feishu_websocket_wss_urls_do_not_fail_due_to_missing_tls_support() {
+    #[test]
+    fn feishu_websocket_wss_urls_do_not_fail_due_to_missing_tls_support() {
+        run_feishu_websocket_test_on_large_stack("feishu-websocket-wss-url", || async move {
+            feishu_websocket_wss_urls_do_not_fail_due_to_missing_tls_support_impl().await;
+        });
+    }
+
+    async fn feishu_websocket_wss_urls_do_not_fail_due_to_missing_tls_support_impl() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind disposable tcp listener");
@@ -757,8 +850,14 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn feishu_websocket_wss_session_surfaces_tls_errors_without_panicking() {
+    #[test]
+    fn feishu_websocket_wss_session_surfaces_tls_errors_without_panicking() {
+        run_feishu_websocket_test_on_large_stack("feishu-websocket-wss-session", || async move {
+            feishu_websocket_wss_session_surfaces_tls_errors_without_panicking_impl().await;
+        });
+    }
+
+    async fn feishu_websocket_wss_session_surfaces_tls_errors_without_panicking_impl() {
         let provider_requests = Arc::new(Mutex::new(Vec::<MockRequest>::new()));
         let feishu_requests = Arc::new(Mutex::new(Vec::<MockRequest>::new()));
         let (provider_base_url, provider_server) =
@@ -803,12 +902,13 @@ mod tests {
 
         let session_url = format!("wss://{address}/events?service_id=42");
         let session_join = tokio::time::timeout(
-            Duration::from_secs(5),
+            Duration::from_secs(15),
             tokio::spawn(async move {
                 run_feishu_websocket_session(
                     &state,
                     session_url.as_str(),
                     &FeishuWsEndpointClientConfig::default(),
+                    ChannelServeStopHandle::new(),
                 )
                 .await
             }),
@@ -834,8 +934,107 @@ mod tests {
         feishu_server.abort();
     }
 
-    #[tokio::test]
-    async fn feishu_websocket_session_reaches_provider_and_replies() {
+    #[test]
+    fn feishu_websocket_session_stop_interrupts_stalled_initial_connect() {
+        run_feishu_websocket_test_on_large_stack("feishu-websocket-stop", || async move {
+            feishu_websocket_session_stop_interrupts_stalled_initial_connect_impl().await;
+        });
+    }
+
+    async fn feishu_websocket_session_stop_interrupts_stalled_initial_connect_impl() {
+        let provider_requests = Arc::new(Mutex::new(Vec::<MockRequest>::new()));
+        let feishu_requests = Arc::new(Mutex::new(Vec::<MockRequest>::new()));
+        let (provider_base_url, provider_server) =
+            spawn_mock_provider_server(provider_requests.clone()).await;
+        let (feishu_base_url, feishu_server) =
+            spawn_mock_feishu_api_server(feishu_requests.clone(), "om_reply_ws_stop_1").await;
+
+        let config = test_websocket_config(&provider_base_url, &feishu_base_url);
+        let resolved = config
+            .feishu
+            .resolve_account(None)
+            .expect("resolve websocket feishu account");
+        let mut adapter = FeishuAdapter::new(&resolved).expect("build feishu adapter");
+        adapter
+            .refresh_tenant_token()
+            .await
+            .expect("refresh tenant token before websocket stop test");
+        let kernel_ctx =
+            bootstrap_test_kernel_context("feishu-websocket-stop-test", DEFAULT_TOKEN_TTL_S)
+                .expect("bootstrap kernel context");
+        let runtime = Arc::new(
+            ChannelOperationRuntimeTracker::start(
+                ChannelPlatform::Feishu,
+                "serve",
+                resolved.account.id.as_str(),
+                resolved.account.label.as_str(),
+            )
+            .await
+            .expect("start runtime tracker"),
+        );
+        let state = FeishuWebhookState::new(config, &resolved, adapter, kernel_ctx, runtime);
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stalled websocket listener");
+        let address = listener
+            .local_addr()
+            .expect("stalled websocket listener addr");
+        let accepted = Arc::new(Notify::new());
+        let release_socket = Arc::new(Notify::new());
+        let accepted_for_server = accepted.clone();
+        let release_for_server = release_socket.clone();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener
+                .accept()
+                .await
+                .expect("accept stalled websocket socket");
+            accepted_for_server.notify_waiters();
+            release_for_server.notified().await;
+            drop(socket);
+        });
+
+        let stop = ChannelServeStopHandle::new();
+        let stop_for_session = stop.clone();
+        let session_url = format!("ws://{address}/events?service_id=42");
+        let mut session = tokio::spawn(async move {
+            run_feishu_websocket_session(
+                &state,
+                session_url.as_str(),
+                &FeishuWsEndpointClientConfig::default(),
+                stop_for_session,
+            )
+            .await
+        });
+
+        accepted.notified().await;
+        stop.request_stop();
+
+        let session_result = tokio::select! {
+            result = &mut session => result,
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                session.abort();
+                panic!("stop should interrupt the stalled websocket connect");
+            }
+        };
+        session_result
+            .expect("join stalled websocket session")
+            .expect("stop should end stalled websocket connect cleanly");
+
+        release_socket.notify_waiters();
+        let _ = server.await;
+        provider_server.abort();
+        feishu_server.abort();
+    }
+
+    #[test]
+    fn feishu_websocket_session_reaches_provider_and_replies() {
+        run_feishu_websocket_test_on_large_stack("feishu-websocket-session", || async move {
+            feishu_websocket_session_reaches_provider_and_replies_impl().await;
+        });
+    }
+
+    async fn feishu_websocket_session_reaches_provider_and_replies_impl() {
         let provider_requests = Arc::new(Mutex::new(Vec::<MockRequest>::new()));
         let feishu_requests = Arc::new(Mutex::new(Vec::<MockRequest>::new()));
         let (provider_base_url, provider_server) =
@@ -899,6 +1098,7 @@ mod tests {
                 ping_interval_s: Some(30),
                 ..FeishuWsEndpointClientConfig::default()
             },
+            ChannelServeStopHandle::new(),
         )
         .await
         .expect_err("session should end after the mock server closes");
@@ -928,21 +1128,37 @@ mod tests {
             "provider request should include the websocket inbound message"
         );
 
-        let feishu_requests = feishu_requests.lock().await.clone();
-        assert_eq!(feishu_requests.len(), 2);
+        let feishu_requests = wait_for_request_count(&feishu_requests, 3).await;
+        assert_eq!(feishu_requests.len(), 3);
+        let reaction_request = feishu_requests
+            .iter()
+            .find(|request| request.path == "/open-apis/im/v1/messages/om_inbound_ws_1/reactions")
+            .expect("websocket flow should add ack reaction");
         assert_eq!(
-            feishu_requests[1].path,
-            "/open-apis/im/v1/messages/om_inbound_ws_1/reply"
-        );
-        assert_eq!(
-            feishu_requests[1].authorization.as_deref(),
+            reaction_request.authorization.as_deref(),
             Some("Bearer t-token-websocket")
         );
         assert!(
-            feishu_requests[1]
+            reaction_request.body.contains("\"emoji_type\""),
+            "reaction request should include a Feishu emoji type"
+        );
+        let reply_request = feishu_requests
+            .iter()
+            .find(|request| request.path == "/open-apis/im/v1/messages/om_inbound_ws_1/reply")
+            .expect("websocket flow should still send a reply");
+        assert!(
+            reply_request.body.contains("\"msg_type\":\"interactive\""),
+            "websocket flow should send markdown-capable interactive cards"
+        );
+        assert!(
+            reply_request.body.contains("\\\"tag\\\":\\\"markdown\\\""),
+            "websocket flow should wrap the provider reply in a markdown card"
+        );
+        assert!(
+            reply_request
                 .body
-                .contains("\\\"text\\\":\\\"structured inbound ack\\\""),
-            "websocket flow should still send the provider reply back through Feishu"
+                .contains("\\\"content\\\":\\\"## structured inbound ack\\\\n\\\\n- rendered\\\""),
+            "websocket flow should preserve provider markdown content"
         );
 
         provider_server.abort();

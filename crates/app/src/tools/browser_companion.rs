@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::io::{ErrorKind, Write};
+use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -9,6 +9,9 @@ use loongclaw_contracts::{ToolCoreOutcome, ToolCoreRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use wait_timeout::ChildExt;
+
+use crate::process_launch::resolve_command_invocation;
+use crate::process_launch::retry_executable_file_busy_with_pause as retry_spawn_with_pause;
 
 const DEFAULT_BROWSER_COMPANION_SCOPE_ID: &str = "__global";
 const BROWSER_COMPANION_PROTOCOL: &str = "loongclaw.browser_companion.v1";
@@ -81,7 +84,7 @@ impl BrowserCompanionOperation {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 struct BrowserCompanionProtocolRequest {
     protocol: &'static str,
     tool_name: String,
@@ -121,11 +124,18 @@ impl BrowserCompanionRunner for CommandBrowserCompanionRunner {
         timeout_seconds: u64,
         request: &BrowserCompanionProtocolRequest,
     ) -> Result<Value, String> {
+        #[cfg(test)]
+        let _test_guard = browser_companion_command_test_lock()
+            .lock()
+            .map_err(|error| format!("browser companion test lock poisoned: {error}"))?;
+
         let encoded = serde_json::to_vec(request)
             .map_err(|error| format!("browser_companion_request_encode_failed: {error}"))?;
         let mut child = retry_executable_file_busy(|| {
-            let mut process = Command::new(command);
+            let invocation = resolve_command_invocation(command, std::iter::empty::<&str>());
+            let mut process = Command::new(&invocation.program);
             process
+                .args(&invocation.args)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
@@ -165,37 +175,21 @@ impl BrowserCompanionRunner for CommandBrowserCompanionRunner {
     }
 }
 
-fn retry_executable_file_busy<T, F>(mut operation: F) -> std::io::Result<T>
+fn retry_executable_file_busy<T, F>(operation: F) -> std::io::Result<T>
 where
     F: FnMut() -> std::io::Result<T>,
 {
-    retry_executable_file_busy_with_pause(&mut operation, || {
-        pause_before_browser_companion_spawn_retry(BROWSER_COMPANION_SPAWN_RETRY_DELAY)
-    })
+    let pause = || pause_before_browser_companion_spawn_retry(BROWSER_COMPANION_SPAWN_RETRY_DELAY);
+
+    retry_executable_file_busy_with_pause(operation, pause)
 }
 
-fn retry_executable_file_busy_with_pause<T, F, P>(
-    mut operation: F,
-    mut pause: P,
-) -> std::io::Result<T>
+fn retry_executable_file_busy_with_pause<T, F, P>(operation: F, pause: P) -> std::io::Result<T>
 where
     F: FnMut() -> std::io::Result<T>,
     P: FnMut() -> std::io::Result<()>,
 {
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        match operation() {
-            Ok(value) => return Ok(value),
-            Err(error)
-                if should_retry_spawn_error(&error)
-                    && attempt < BROWSER_COMPANION_SPAWN_RETRY_ATTEMPTS =>
-            {
-                pause()?;
-            }
-            Err(error) => return Err(error),
-        }
-    }
+    retry_spawn_with_pause(operation, BROWSER_COMPANION_SPAWN_RETRY_ATTEMPTS, pause)
 }
 
 fn pause_before_browser_companion_spawn_retry(delay: Duration) -> std::io::Result<()> {
@@ -246,10 +240,6 @@ fn pause_before_browser_companion_spawn_retry(delay: Duration) -> std::io::Resul
     }
 }
 
-fn should_retry_spawn_error(error: &std::io::Error) -> bool {
-    error.kind() == ErrorKind::ExecutableFileBusy
-}
-
 fn write_browser_companion_request<W, C>(
     stdin: Option<W>,
     encoded: &[u8],
@@ -261,6 +251,14 @@ where
 {
     if let Some(mut stdin) = stdin {
         stdin.write_all(encoded).map_err(|error| {
+            cleanup();
+            format!("browser_companion_stdin_write_failed: {error}")
+        })?;
+        stdin.write_all(b"\n").map_err(|error| {
+            cleanup();
+            format!("browser_companion_stdin_write_failed: {error}")
+        })?;
+        stdin.flush().map_err(|error| {
             cleanup();
             format!("browser_companion_stdin_write_failed: {error}")
         })?;
@@ -309,6 +307,12 @@ static BROWSER_COMPANION_SESSIONS: OnceLock<
 fn browser_companion_sessions()
 -> &'static Mutex<BTreeMap<String, BTreeMap<String, BrowserCompanionSession>>> {
     BROWSER_COMPANION_SESSIONS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(test)]
+fn browser_companion_command_test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 fn next_browser_companion_sequence() -> u64 {
@@ -423,6 +427,12 @@ fn execute_browser_companion_request(
     }
 
     let command = browser_companion_command(policy)?;
+    validate_browser_companion_request_target(
+        request.tool_name.as_str(),
+        operation,
+        payload,
+        policy,
+    )?;
     let session_id = if operation.requires_existing_session() {
         let session_id =
             required_payload_string(payload, "session_id", request.tool_name.as_str())?;
@@ -432,19 +442,32 @@ fn execute_browser_companion_request(
         format!("browser-companion-{}", next_browser_companion_sequence())
     };
 
-    let result = runner.invoke(
-        command,
-        policy.timeout_seconds,
-        &BrowserCompanionProtocolRequest {
-            protocol: BROWSER_COMPANION_PROTOCOL,
-            tool_name: request.tool_name.clone(),
-            operation: operation.protocol_name(),
-            action_class: operation.action_class(),
-            session_scope: scope_id.to_owned(),
-            session_id: session_id.clone(),
-            arguments: browser_companion_arguments(payload),
-        },
-    )?;
+    let protocol_request = BrowserCompanionProtocolRequest {
+        protocol: BROWSER_COMPANION_PROTOCOL,
+        tool_name: request.tool_name.clone(),
+        operation: operation.protocol_name(),
+        action_class: operation.action_class(),
+        session_scope: scope_id.to_owned(),
+        session_id: session_id.clone(),
+        arguments: browser_companion_arguments(payload),
+    };
+    let result = runner.invoke(command, policy.timeout_seconds, &protocol_request)?;
+    let result_validation =
+        validate_browser_companion_result_target(request.tool_name.as_str(), &result, policy);
+    if let Err(error) = result_validation {
+        let cleanup = cleanup_browser_companion_after_invalid_result(
+            operation,
+            scope_id,
+            session_id.as_str(),
+            command,
+            policy.timeout_seconds,
+            runner,
+        );
+        if let Err(cleanup_error) = cleanup {
+            return Err(format!("{error}; {cleanup_error}"));
+        }
+        return Err(error);
+    }
 
     match operation {
         BrowserCompanionOperation::SessionStart => {
@@ -482,6 +505,44 @@ fn execute_browser_companion_request(
     })
 }
 
+fn cleanup_browser_companion_after_invalid_result(
+    operation: BrowserCompanionOperation,
+    scope_id: &str,
+    session_id: &str,
+    command: &str,
+    timeout_seconds: u64,
+    runner: &dyn BrowserCompanionRunner,
+) -> Result<(), String> {
+    if operation == BrowserCompanionOperation::SessionStop {
+        return Ok(());
+    }
+
+    let stop_request = BrowserCompanionProtocolRequest {
+        protocol: BROWSER_COMPANION_PROTOCOL,
+        tool_name: "browser.companion.session.stop".to_owned(),
+        operation: BrowserCompanionOperation::SessionStop.protocol_name(),
+        action_class: BrowserCompanionOperation::SessionStop.action_class(),
+        session_scope: scope_id.to_owned(),
+        session_id: session_id.to_owned(),
+        arguments: Value::Object(Map::new()),
+    };
+    let remote_cleanup = runner.invoke(command, timeout_seconds, &stop_request);
+    let local_cleanup = remove_browser_companion_session_if_present(scope_id, session_id);
+
+    let mut cleanup_issues = Vec::new();
+    if let Err(error) = remote_cleanup {
+        cleanup_issues.push(format!("browser_companion_remote_cleanup_failed: {error}"));
+    }
+    if let Err(error) = local_cleanup {
+        cleanup_issues.push(format!("browser_companion_local_cleanup_failed: {error}"));
+    }
+    if cleanup_issues.is_empty() {
+        return Ok(());
+    }
+
+    Err(cleanup_issues.join("; "))
+}
+
 fn browser_companion_command(
     policy: &super::runtime_config::BrowserCompanionRuntimePolicy,
 ) -> Result<&str, String> {
@@ -513,6 +574,72 @@ fn browser_companion_arguments(payload: &Map<String, Value>) -> Value {
     arguments.remove(super::BROWSER_SESSION_SCOPE_FIELD);
     arguments.remove("session_id");
     Value::Object(arguments)
+}
+
+fn validate_browser_companion_request_target(
+    tool_name: &str,
+    operation: BrowserCompanionOperation,
+    payload: &Map<String, Value>,
+    policy: &super::runtime_config::BrowserCompanionRuntimePolicy,
+) -> Result<(), String> {
+    let starts_session = operation == BrowserCompanionOperation::SessionStart;
+    let navigates = operation == BrowserCompanionOperation::Navigate;
+    if !starts_session && !navigates {
+        return Ok(());
+    }
+
+    let raw_url = required_payload_string(payload, "url", tool_name)?;
+    validate_browser_companion_target_url(
+        raw_url.as_str(),
+        policy,
+        format!("{tool_name} payload.url").as_str(),
+    )
+}
+
+fn validate_browser_companion_result_target(
+    tool_name: &str,
+    result: &Value,
+    policy: &super::runtime_config::BrowserCompanionRuntimePolicy,
+) -> Result<(), String> {
+    let page_url = result
+        .get("page_url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let Some(page_url) = page_url else {
+        return Ok(());
+    };
+
+    validate_browser_companion_target_url(
+        page_url,
+        policy,
+        format!("{tool_name} result.page_url").as_str(),
+    )
+}
+
+fn validate_browser_companion_target_url(
+    raw_url: &str,
+    policy: &super::runtime_config::BrowserCompanionRuntimePolicy,
+    surface_name: &str,
+) -> Result<(), String> {
+    let parsed_url = reqwest::Url::parse(raw_url)
+        .map_err(|error| format!("{surface_name} is invalid: {error}"))?;
+    let web_policy = policy.web_policy();
+    let allowed_domains = if web_policy.enforce_allowed_domains {
+        Some(&web_policy.allowed_domains)
+    } else {
+        None
+    };
+    let blocked_domains = Some(&web_policy.blocked_domains);
+    let options = super::web_http::HttpTargetValidationOptions {
+        allow_private_hosts: web_policy.allow_private_hosts,
+        reject_userinfo: false,
+        resolve_dns: false,
+        enforce_allowed_domains: web_policy.enforce_allowed_domains,
+        allowed_domains,
+        blocked_domains,
+    };
+    super::web_http::validate_http_target(&parsed_url, &options, surface_name).map(|_| ())
 }
 
 fn required_payload_string(
@@ -588,11 +715,31 @@ fn remove_browser_companion_session(scope_id: &str, session_id: &str) -> Result<
     Ok(())
 }
 
+fn remove_browser_companion_session_if_present(
+    scope_id: &str,
+    session_id: &str,
+) -> Result<(), String> {
+    let mut sessions = browser_companion_sessions()
+        .lock()
+        .map_err(|error| format!("browser companion session store lock poisoned: {error}"))?;
+    let Some(scope_sessions) = sessions.get_mut(scope_id) else {
+        return Ok(());
+    };
+    scope_sessions.remove(session_id);
+    if scope_sessions.is_empty() {
+        sessions.remove(scope_id);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
         io,
-        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+        sync::{
+            Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
         time::Duration,
     };
 
@@ -707,6 +854,17 @@ mod tests {
     }
 
     #[test]
+    fn write_browser_companion_request_appends_newline_frame() {
+        let mut buffer = Vec::new();
+        let mut writer = io::Cursor::new(&mut buffer);
+
+        super::write_browser_companion_request(Some(&mut writer), br#"{"ok":true}"#, || {})
+            .expect("request write should succeed");
+
+        assert_eq!(buffer, b"{\"ok\":true}\n");
+    }
+
+    #[test]
     fn pause_before_browser_companion_spawn_retry_is_safe_on_current_thread_runtime() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -740,11 +898,34 @@ mod tests {
         }
     }
 
+    struct ResultRunner {
+        calls: AtomicUsize,
+        requests: Mutex<Vec<super::BrowserCompanionProtocolRequest>>,
+        result: Value,
+    }
+
+    impl super::BrowserCompanionRunner for ResultRunner {
+        fn invoke(
+            &self,
+            _command: &str,
+            _timeout_seconds: u64,
+            request: &super::BrowserCompanionProtocolRequest,
+        ) -> Result<Value, String> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let mut requests = self
+                .requests
+                .lock()
+                .expect("lock browser companion request log");
+            requests.push(request.clone());
+            Ok(self.result.clone())
+        }
+    }
+
     #[test]
     fn browser_companion_session_start_reports_balanced_execution_tier() {
         let request = ToolCoreRequest {
             tool_name: "browser.companion.session.start".to_owned(),
-            payload: json!({}),
+            payload: json!({"url": "http://127.0.0.1/start"}),
         };
         let payload = request
             .payload
@@ -757,6 +938,10 @@ mod tests {
             command: Some("browser-companion".to_owned()),
             expected_version: Some("1.5.0".to_owned()),
             timeout_seconds: 5,
+            allow_private_hosts: true,
+            enforce_allowed_domains: false,
+            allowed_domains: std::collections::BTreeSet::new(),
+            blocked_domains: std::collections::BTreeSet::new(),
         };
 
         let outcome = super::execute_browser_companion_request(
@@ -797,5 +982,189 @@ mod tests {
 
         assert_eq!(stopped.payload["session_id"], json!(session_id));
         assert_eq!(stopped.payload["operation"], json!("session.stop"));
+    }
+
+    #[test]
+    fn browser_companion_session_start_rejects_blocked_payload_url_before_spawn() {
+        let request = ToolCoreRequest {
+            tool_name: "browser.companion.session.start".to_owned(),
+            payload: json!({"url": "https://blocked.example.com"}),
+        };
+        let payload = request
+            .payload
+            .as_object()
+            .expect("browser companion payload object")
+            .clone();
+        let policy = super::super::runtime_config::BrowserCompanionRuntimePolicy {
+            enabled: true,
+            ready: true,
+            command: Some("browser-companion".to_owned()),
+            expected_version: None,
+            timeout_seconds: 5,
+            allow_private_hosts: false,
+            enforce_allowed_domains: false,
+            allowed_domains: std::collections::BTreeSet::new(),
+            blocked_domains: std::collections::BTreeSet::from(["blocked.example.com".to_owned()]),
+        };
+        let runner = ResultRunner {
+            calls: AtomicUsize::new(0),
+            requests: Mutex::new(Vec::new()),
+            result: json!({"page_url": "https://blocked.example.com"}),
+        };
+
+        let error = super::execute_browser_companion_request(
+            request,
+            &payload,
+            "test-scope",
+            &policy,
+            &runner,
+            true,
+        )
+        .expect_err("blocked url should fail before companion spawn");
+
+        assert!(
+            error.contains("blocked host"),
+            "expected blocked-host error, got {error}"
+        );
+        assert_eq!(runner.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn browser_companion_revalidates_returned_page_url() {
+        let request = ToolCoreRequest {
+            tool_name: "browser.companion.session.start".to_owned(),
+            payload: json!({"url": "http://127.0.0.1/start"}),
+        };
+        let payload = request
+            .payload
+            .as_object()
+            .expect("browser companion payload object")
+            .clone();
+        let policy = super::super::runtime_config::BrowserCompanionRuntimePolicy {
+            enabled: true,
+            ready: true,
+            command: Some("browser-companion".to_owned()),
+            expected_version: None,
+            timeout_seconds: 5,
+            allow_private_hosts: true,
+            enforce_allowed_domains: false,
+            allowed_domains: std::collections::BTreeSet::new(),
+            blocked_domains: std::collections::BTreeSet::from(["internal.example".to_owned()]),
+        };
+        let runner = ResultRunner {
+            calls: AtomicUsize::new(0),
+            requests: Mutex::new(Vec::new()),
+            result: json!({"page_url": "https://internal.example"}),
+        };
+
+        let error = super::execute_browser_companion_request(
+            request,
+            &payload,
+            "test-scope",
+            &policy,
+            &runner,
+            true,
+        )
+        .expect_err("returned page_url outside policy should fail closed");
+
+        assert!(
+            error.contains("blocked host"),
+            "expected returned page_url revalidation, got {error}"
+        );
+        assert_eq!(runner.calls.load(Ordering::Relaxed), 2);
+
+        let requests = runner
+            .requests
+            .lock()
+            .expect("lock browser companion request log");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].operation, "session.start");
+        assert_eq!(requests[1].operation, "session.stop");
+        assert_eq!(requests[0].session_id, requests[1].session_id);
+    }
+
+    #[test]
+    fn browser_companion_boundary_failure_drops_existing_session() {
+        let scope_id = "test-scope-boundary-cleanup";
+        let policy = super::super::runtime_config::BrowserCompanionRuntimePolicy {
+            enabled: true,
+            ready: true,
+            command: Some("browser-companion".to_owned()),
+            expected_version: None,
+            timeout_seconds: 5,
+            allow_private_hosts: true,
+            enforce_allowed_domains: false,
+            allowed_domains: std::collections::BTreeSet::new(),
+            blocked_domains: std::collections::BTreeSet::from(["internal.example".to_owned()]),
+        };
+        let start_request = ToolCoreRequest {
+            tool_name: "browser.companion.session.start".to_owned(),
+            payload: json!({"url": "http://127.0.0.1/start"}),
+        };
+        let start_payload = start_request
+            .payload
+            .as_object()
+            .expect("browser companion payload object")
+            .clone();
+        let start_outcome = super::execute_browser_companion_request(
+            start_request,
+            &start_payload,
+            scope_id,
+            &policy,
+            &OkRunner,
+            true,
+        )
+        .expect("browser companion session start should succeed");
+        let session_id = start_outcome.payload["session_id"]
+            .as_str()
+            .expect("session id should be text")
+            .to_owned();
+
+        let navigate_request = ToolCoreRequest {
+            tool_name: "browser.companion.navigate".to_owned(),
+            payload: json!({
+                "session_id": session_id,
+                "url": "http://127.0.0.1/next"
+            }),
+        };
+        let navigate_payload = navigate_request
+            .payload
+            .as_object()
+            .expect("browser companion payload object")
+            .clone();
+        let runner = ResultRunner {
+            calls: AtomicUsize::new(0),
+            requests: Mutex::new(Vec::new()),
+            result: json!({"page_url": "https://internal.example"}),
+        };
+
+        let error = super::execute_browser_companion_request(
+            navigate_request,
+            &navigate_payload,
+            scope_id,
+            &policy,
+            &runner,
+            true,
+        )
+        .expect_err("returned page_url outside policy should fail closed");
+
+        assert!(
+            error.contains("blocked host"),
+            "expected returned page_url revalidation, got {error}"
+        );
+        assert!(
+            super::ensure_browser_companion_session(scope_id, session_id.as_str()).is_err(),
+            "boundary cleanup should drop the existing local companion session"
+        );
+        assert_eq!(runner.calls.load(Ordering::Relaxed), 2);
+
+        let requests = runner
+            .requests
+            .lock()
+            .expect("lock browser companion request log");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].operation, "navigate");
+        assert_eq!(requests[1].operation, "session.stop");
+        assert_eq!(requests[0].session_id, requests[1].session_id);
     }
 }

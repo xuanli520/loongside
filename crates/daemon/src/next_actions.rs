@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 
 use loongclaw_app as mvp;
@@ -8,6 +9,7 @@ pub use mvp::chat::DEFAULT_FIRST_PROMPT as DEFAULT_FIRST_ASK_MESSAGE;
 pub enum SetupNextActionKind {
     Ask,
     Chat,
+    Personalize,
     Channel,
     BrowserPreview,
     Doctor,
@@ -24,6 +26,7 @@ pub(crate) enum BrowserPreviewActionPhase {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetupNextAction {
     pub kind: SetupNextActionKind,
+    pub channel_action_id: Option<&'static str>,
     pub browser_preview_phase: Option<BrowserPreviewActionPhase>,
     pub label: String,
     pub command: String,
@@ -43,11 +46,16 @@ pub(crate) fn collect_setup_next_actions_with_path_env(
     path_env: Option<&OsStr>,
 ) -> Vec<SetupNextAction> {
     let mut actions = Vec::new();
+    let channel_actions =
+        crate::migration::channels::collect_channel_next_actions(config, config_path);
+    let unresolved_plugin_bridge_surfaces =
+        collect_unresolved_plugin_bridge_surface_ids(config, &channel_actions);
     let browser_preview =
         crate::browser_preview::inspect_browser_preview_state_with_path_env(config, path_env);
     if config.cli.enabled {
         actions.push(SetupNextAction {
             kind: SetupNextActionKind::Ask,
+            channel_action_id: None,
             browser_preview_phase: None,
             label: "first answer".to_owned(),
             command: crate::cli_handoff::format_ask_with_config(
@@ -57,25 +65,38 @@ pub(crate) fn collect_setup_next_actions_with_path_env(
         });
         actions.push(SetupNextAction {
             kind: SetupNextActionKind::Chat,
+            channel_action_id: None,
             browser_preview_phase: None,
             label: "chat".to_owned(),
             command: crate::cli_handoff::format_subcommand_with_config("chat", config_path),
         });
-    }
-    actions.extend(
-        crate::migration::channels::collect_channel_next_actions(config, config_path)
-            .into_iter()
-            .map(|action| SetupNextAction {
-                kind: SetupNextActionKind::Channel,
+        if should_suggest_personalization(config) {
+            actions.push(SetupNextAction {
+                kind: SetupNextActionKind::Personalize,
+                channel_action_id: None,
                 browser_preview_phase: None,
-                label: action.label.to_owned(),
-                command: action.command,
-            }),
-    );
+                label: "working preferences".to_owned(),
+                command: crate::cli_handoff::format_subcommand_with_config(
+                    "personalize",
+                    config_path,
+                ),
+            });
+        }
+    }
+    if !unresolved_plugin_bridge_surfaces.is_empty() {
+        let doctor_action =
+            build_managed_bridge_doctor_action(config_path, &unresolved_plugin_bridge_surfaces);
+        actions.push(doctor_action);
+    }
+    let channel_setup_actions = channel_actions
+        .into_iter()
+        .map(channel_next_action_to_setup_action);
+    actions.extend(channel_setup_actions);
     if config.cli.enabled {
         let preview_action = if browser_preview.ready() {
             Some(SetupNextAction {
                 kind: SetupNextActionKind::BrowserPreview,
+                channel_action_id: None,
                 browser_preview_phase: Some(BrowserPreviewActionPhase::Ready),
                 label: crate::browser_preview::BROWSER_PREVIEW_READY_LABEL.to_owned(),
                 command: crate::browser_preview::browser_preview_ready_command(config_path),
@@ -83,6 +104,7 @@ pub(crate) fn collect_setup_next_actions_with_path_env(
         } else if browser_preview.needs_shell_unblock() {
             Some(SetupNextAction {
                 kind: SetupNextActionKind::BrowserPreview,
+                channel_action_id: None,
                 browser_preview_phase: Some(BrowserPreviewActionPhase::Unblock),
                 label: crate::browser_preview::BROWSER_PREVIEW_UNBLOCK_LABEL.to_owned(),
                 command: crate::browser_preview::browser_preview_unblock_command(config_path),
@@ -90,6 +112,7 @@ pub(crate) fn collect_setup_next_actions_with_path_env(
         } else if browser_preview.needs_enable_command() {
             Some(SetupNextAction {
                 kind: SetupNextActionKind::BrowserPreview,
+                channel_action_id: None,
                 browser_preview_phase: Some(BrowserPreviewActionPhase::Enable),
                 label: crate::browser_preview::BROWSER_PREVIEW_ENABLE_LABEL.to_owned(),
                 command: crate::browser_preview::browser_preview_enable_command(config_path),
@@ -97,6 +120,7 @@ pub(crate) fn collect_setup_next_actions_with_path_env(
         } else if browser_preview.needs_runtime_install() {
             Some(SetupNextAction {
                 kind: SetupNextActionKind::BrowserPreview,
+                channel_action_id: None,
                 browser_preview_phase: Some(BrowserPreviewActionPhase::InstallRuntime),
                 label: format!("install {}", mvp::tools::BROWSER_COMPANION_COMMAND),
                 command: crate::browser_preview::browser_preview_install_command().to_owned(),
@@ -111,12 +135,151 @@ pub(crate) fn collect_setup_next_actions_with_path_env(
     if actions.is_empty() {
         actions.push(SetupNextAction {
             kind: SetupNextActionKind::Doctor,
+            channel_action_id: None,
             browser_preview_phase: None,
             label: "doctor".to_owned(),
             command: crate::cli_handoff::format_subcommand_with_config("doctor", config_path),
         });
     }
     actions
+}
+
+fn collect_unresolved_plugin_bridge_surface_ids(
+    config: &mvp::config::LoongClawConfig,
+    channel_actions: &[crate::migration::channels::ChannelNextAction],
+) -> Vec<&'static str> {
+    let has_catalog_only_channel_handoff = channel_actions_are_catalog_only(channel_actions);
+
+    if !has_catalog_only_channel_handoff {
+        return Vec::new();
+    }
+
+    unresolved_plugin_bridge_surface_ids(config)
+}
+
+fn channel_actions_are_catalog_only(
+    channel_actions: &[crate::migration::channels::ChannelNextAction],
+) -> bool {
+    if channel_actions.len() != 1 {
+        return false;
+    }
+
+    let Some(action) = channel_actions.first() else {
+        return false;
+    };
+
+    action.id == crate::migration::channels::CHANNEL_CATALOG_ACTION_ID
+}
+
+fn unresolved_plugin_bridge_surface_ids(
+    config: &mvp::config::LoongClawConfig,
+) -> Vec<&'static str> {
+    let inventory = mvp::channel::channel_inventory(config);
+    let channel_checks = crate::migration::channels::collect_channel_preflight_checks(config);
+    let unresolved_surface_names = channel_checks
+        .into_iter()
+        .filter(|check| check.level != crate::migration::channels::ChannelCheckLevel::Pass)
+        .map(|check| check.name)
+        .collect::<BTreeSet<_>>();
+
+    inventory
+        .channel_surfaces
+        .into_iter()
+        .filter(enabled_plugin_bridge_surface)
+        .filter(|surface| {
+            let surface_name = plugin_bridge_surface_name(surface.catalog.id);
+            unresolved_surface_names.contains(surface_name)
+        })
+        .map(|surface| surface.catalog.id)
+        .collect()
+}
+
+fn enabled_plugin_bridge_surface(surface: &mvp::channel::ChannelSurface) -> bool {
+    let has_plugin_bridge_contract = surface.catalog.plugin_bridge_contract.is_some();
+
+    if !has_plugin_bridge_contract {
+        return false;
+    }
+
+    surface
+        .configured_accounts
+        .iter()
+        .any(|snapshot| snapshot.enabled)
+}
+
+fn plugin_bridge_surface_name(channel_id: &'static str) -> &'static str {
+    let descriptor = mvp::config::channel_descriptor(channel_id);
+
+    match descriptor {
+        Some(descriptor) => descriptor.surface_label,
+        None => channel_id,
+    }
+}
+
+fn build_managed_bridge_doctor_action(
+    config_path: &str,
+    unresolved_surface_ids: &[&'static str],
+) -> SetupNextAction {
+    let command = crate::cli_handoff::format_subcommand_with_config("doctor", config_path);
+    let label = managed_bridge_doctor_action_label(unresolved_surface_ids);
+
+    SetupNextAction {
+        kind: SetupNextActionKind::Doctor,
+        channel_action_id: None,
+        browser_preview_phase: None,
+        label,
+        command,
+    }
+}
+
+fn managed_bridge_doctor_action_label(unresolved_surface_ids: &[&'static str]) -> String {
+    if unresolved_surface_ids.len() == 1 {
+        let surface_id = unresolved_surface_ids
+            .first()
+            .copied()
+            .unwrap_or("managed bridge");
+        return format!("verify {surface_id} managed bridge");
+    }
+
+    if unresolved_surface_ids.is_empty() {
+        return "verify managed bridges".to_owned();
+    }
+
+    let rendered_surface_ids = unresolved_surface_ids.join(", ");
+    let label = format!("verify managed bridges: {rendered_surface_ids}");
+
+    label
+}
+
+pub(crate) fn is_managed_bridge_doctor_action(action: &SetupNextAction) -> bool {
+    let is_doctor = action.kind == SetupNextActionKind::Doctor;
+    let label = action.label.as_str();
+    let is_managed_bridge_label = label.starts_with("verify ") && label.contains("managed bridge");
+
+    is_doctor && is_managed_bridge_label
+}
+
+fn channel_next_action_to_setup_action(
+    action: crate::migration::channels::ChannelNextAction,
+) -> SetupNextAction {
+    SetupNextAction {
+        kind: SetupNextActionKind::Channel,
+        channel_action_id: Some(action.id),
+        browser_preview_phase: None,
+        label: action.label.to_owned(),
+        command: action.command,
+    }
+}
+
+fn should_suggest_personalization(config: &mvp::config::LoongClawConfig) -> bool {
+    let personalization = config.memory.trimmed_personalization();
+    let Some(personalization) = personalization else {
+        return true;
+    };
+    if personalization.suppresses_suggestions() {
+        return false;
+    }
+    !personalization.has_operator_preferences()
 }
 
 #[cfg(test)]
@@ -174,6 +337,98 @@ mod tests {
         fs::set_permissions(&path, permissions).expect("clear executable bit");
     }
 
+    fn assert_channel_catalog_action(action: &SetupNextAction) {
+        assert_eq!(action.kind, SetupNextActionKind::Channel);
+        assert_eq!(
+            action.channel_action_id,
+            Some(crate::migration::channels::CHANNEL_CATALOG_ACTION_ID)
+        );
+        assert_eq!(action.browser_preview_phase, None);
+        assert_eq!(action.label, "channels");
+        assert_eq!(
+            action.command,
+            "loong channels --config '/tmp/loongclaw.toml'"
+        );
+    }
+
+    #[test]
+    fn collect_setup_next_actions_includes_personalize_after_chat_when_pending() {
+        let config = mvp::config::LoongClawConfig::default();
+
+        let actions = collect_setup_next_actions_with_path_env(
+            &config,
+            "/tmp/loongclaw.toml",
+            Some(std::ffi::OsStr::new("")),
+        );
+
+        assert_eq!(actions[0].kind, SetupNextActionKind::Ask);
+        assert_eq!(actions[1].kind, SetupNextActionKind::Chat);
+        assert_eq!(actions[2].kind, SetupNextActionKind::Personalize);
+        assert_eq!(actions[2].label, "working preferences");
+        assert_eq!(
+            actions[2].command,
+            "loong personalize --config '/tmp/loongclaw.toml'"
+        );
+    }
+
+    #[test]
+    fn collect_setup_next_actions_omits_personalize_when_suppressed() {
+        let mut config = mvp::config::LoongClawConfig::default();
+        config.memory.personalization = Some(mvp::config::PersonalizationConfig {
+            preferred_name: None,
+            response_density: None,
+            initiative_level: None,
+            standing_boundaries: None,
+            timezone: None,
+            locale: None,
+            prompt_state: mvp::config::PersonalizationPromptState::Suppressed,
+            schema_version: 1,
+            updated_at_epoch_seconds: Some(7),
+        });
+
+        let actions = collect_setup_next_actions_with_path_env(
+            &config,
+            "/tmp/loongclaw.toml",
+            Some(std::ffi::OsStr::new("")),
+        );
+
+        assert!(
+            actions
+                .iter()
+                .all(|action| action.kind != SetupNextActionKind::Personalize),
+            "suppressed personalization should not be suggested again: {actions:#?}"
+        );
+    }
+
+    #[test]
+    fn collect_setup_next_actions_omits_personalize_when_configured() {
+        let mut config = mvp::config::LoongClawConfig::default();
+        config.memory.personalization = Some(mvp::config::PersonalizationConfig {
+            preferred_name: Some("Chum".to_owned()),
+            response_density: Some(mvp::config::ResponseDensity::Balanced),
+            initiative_level: Some(mvp::config::InitiativeLevel::Balanced),
+            standing_boundaries: None,
+            timezone: None,
+            locale: None,
+            prompt_state: mvp::config::PersonalizationPromptState::Configured,
+            schema_version: 1,
+            updated_at_epoch_seconds: Some(7),
+        });
+
+        let actions = collect_setup_next_actions_with_path_env(
+            &config,
+            "/tmp/loongclaw.toml",
+            Some(std::ffi::OsStr::new("")),
+        );
+
+        assert!(
+            actions
+                .iter()
+                .all(|action| action.kind != SetupNextActionKind::Personalize),
+            "configured personalization should not be suggested again: {actions:#?}"
+        );
+    }
+
     #[test]
     fn collect_setup_next_actions_promotes_browser_companion_preview_when_ready() {
         let root = unique_temp_dir("loongclaw-next-actions-browser-companion");
@@ -201,14 +456,16 @@ mod tests {
 
         assert_eq!(actions[0].kind, SetupNextActionKind::Ask);
         assert_eq!(actions[1].kind, SetupNextActionKind::Chat);
-        assert_eq!(actions[2].kind, SetupNextActionKind::BrowserPreview);
+        assert_eq!(actions[2].kind, SetupNextActionKind::Personalize);
+        assert_channel_catalog_action(&actions[3]);
+        assert_eq!(actions[4].kind, SetupNextActionKind::BrowserPreview);
         assert_eq!(
-            actions[2].browser_preview_phase,
+            actions[4].browser_preview_phase,
             Some(BrowserPreviewActionPhase::Ready)
         );
-        assert_eq!(actions[2].label, "browser companion preview");
+        assert_eq!(actions[4].label, "browser companion preview");
         assert!(
-            actions[2]
+            actions[4]
                 .command
                 .contains("Use the browser companion preview to open https://example.com"),
             "ready preview action should hand users into a task-shaped first browser recipe: {actions:#?}"
@@ -242,14 +499,16 @@ mod tests {
             Some(bin_dir.as_os_str()),
         );
 
-        assert_eq!(actions[2].kind, SetupNextActionKind::BrowserPreview);
+        assert_eq!(actions[2].kind, SetupNextActionKind::Personalize);
+        assert_channel_catalog_action(&actions[3]);
+        assert_eq!(actions[4].kind, SetupNextActionKind::BrowserPreview);
         assert_eq!(
-            actions[2].browser_preview_phase,
+            actions[4].browser_preview_phase,
             Some(BrowserPreviewActionPhase::Unblock)
         );
-        assert_eq!(actions[2].label, "allow agent-browser");
+        assert_eq!(actions[4].label, "allow agent-browser");
         assert!(
-            actions[2]
+            actions[4]
                 .command
                 .contains("remove `agent-browser` from [tools].shell_deny"),
             "shell hard-deny should produce an unblock step instead of looping back to enable-browser-preview: {actions:#?}"
@@ -273,13 +532,15 @@ mod tests {
             Some(bin_dir.as_os_str()),
         );
 
-        assert_eq!(actions[2].kind, SetupNextActionKind::BrowserPreview);
+        assert_eq!(actions[2].kind, SetupNextActionKind::Personalize);
+        assert_channel_catalog_action(&actions[3]);
+        assert_eq!(actions[4].kind, SetupNextActionKind::BrowserPreview);
         assert_eq!(
-            actions[2].browser_preview_phase,
+            actions[4].browser_preview_phase,
             Some(BrowserPreviewActionPhase::Enable)
         );
         assert!(
-            actions[2].command.contains("enable-browser-preview"),
+            actions[4].command.contains("enable-browser-preview"),
             "browser preview enable action should point operators at the preview bootstrap command: {actions:#?}"
         );
 
@@ -312,17 +573,19 @@ mod tests {
             Some(bin_dir.as_os_str()),
         );
 
-        assert_eq!(actions[2].kind, SetupNextActionKind::BrowserPreview);
+        assert_eq!(actions[2].kind, SetupNextActionKind::Personalize);
+        assert_channel_catalog_action(&actions[3]);
+        assert_eq!(actions[4].kind, SetupNextActionKind::BrowserPreview);
         assert_eq!(
-            actions[2].browser_preview_phase,
+            actions[4].browser_preview_phase,
             Some(BrowserPreviewActionPhase::InstallRuntime)
         );
         assert_eq!(
-            actions[2].label,
+            actions[4].label,
             format!("install {}", mvp::tools::BROWSER_COMPANION_COMMAND)
         );
         assert_eq!(
-            actions[2].command,
+            actions[4].command,
             format!(
                 "npm install -g {} && {} install",
                 mvp::tools::BROWSER_COMPANION_COMMAND,
@@ -331,5 +594,117 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn collect_setup_next_actions_labels_single_unresolved_plugin_bridge_surface() {
+        let mut config = mvp::config::LoongClawConfig::default();
+        config.weixin.enabled = true;
+        config.weixin.bridge_url = Some("https://bridge.example.test/weixin".to_owned());
+        config.weixin.bridge_access_token = Some(loongclaw_contracts::SecretRef::Inline(
+            "weixin-token".to_owned(),
+        ));
+        config.weixin.allowed_contact_ids = vec!["wxid_alice".to_owned()];
+
+        let actions = collect_setup_next_actions_with_path_env(
+            &config,
+            "/tmp/loongclaw.toml",
+            Some(std::ffi::OsStr::new("")),
+        );
+        let doctor_action = actions
+            .iter()
+            .find(|action| action.kind == SetupNextActionKind::Doctor)
+            .expect("managed bridge doctor action");
+
+        assert_eq!(doctor_action.label, "verify weixin managed bridge");
+        assert_eq!(
+            doctor_action.command,
+            "loong doctor --config '/tmp/loongclaw.toml'"
+        );
+    }
+
+    #[test]
+    fn collect_setup_next_actions_labels_multiple_unresolved_plugin_bridge_surfaces() {
+        let mut config = mvp::config::LoongClawConfig::default();
+        config.weixin.enabled = true;
+        config.weixin.bridge_url = Some("https://bridge.example.test/weixin".to_owned());
+        config.weixin.bridge_access_token = Some(loongclaw_contracts::SecretRef::Inline(
+            "weixin-token".to_owned(),
+        ));
+        config.weixin.allowed_contact_ids = vec!["wxid_alice".to_owned()];
+        config.qqbot.enabled = true;
+        config.qqbot.app_id = Some(loongclaw_contracts::SecretRef::Inline("10001".to_owned()));
+        config.qqbot.client_secret = Some(loongclaw_contracts::SecretRef::Inline(
+            "qqbot-secret".to_owned(),
+        ));
+        config.qqbot.allowed_peer_ids = vec!["openid-alice".to_owned()];
+
+        let actions = collect_setup_next_actions_with_path_env(
+            &config,
+            "/tmp/loongclaw.toml",
+            Some(std::ffi::OsStr::new("")),
+        );
+        let doctor_action = actions
+            .iter()
+            .find(|action| action.kind == SetupNextActionKind::Doctor)
+            .expect("managed bridge doctor action");
+
+        assert_eq!(doctor_action.label, "verify managed bridges: weixin, qqbot");
+        assert_eq!(
+            doctor_action.command,
+            "loong doctor --config '/tmp/loongclaw.toml'"
+        );
+    }
+
+    #[test]
+    fn is_managed_bridge_doctor_action_matches_single_surface_label() {
+        let action = SetupNextAction {
+            kind: SetupNextActionKind::Doctor,
+            channel_action_id: None,
+            browser_preview_phase: None,
+            label: "verify weixin managed bridge".to_owned(),
+            command: "loong doctor --config '/tmp/loongclaw.toml'".to_owned(),
+        };
+
+        assert!(is_managed_bridge_doctor_action(&action));
+    }
+
+    #[test]
+    fn is_managed_bridge_doctor_action_matches_multi_surface_label() {
+        let action = SetupNextAction {
+            kind: SetupNextActionKind::Doctor,
+            channel_action_id: None,
+            browser_preview_phase: None,
+            label: "verify managed bridges: weixin, qqbot".to_owned(),
+            command: "loong doctor --config '/tmp/loongclaw.toml'".to_owned(),
+        };
+
+        assert!(is_managed_bridge_doctor_action(&action));
+    }
+
+    #[test]
+    fn is_managed_bridge_doctor_action_rejects_unrelated_doctor_action() {
+        let action = SetupNextAction {
+            kind: SetupNextActionKind::Doctor,
+            channel_action_id: None,
+            browser_preview_phase: None,
+            label: "doctor".to_owned(),
+            command: "loong doctor --config '/tmp/loongclaw.toml'".to_owned(),
+        };
+
+        assert!(!is_managed_bridge_doctor_action(&action));
+    }
+
+    #[test]
+    fn is_managed_bridge_doctor_action_rejects_non_doctor_action() {
+        let action = SetupNextAction {
+            kind: SetupNextActionKind::Channel,
+            channel_action_id: Some(crate::migration::channels::CHANNEL_CATALOG_ACTION_ID),
+            browser_preview_phase: None,
+            label: "verify weixin managed bridge".to_owned(),
+            command: "loong channels --config '/tmp/loongclaw.toml'".to_owned(),
+        };
+
+        assert!(!is_managed_bridge_doctor_action(&action));
     }
 }

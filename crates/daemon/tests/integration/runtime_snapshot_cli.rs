@@ -99,6 +99,12 @@ impl Drop for RuntimeSnapshotPolicyResetGuard {
 
 fn write_runtime_snapshot_config(root: &Path) -> (PathBuf, mvp::config::LoongClawConfig) {
     fs::create_dir_all(root).expect("create fixture root");
+    let workspace_root = root.join("workspace");
+    fs::create_dir_all(&workspace_root).expect("create workspace fixture root");
+    let mcp_command = std::env::current_exe()
+        .expect("current executable path for MCP fixture")
+        .display()
+        .to_string();
 
     let mut config = mvp::config::LoongClawConfig::default();
     config.tools.file_root = Some(root.display().to_string());
@@ -119,6 +125,26 @@ fn write_runtime_snapshot_config(root: &Path) -> (PathBuf, mvp::config::LoongCla
     config.acp.dispatch.enabled = true;
     config.acp.default_agent = Some("codex".to_owned());
     config.acp.allowed_agents = vec!["codex".to_owned(), "planner".to_owned()];
+    config.mcp.servers.insert(
+        "docs".to_owned(),
+        mvp::mcp::McpServerConfig {
+            transport: mvp::mcp::McpServerTransportConfig::Stdio {
+                command: mcp_command,
+                args: vec!["context7-mcp".to_owned()],
+                env: std::collections::BTreeMap::from([(
+                    "API_TOKEN".to_owned(),
+                    "secret".to_owned(),
+                )]),
+                cwd: Some(workspace_root),
+            },
+            enabled: true,
+            required: false,
+            startup_timeout_ms: Some(15_000),
+            tool_timeout_ms: Some(120_000),
+            enabled_tools: vec!["search".to_owned()],
+            disabled_tools: vec!["write".to_owned()],
+        },
+    );
     config.providers.insert(
         "openai-main".to_owned(),
         mvp::config::ProviderProfileConfig {
@@ -137,7 +163,9 @@ fn write_runtime_snapshot_config(root: &Path) -> (PathBuf, mvp::config::LoongCla
             provider: mvp::config::ProviderConfig {
                 kind: mvp::config::ProviderKind::Deepseek,
                 model: "deepseek-chat".to_owned(),
-                api_key: Some("demo-token".to_owned()),
+                api_key: Some(loongclaw_contracts::SecretRef::Inline(
+                    "demo-token".to_owned(),
+                )),
                 ..Default::default()
             },
         },
@@ -170,6 +198,48 @@ fn install_demo_skill(root: &Path, config: &mvp::config::LoongClawConfig, config
         &runtime_config,
     )
     .expect("install demo skill");
+}
+
+fn install_demo_runtime_plugin_package(root: &Path, config_path: &Path) {
+    write_file(
+        root,
+        "runtime-plugins/search/loongclaw.plugin.json",
+        r#"{
+  "api_version": "v1alpha1",
+  "version": "1.0.0",
+  "plugin_id": "demo-search-plugin",
+  "provider_id": "demo-search",
+  "connector_name": "demo-search-http",
+  "endpoint": "https://example.com/search",
+  "capabilities": ["InvokeConnector"],
+  "metadata": {
+    "bridge_kind": "http_json",
+    "adapter_family": "web-search"
+  },
+  "setup": {
+    "mode": "metadata_only",
+    "surface": "web_search",
+    "required_env_vars": ["RUNTIME_PLUGIN_DEMO_KEY"],
+    "required_config_keys": ["tools.web_search.default_provider"]
+  },
+  "slot_claims": [
+    {
+      "slot": "provider:web_search",
+      "key": "demo",
+      "mode": "shared"
+    }
+  ]
+}"#,
+    );
+
+    let (path_string, mut reloaded) = mvp::config::load(Some(
+        config_path.to_str().expect("config path should be utf-8"),
+    ))
+    .expect("reload config");
+    reloaded.runtime_plugins.enabled = true;
+    reloaded.runtime_plugins.roots = vec![root.join("runtime-plugins").display().to_string()];
+    mvp::config::write(Some(&path_string.display().to_string()), &reloaded, true)
+        .expect("rewrite config fixture with runtime plugin roots");
 }
 
 fn array_contains_string(array: &Value, needle: &str) -> bool {
@@ -213,12 +283,14 @@ fn runtime_snapshot_json_payload_includes_provider_tool_and_external_skill_inven
     ]);
     let (config_path, config) = write_runtime_snapshot_config(&root);
     install_demo_skill(&root, &config, &config_path);
+    install_demo_runtime_plugin_package(&root, &config_path);
 
     let snapshot = collect_runtime_snapshot_cli_state(Some(
         config_path.to_str().expect("config path should be utf-8"),
     ))
     .expect("collect runtime snapshot");
-    let payload = build_runtime_snapshot_cli_json_payload(&snapshot);
+    let payload =
+        build_runtime_snapshot_cli_json_payload(&snapshot).expect("build runtime snapshot payload");
 
     assert_eq!(payload["schema"]["version"], 1);
     assert_eq!(payload["provider"]["active_profile_id"], "deepseek-lab");
@@ -249,6 +321,21 @@ fn runtime_snapshot_json_payload_includes_provider_tool_and_external_skill_inven
             .is_some_and(|value: &str| !value.is_empty()),
         "capability snapshot digest should be populated"
     );
+    assert_eq!(payload["runtime_plugins"]["enabled"], true);
+    assert_eq!(payload["runtime_plugins"]["discovered_plugin_count"], 1);
+    assert_eq!(
+        payload["runtime_plugins"]["setup_incomplete_plugin_count"],
+        1
+    );
+    assert_eq!(
+        payload["runtime_plugins"]["readiness_evaluation"],
+        "default_bridge_support_matrix"
+    );
+    assert!(array_contains_object_field(
+        &payload["runtime_plugins"]["plugins"],
+        "plugin_id",
+        "demo-search-plugin"
+    ));
 
     fs::remove_dir_all(&root).ok();
 }
@@ -271,8 +358,10 @@ fn runtime_snapshot_json_payload_marks_x_api_key_profiles_as_credential_resolved
             default_for_kind: false,
             provider: mvp::config::ProviderConfig {
                 kind: mvp::config::ProviderKind::Anthropic,
-                model: "claude-3-7-sonnet".to_owned(),
-                api_key: Some("${RUNTIME_SNAPSHOT_ANTHROPIC_KEY}".to_owned()),
+                model: "claude-3-7-sonnet-latest".to_owned(),
+                api_key: Some(loongclaw_contracts::SecretRef::Inline(
+                    "${RUNTIME_SNAPSHOT_ANTHROPIC_KEY}".to_owned(),
+                )),
                 ..Default::default()
             },
         },
@@ -284,7 +373,8 @@ fn runtime_snapshot_json_payload_marks_x_api_key_profiles_as_credential_resolved
         config_path.to_str().expect("config path should be utf-8"),
     ))
     .expect("collect runtime snapshot");
-    let payload = build_runtime_snapshot_cli_json_payload(&snapshot);
+    let payload =
+        build_runtime_snapshot_cli_json_payload(&snapshot).expect("build runtime snapshot payload");
 
     let anthropic_profile = array_object_with_string_field(
         &payload["provider"]["profiles"],
@@ -293,6 +383,78 @@ fn runtime_snapshot_json_payload_marks_x_api_key_profiles_as_credential_resolved
     )
     .expect("anthropic provider profile should be present");
     assert_eq!(anthropic_profile["credential_resolved"], true);
+    assert_eq!(
+        anthropic_profile["descriptor"]["schema"]["version"],
+        serde_json::json!(mvp::config::PROVIDER_DESCRIPTOR_SCHEMA_VERSION)
+    );
+    assert_eq!(
+        anthropic_profile["descriptor"]["auth"]["scheme"],
+        serde_json::json!("x_api_key")
+    );
+    assert_eq!(
+        anthropic_profile["descriptor"]["auth"]["requires_explicit_configuration"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        anthropic_profile["descriptor"]["feature"]["family"],
+        serde_json::json!("anthropic")
+    );
+
+    fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn runtime_snapshot_json_payload_preserves_auth_optional_provider_descriptor_contract() {
+    let root = unique_temp_dir("loongclaw-runtime-snapshot-auth-optional");
+    let _env = RuntimeSnapshotEnvGuard::set(&[
+        ("RUNTIME_SNAPSHOT_DEEPSEEK_KEY", Some("demo-token")),
+        ("LOONGCLAW_BROWSER_COMPANION_READY", Some("true")),
+    ]);
+    let (config_path, mut config) = write_runtime_snapshot_config(&root);
+    config.providers.insert(
+        "ollama-local".to_owned(),
+        mvp::config::ProviderProfileConfig {
+            default_for_kind: false,
+            provider: mvp::config::ProviderConfig {
+                kind: mvp::config::ProviderKind::Ollama,
+                model: "qwen2.5-coder".to_owned(),
+                ..Default::default()
+            },
+        },
+    );
+    mvp::config::write(Some(config_path.to_string_lossy().as_ref()), &config, true)
+        .expect("rewrite config fixture");
+
+    let snapshot = collect_runtime_snapshot_cli_state(Some(
+        config_path.to_str().expect("config path should be utf-8"),
+    ))
+    .expect("collect runtime snapshot");
+    let payload =
+        build_runtime_snapshot_cli_json_payload(&snapshot).expect("build runtime snapshot payload");
+
+    let ollama_profile = array_object_with_string_field(
+        &payload["provider"]["profiles"],
+        "profile_id",
+        "ollama-local",
+    )
+    .expect("ollama provider profile should be present");
+    assert_eq!(ollama_profile["credential_resolved"], false);
+    assert_eq!(
+        ollama_profile["descriptor"]["auth"]["scheme"],
+        serde_json::json!("bearer")
+    );
+    assert_eq!(
+        ollama_profile["descriptor"]["auth"]["auth_optional"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        ollama_profile["descriptor"]["auth"]["requires_explicit_configuration"],
+        serde_json::json!(false)
+    );
+    assert_eq!(
+        ollama_profile["descriptor"]["auth"]["hint_env_names"],
+        serde_json::json!([])
+    );
 
     fs::remove_dir_all(&root).ok();
 }
@@ -311,7 +473,8 @@ fn runtime_snapshot_json_payload_reflects_effective_external_skills_policy_overr
         config_path.to_str().expect("config path should be utf-8"),
     ))
     .expect("collect enabled runtime snapshot");
-    let enabled_payload = build_runtime_snapshot_cli_json_payload(&enabled_snapshot);
+    let enabled_payload = build_runtime_snapshot_cli_json_payload(&enabled_snapshot)
+        .expect("build enabled runtime snapshot payload");
     let enabled_digest = enabled_payload["tools"]["capability_snapshot_sha256"].clone();
     assert!(array_contains_string(
         &enabled_payload["tools"]["visible_tool_names"],
@@ -343,7 +506,8 @@ fn runtime_snapshot_json_payload_reflects_effective_external_skills_policy_overr
         config_path.to_str().expect("config path should be utf-8"),
     ))
     .expect("collect runtime snapshot");
-    let payload = build_runtime_snapshot_cli_json_payload(&snapshot);
+    let payload =
+        build_runtime_snapshot_cli_json_payload(&snapshot).expect("build runtime snapshot payload");
 
     assert!(!snapshot.tool_runtime.external_skills.enabled);
     assert!(
@@ -407,6 +571,7 @@ fn runtime_snapshot_text_highlights_experiment_relevant_sections() {
     ]);
     let (config_path, config) = write_runtime_snapshot_config(&root);
     install_demo_skill(&root, &config, &config_path);
+    install_demo_runtime_plugin_package(&root, &config_path);
 
     let snapshot = collect_runtime_snapshot_cli_state(Some(
         config_path.to_str().expect("config path should be utf-8"),
@@ -418,7 +583,19 @@ fn runtime_snapshot_text_highlights_experiment_relevant_sections() {
     assert!(rendered.contains("context_engine selected="));
     assert!(rendered.contains("memory selected="));
     assert!(rendered.contains("acp enabled=true"));
+    assert!(rendered.contains("acp mcp_servers=1"));
+    assert!(rendered.contains("acp_mcp docs status=pending"));
     assert!(rendered.contains("tools visible_count="));
+    assert!(rendered.contains(
+        "runtime_plugins inventory_status=ok enabled=true readiness_evaluation=default_bridge_support_matrix"
+    ));
+    assert!(rendered.contains("demo-search-plugin"));
+    assert!(rendered.contains("source_path="));
+    assert!(rendered.contains("package_root="));
+    assert!(rendered.contains("setup_mode=metadata_only"));
+    assert!(rendered.contains("setup_surface=web_search"));
+    assert!(rendered.contains("missing_env_vars=RUNTIME_PLUGIN_DEMO_KEY"));
+    assert!(rendered.contains("reason=\"plugin setup is incomplete:"));
     assert!(rendered.contains("external_skills inventory_status=ok override_active=false"));
     assert!(rendered.contains("demo-skill"));
 

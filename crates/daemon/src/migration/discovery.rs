@@ -7,6 +7,8 @@ use loongclaw_app as mvp;
 use loongclaw_spec::CliResult;
 use serde::Deserialize;
 
+use crate::provider_credential_policy;
+
 use super::channels;
 use super::provider_transport::ImportedProviderTransport;
 use super::types::{
@@ -42,7 +44,8 @@ pub fn classify_current_setup(output_path: &Path) -> CurrentSetupState {
         return CurrentSetupState::Repairable;
     };
     let readiness = resolve_channel_import_readiness_from_config(&config);
-    let has_provider_auth = config.provider.authorization_header().is_some();
+    let has_provider_auth =
+        provider_credential_policy::provider_has_locally_available_credentials(&config.provider);
     let channel_blockers = channels::enabled_channels_have_blockers(&config, &readiness);
     if channel_blockers {
         return CurrentSetupState::Repairable;
@@ -361,17 +364,20 @@ fn collect_domain_previews(
     }
 
     let default_tools = mvp::config::ToolConfig::default();
-    if config.tools.shell_allow != default_tools.shell_allow
-        || config.tools.file_root != default_tools.file_root
-    {
+    let configured_file_root = config.tools.configured_file_root();
+    let default_configured_file_root = default_tools.configured_file_root();
+    let explicit_file_root_changed = configured_file_root != default_configured_file_root;
+    let shell_allow_changed = config.tools.shell_allow != default_tools.shell_allow;
+
+    if shell_allow_changed || explicit_file_root_changed {
         let mut parts = Vec::new();
-        if config.tools.file_root != default_tools.file_root {
+        if explicit_file_root_changed {
             parts.push(format!(
                 "workspace root {}",
                 config.tools.resolved_file_root().display()
             ));
         }
-        if config.tools.shell_allow != default_tools.shell_allow {
+        if shell_allow_changed {
             parts.push(format!(
                 "shell permissions {}",
                 config.tools.shell_allow.join(", ")
@@ -423,7 +429,10 @@ fn memory_sqlite_path_looks_default(
         && candidate_path
             .parent()
             .and_then(Path::file_name)
-            .is_some_and(|component| component == ".loongclaw")
+            .is_some_and(|component| {
+                component == mvp::config::HOME_DIR_NAME
+                    || component == mvp::config::LEGACY_HOME_DIR_NAME
+            })
 }
 
 fn map_surface_level(level: ImportSurfaceLevel) -> PreviewStatus {
@@ -441,11 +450,19 @@ fn default_codex_config_paths() -> Vec<PathBuf> {
     let home = PathBuf::from(home);
     let mut seen = BTreeSet::new();
     let mut paths = Vec::new();
+    let base_codex_path = home.join(".codex/config.toml");
+    let default_agent_codex_path = home
+        .join(".codex/agents")
+        .join(mvp::config::CLI_COMMAND_NAME)
+        .join("config.toml");
+    let legacy_agent_codex_path = home
+        .join(".codex/agents")
+        .join(mvp::config::LEGACY_CLI_COMMAND_NAME)
+        .join("config.toml");
     for path in [
-        home.join(".codex/config.toml"),
-        home.join(".codex/agents")
-            .join(mvp::config::CLI_COMMAND_NAME)
-            .join("config.toml"),
+        base_codex_path,
+        default_agent_codex_path,
+        legacy_agent_codex_path,
     ] {
         if path.is_file() && seen.insert(path.clone()) {
             paths.push(path);
@@ -520,7 +537,9 @@ fn codex_import_config_to_loongclaw(
             .kind
             .default_api_key_env()
             .unwrap_or("OPENAI_API_KEY");
-        config.provider.api_key_env = Some(suggested_env.to_owned());
+        config
+            .provider
+            .set_api_key_env_binding(Some(suggested_env.to_owned()));
     }
 
     Ok(Some(config))
@@ -531,9 +550,9 @@ fn baseline_codex_import_provider_config(
 ) -> mvp::config::ProviderConfig {
     let mut provider = mvp::config::ProviderConfig {
         kind: provider_kind,
-        api_key_env: provider_kind.default_api_key_env().map(str::to_owned),
         ..mvp::config::ProviderConfig::default()
     };
+    provider.set_api_key_env_binding(provider_kind.default_api_key_env().map(str::to_owned));
     ImportedProviderTransport::default_for_kind(provider_kind).apply_to_provider(&mut provider);
     provider
 }
@@ -591,7 +610,8 @@ fn codex_wire_api_looks_openai_compatible(raw: &str) -> bool {
 
 fn provider_import_surface(config: &mvp::config::LoongClawConfig) -> Option<ImportSurface> {
     let provider_changed = config.provider.differs_from_default();
-    let credentials_ready = config.provider.authorization_header().is_some();
+    let credentials_ready =
+        provider_credential_policy::provider_has_locally_available_credentials(&config.provider);
     if !provider_changed && !credentials_ready {
         return None;
     }
@@ -672,7 +692,7 @@ mod tests {
     #[test]
     fn cli_import_surface_detects_prompt_pack_metadata_changes() {
         let mut config = mvp::config::LoongClawConfig::default();
-        config.cli.personality = Some(mvp::prompt::PromptPersonality::FriendlyCollab);
+        config.cli.personality = Some(mvp::prompt::PromptPersonality::Hermit);
 
         let surfaces = collect_import_surfaces(&config);
 
@@ -682,5 +702,18 @@ mod tests {
                 .any(|surface| surface.domain == SetupDomainKind::Cli),
             "changing prompt-pack personality metadata should mark the CLI domain as imported: {surfaces:#?}"
         );
+    }
+
+    #[test]
+    fn provider_import_surface_marks_x_api_key_provider_ready() {
+        let mut env = crate::test_support::ScopedEnv::new();
+        env.set("ANTHROPIC_API_KEY", "test-anthropic-key");
+        let mut config = mvp::config::LoongClawConfig::default();
+        config.provider.kind = mvp::config::ProviderKind::Anthropic;
+        config.provider.model = "claude-sonnet-4-5".to_owned();
+
+        let surface = provider_import_surface(&config).expect("provider surface should exist");
+
+        assert_eq!(surface.level, ImportSurfaceLevel::Ready);
     }
 }

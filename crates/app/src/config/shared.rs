@@ -1,13 +1,56 @@
 use std::{
     collections::BTreeMap,
     env,
+    ffi::OsStr,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
+
+use loongclaw_contracts::SecretRef;
 
 pub(super) const DEFAULT_CONFIG_FILE: &str = "config.toml";
 pub(super) const DEFAULT_SQLITE_FILE: &str = "memory.sqlite3";
-pub const CLI_COMMAND_NAME: &str = "loongclaw";
+pub const CLI_COMMAND_NAME: &str = "loong";
+pub const LEGACY_CLI_COMMAND_NAME: &str = "loongclaw";
+pub const HOME_DIR_NAME: &str = ".loong";
+pub const LEGACY_HOME_DIR_NAME: &str = ".loongclaw";
+pub const PRODUCT_DISPLAY_NAME: &str = "LoongClaw";
+static ACTIVE_CLI_COMMAND_NAME: OnceLock<&'static str> = OnceLock::new();
 pub(super) const DEFAULT_FEISHU_SQLITE_FILE: &str = "feishu.sqlite3";
+pub(crate) const LOONGCLAW_HOME_ENV: &str = "LOONG_HOME";
+
+fn normalize_cli_command_name(raw: &str) -> &'static str {
+    if raw.eq_ignore_ascii_case(LEGACY_CLI_COMMAND_NAME) {
+        LEGACY_CLI_COMMAND_NAME
+    } else {
+        CLI_COMMAND_NAME
+    }
+}
+
+pub fn detect_invoked_cli_command_name_from_arg0(arg0: Option<&OsStr>) -> &'static str {
+    let Some(arg0) = arg0 else {
+        return CLI_COMMAND_NAME;
+    };
+    let Some(stem) = Path::new(arg0).file_stem().and_then(|value| value.to_str()) else {
+        return CLI_COMMAND_NAME;
+    };
+    normalize_cli_command_name(stem)
+}
+
+pub fn detect_invoked_cli_command_name() -> &'static str {
+    detect_invoked_cli_command_name_from_arg0(env::args_os().next().as_deref())
+}
+
+pub fn set_active_cli_command_name(command_name: &'static str) {
+    let _ = ACTIVE_CLI_COMMAND_NAME.set(normalize_cli_command_name(command_name));
+}
+
+pub fn active_cli_command_name() -> &'static str {
+    ACTIVE_CLI_COMMAND_NAME
+        .get()
+        .copied()
+        .unwrap_or(CLI_COMMAND_NAME)
+}
 
 pub(super) struct EnvPointerValidationHint<'a> {
     pub inline_field_path: &'a str,
@@ -67,6 +110,7 @@ pub(super) enum ConfigValidationCode {
     PercentWrapped,
     SecretLiteral,
     InvalidName,
+    InvalidValue,
     NumericRange,
     DuplicateChannelAccountId,
     UnknownChannelDefaultAccount,
@@ -83,6 +127,7 @@ impl ConfigValidationCode {
             ConfigValidationCode::PercentWrapped => "config.env_pointer.percent_wrapped",
             ConfigValidationCode::SecretLiteral => "config.env_pointer.secret_literal",
             ConfigValidationCode::InvalidName => "config.env_pointer.invalid_name",
+            ConfigValidationCode::InvalidValue => "config.value.invalid",
             ConfigValidationCode::NumericRange => "config.numeric_range",
             ConfigValidationCode::DuplicateChannelAccountId => {
                 "config.channel_account.duplicate_id"
@@ -117,6 +162,7 @@ impl ConfigValidationCode {
             ConfigValidationCode::InvalidName => {
                 "urn:loongclaw:problem:config.env_pointer.invalid_name"
             }
+            ConfigValidationCode::InvalidValue => "urn:loongclaw:problem:config.value.invalid",
             ConfigValidationCode::NumericRange => "urn:loongclaw:problem:config.numeric_range",
             ConfigValidationCode::DuplicateChannelAccountId => {
                 "urn:loongclaw:problem:config.channel_account.duplicate_id"
@@ -143,6 +189,7 @@ impl ConfigValidationCode {
             ConfigValidationCode::PercentWrapped => "config.env_pointer.percent_wrapped.title",
             ConfigValidationCode::SecretLiteral => "config.env_pointer.secret_literal.title",
             ConfigValidationCode::InvalidName => "config.env_pointer.invalid_name.title",
+            ConfigValidationCode::InvalidValue => "config.value.invalid.title",
             ConfigValidationCode::NumericRange => "config.numeric_range.title",
             ConfigValidationCode::DuplicateChannelAccountId => {
                 "config.channel_account.duplicate_id.title"
@@ -179,6 +226,7 @@ impl ConfigValidationCode {
             ConfigValidationCode::PercentWrapped => "Percent-Wrapped Env Pointer Notation",
             ConfigValidationCode::SecretLiteral => "Secret Literal Used In Env Pointer",
             ConfigValidationCode::InvalidName => "Invalid Env Pointer Name",
+            ConfigValidationCode::InvalidValue => "Invalid Config Value",
             ConfigValidationCode::NumericRange => "Config Value Out Of Range",
             ConfigValidationCode::DuplicateChannelAccountId => {
                 "Duplicate Normalized Channel Account ID"
@@ -207,6 +255,9 @@ impl ConfigValidationCode {
             ConfigValidationCode::InvalidName => {
                 "[{code}] {field_path} is not a valid environment variable name reference. use `{field_path}` with a name like `{example_env_name}`"
             }
+            ConfigValidationCode::InvalidValue => {
+                "[{code}] {field_path} is invalid: {invalid_reason}. {suggested_fix}"
+            }
             ConfigValidationCode::NumericRange => {
                 "[{code}] {field_path} must be between {min} and {max}; got {actual_value}"
             }
@@ -230,14 +281,14 @@ impl ConfigValidationCode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ConfigValidationIssue {
-    pub severity: ConfigValidationSeverity,
-    pub code: ConfigValidationCode,
-    pub field_path: String,
-    pub inline_field_path: String,
-    pub example_env_name: String,
-    pub suggested_env_name: Option<String>,
-    pub extra_message_variables: BTreeMap<String, String>,
+pub(crate) struct ConfigValidationIssue {
+    pub(super) severity: ConfigValidationSeverity,
+    pub(super) code: ConfigValidationCode,
+    pub(super) field_path: String,
+    pub(super) inline_field_path: String,
+    pub(super) example_env_name: String,
+    pub(super) suggested_env_name: Option<String>,
+    pub(super) extra_message_variables: BTreeMap<String, String>,
 }
 
 impl ConfigValidationIssue {
@@ -328,6 +379,7 @@ const EN_VALIDATION_MESSAGE_CATALOG: &[ConfigValidationCatalogEntry] = &[
         "config.env_pointer.invalid_name.title",
         "Invalid Env Pointer Name",
     ),
+    ConfigValidationCatalogEntry::new("config.value.invalid.title", "Invalid Config Value"),
     ConfigValidationCatalogEntry::new("config.numeric_range.title", "Config Value Out Of Range"),
     ConfigValidationCatalogEntry::new(
         "config.channel_account.duplicate_id.title",
@@ -364,6 +416,10 @@ const EN_VALIDATION_MESSAGE_CATALOG: &[ConfigValidationCatalogEntry] = &[
     ConfigValidationCatalogEntry::new(
         "config.env_pointer.invalid_name",
         "[{code}] {field_path} is not a valid environment variable name reference. use `{field_path}` with a name like `{example_env_name}`",
+    ),
+    ConfigValidationCatalogEntry::new(
+        "config.value.invalid",
+        "[{code}] {field_path} is invalid: {invalid_reason}. {suggested_fix}",
     ),
     ConfigValidationCatalogEntry::new(
         "config.numeric_range",
@@ -438,17 +494,51 @@ fn get_user_home() -> PathBuf {
     )
 }
 
+fn get_loongclaw_home() -> PathBuf {
+    resolve_loongclaw_home(
+        env::var_os(LOONGCLAW_HOME_ENV).as_deref(),
+        env::var_os("HOME").as_deref(),
+        env::var_os("USERPROFILE").as_deref(),
+    )
+}
+
 fn resolve_user_home(
     home: Option<&std::ffi::OsStr>,
     userprofile: Option<&std::ffi::OsStr>,
 ) -> PathBuf {
-    home.or(userprofile)
+    home.filter(|value| !value.is_empty())
+        .or_else(|| userprofile.filter(|value| !value.is_empty()))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+fn resolve_loongclaw_home(
+    loongclaw_home: Option<&std::ffi::OsStr>,
+    home: Option<&std::ffi::OsStr>,
+    userprofile: Option<&std::ffi::OsStr>,
+) -> PathBuf {
+    loongclaw_home
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| resolve_user_home(home, userprofile).join(HOME_DIR_NAME))
+}
+
+/// Returns `Some(legacy_path)` if the legacy home exists but the new home does not.
+pub fn detect_legacy_home(user_home: &Path) -> Option<PathBuf> {
+    let new_home = user_home.join(HOME_DIR_NAME);
+    if new_home.exists() {
+        return None;
+    }
+    let legacy_home = user_home.join(LEGACY_HOME_DIR_NAME);
+    if legacy_home.exists() {
+        Some(legacy_home)
+    } else {
+        None
+    }
+}
+
 pub(super) fn default_loongclaw_home() -> PathBuf {
-    get_user_home().join(".loongclaw")
+    get_loongclaw_home()
 }
 
 pub fn expand_path(raw: &str) -> PathBuf {
@@ -544,6 +634,23 @@ pub(super) fn validate_env_pointer_field(
     Ok(())
 }
 
+pub(super) fn validate_secret_ref_env_pointer_field(
+    field_path: &str,
+    secret_ref: Option<&SecretRef>,
+    hint: EnvPointerValidationHint<'_>,
+) -> Result<(), Box<ConfigValidationIssue>> {
+    let Some(secret_ref) = secret_ref else {
+        return Ok(());
+    };
+
+    let Some(env_name) = secret_ref.explicit_env_name() else {
+        return Ok(());
+    };
+
+    let env_field_path = format!("{field_path}.env");
+    validate_env_pointer_field(env_field_path.as_str(), Some(env_name.as_str()), hint)
+}
+
 pub(super) fn validate_numeric_range(
     field_path: &str,
     actual_value: usize,
@@ -592,6 +699,10 @@ fn looks_like_secret_literal(raw: &str, detect_telegram_token_shape: bool) -> bo
         return true;
     }
 
+    if looks_like_uuid_shaped_secret_literal(trimmed) {
+        return true;
+    }
+
     if looks_like_compatible_env_name(trimmed) {
         return false;
     }
@@ -601,6 +712,22 @@ fn looks_like_secret_literal(raw: &str, detect_telegram_token_shape: bool) -> bo
         && trimmed
             .chars()
             .any(|ch| matches!(ch, '-' | '.' | ':' | '/' | '+'))
+}
+
+fn looks_like_uuid_shaped_secret_literal(raw: &str) -> bool {
+    let mut groups = raw.split('-');
+    let expected_lengths = [8usize, 4, 4, 4, 12];
+
+    for expected_length in expected_lengths {
+        let Some(group) = groups.next() else {
+            return false;
+        };
+        if group.len() != expected_length || !group.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            return false;
+        }
+    }
+
+    groups.next().is_none()
 }
 
 fn looks_like_compatible_env_name(raw: &str) -> bool {
@@ -676,84 +803,10 @@ fn normalize_dollar_prefixed_env_name(raw: &str, fallback: &str) -> String {
     trimmed.to_owned()
 }
 
-enum InlineSecretInput<'a> {
-    Literal(&'a str),
-    EnvReference(&'a str),
-}
-
-fn classify_inline_secret_input(raw: &str) -> Option<InlineSecretInput<'_>> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if let Some(env_key) = parse_explicit_env_reference(trimmed) {
-        return Some(InlineSecretInput::EnvReference(env_key));
-    }
-    Some(InlineSecretInput::Literal(trimmed))
-}
-
-pub(super) fn parse_explicit_env_reference(raw: &str) -> Option<&str> {
-    parse_dollar_env_reference(raw)
-        .or_else(|| parse_env_prefix_reference(raw))
-        .or_else(|| parse_percent_env_reference(raw))
-}
-
-fn parse_dollar_env_reference(raw: &str) -> Option<&str> {
-    let stripped = raw.trim().strip_prefix('$')?.trim();
-    if stripped.is_empty() {
-        return None;
-    }
-    let candidate = stripped
-        .strip_prefix('{')
-        .and_then(|rest| rest.strip_suffix('}'))
-        .map(str::trim)
-        .unwrap_or(stripped);
-    looks_like_compatible_env_name(candidate).then_some(candidate)
-}
-
-fn parse_env_prefix_reference(raw: &str) -> Option<&str> {
-    if raw.len() < 4 || !raw[..4].eq_ignore_ascii_case("env:") {
-        return None;
-    }
-    let candidate = raw[4..].trim();
-    looks_like_compatible_env_name(candidate).then_some(candidate)
-}
-
-fn parse_percent_env_reference(raw: &str) -> Option<&str> {
-    let candidate = parse_percent_wrapped_env_name(raw)?;
-    looks_like_compatible_env_name(candidate).then_some(candidate)
-}
-
-fn read_non_empty_env_value(key: &str) -> Option<String> {
-    let trimmed_key = key.trim();
-    if trimmed_key.is_empty() {
-        return None;
-    }
-    let value = env::var(trimmed_key).ok()?;
-    let trimmed_value = value.trim();
-    if trimmed_value.is_empty() {
-        return None;
-    }
-    Some(trimmed_value.to_owned())
-}
-
-pub(super) fn read_secret_prefer_inline(
-    inline: Option<&str>,
-    env_key: Option<&str>,
-) -> Option<String> {
-    if let Some(raw) = inline {
-        match classify_inline_secret_input(raw) {
-            Some(InlineSecretInput::Literal(value)) => return Some(value.to_owned()),
-            Some(InlineSecretInput::EnvReference(key)) => return read_non_empty_env_value(key),
-            None => {}
-        }
-    }
-    env_key.and_then(read_non_empty_env_value)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::ScopedEnv;
 
     #[test]
     fn message_template_interpolation_replaces_known_placeholders() {
@@ -807,6 +860,14 @@ mod tests {
     }
 
     #[test]
+    fn uuid_shaped_values_are_treated_as_secret_literals() {
+        assert!(looks_like_secret_literal(
+            "9f479837-0a12-4b56-89ab-cdef01234567",
+            false
+        ));
+    }
+
+    #[test]
     fn numeric_range_validation_reports_actual_and_bounds() {
         let issue = validate_numeric_range("memory.sliding_window", 129, 1, 128)
             .expect_err("out-of-range values should be rejected");
@@ -847,6 +908,148 @@ mod tests {
             result_dot,
             PathBuf::from("."),
             "get_user_home() should return \".\" when both HOME and USERPROFILE are absent"
+        );
+    }
+
+    #[test]
+    fn resolve_loongclaw_home_prefers_explicit_override_over_user_home() {
+        let override_home = if cfg!(windows) {
+            PathBuf::from(r"C:\tmp\loongclaw-home-override")
+        } else {
+            PathBuf::from("/tmp/loongclaw-home-override")
+        };
+        let home = if cfg!(windows) {
+            PathBuf::from(r"C:\Users\loongclaw-test-home")
+        } else {
+            PathBuf::from("/tmp/loongclaw-test-home")
+        };
+
+        let resolved = resolve_loongclaw_home(
+            Some(override_home.as_os_str()),
+            Some(home.as_os_str()),
+            None,
+        );
+
+        assert_eq!(resolved, override_home);
+    }
+
+    #[test]
+    fn resolve_user_home_treats_empty_home_as_unset() {
+        let userprofile = if cfg!(windows) {
+            PathBuf::from(r"C:\Users\loongclaw-test-userprofile")
+        } else {
+            PathBuf::from("/tmp/loongclaw-test-userprofile")
+        };
+        let resolved = resolve_user_home(
+            Some(std::ffi::OsStr::new("")),
+            Some(userprofile.as_os_str()),
+        );
+
+        assert_eq!(resolved, userprofile);
+    }
+
+    #[test]
+    fn default_loongclaw_home_uses_override_env_when_present() {
+        let mut env = ScopedEnv::new();
+        let override_home = std::env::temp_dir().join("loongclaw-home-env-override");
+        env.set(LOONGCLAW_HOME_ENV, &override_home);
+
+        assert_eq!(default_loongclaw_home(), override_home);
+    }
+
+    #[test]
+    fn resolve_loongclaw_home_treats_empty_override_as_unset() {
+        let home = if cfg!(windows) {
+            PathBuf::from(r"C:\Users\loongclaw-test-home")
+        } else {
+            PathBuf::from("/tmp/loongclaw-test-home")
+        };
+        let resolved =
+            resolve_loongclaw_home(Some(std::ffi::OsStr::new("")), Some(home.as_os_str()), None);
+
+        assert_eq!(resolved, home.join(".loong"));
+    }
+
+    #[test]
+    fn default_loongclaw_home_treats_empty_override_env_as_unset() {
+        let mut env = ScopedEnv::new();
+        let home = if cfg!(windows) {
+            PathBuf::from(r"C:\Users\loongclaw-test-home")
+        } else {
+            PathBuf::from("/tmp/loongclaw-test-home")
+        };
+        env.set(LOONGCLAW_HOME_ENV, "");
+        env.set("HOME", &home);
+        env.remove("USERPROFILE");
+
+        let resolved = default_loongclaw_home();
+
+        assert_eq!(resolved, home.join(".loong"));
+    }
+
+    #[test]
+    fn default_loongclaw_home_reads_loong_home_env() {
+        let mut env = ScopedEnv::new();
+        let override_home = std::env::temp_dir().join("loong-home-env-test");
+        env.set(LOONGCLAW_HOME_ENV, &override_home);
+        env.remove("LOONGCLAW_HOME");
+
+        assert_eq!(default_loongclaw_home(), override_home);
+    }
+
+    #[test]
+    fn default_loongclaw_home_prefers_loong_home_over_loongclaw_home() {
+        let mut env = ScopedEnv::new();
+        let new_home = std::env::temp_dir().join("loong-home-preferred");
+        let old_home = std::env::temp_dir().join("loongclaw-home-deprecated");
+        env.set(LOONGCLAW_HOME_ENV, &new_home);
+        env.set("LOONGCLAW_HOME", &old_home);
+
+        // The active env constant reads the preferred name, so the legacy
+        // fallback stays ignored when both are present.
+        assert_eq!(default_loongclaw_home(), new_home);
+    }
+}
+
+#[cfg(test)]
+mod legacy_home_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn detect_legacy_home_finds_legacy_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let legacy = temp.path().join(".loongclaw");
+        fs::create_dir_all(&legacy).unwrap();
+        // .loong does NOT exist
+        let result = detect_legacy_home(temp.path());
+        assert!(
+            result.is_some(),
+            "should detect legacy home when .loongclaw exists but .loong does not"
+        );
+    }
+
+    #[test]
+    fn detect_legacy_home_no_warning_when_new_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        let new_home = temp.path().join(".loong");
+        let legacy = temp.path().join(".loongclaw");
+        fs::create_dir_all(&new_home).unwrap();
+        fs::create_dir_all(&legacy).unwrap();
+        let result = detect_legacy_home(temp.path());
+        assert!(
+            result.is_none(),
+            "should not detect legacy when .loong already exists"
+        );
+    }
+
+    #[test]
+    fn detect_legacy_home_no_warning_fresh_install() {
+        let temp = tempfile::tempdir().unwrap();
+        let result = detect_legacy_home(temp.path());
+        assert!(
+            result.is_none(),
+            "should not detect legacy on fresh install"
         );
     }
 }

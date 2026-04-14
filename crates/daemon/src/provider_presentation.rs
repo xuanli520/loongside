@@ -1,5 +1,7 @@
 use loongclaw_app as mvp;
 
+use crate::provider_credential_policy;
+
 pub fn guided_provider_label(kind: mvp::config::ProviderKind) -> &'static str {
     kind.display_name()
 }
@@ -58,10 +60,21 @@ pub fn render_provider_profile_state_lines(
     width: usize,
     single_provider_prefix: Option<&str>,
 ) -> Vec<String> {
+    let display_lines = provider_profile_state_display_lines(config, single_provider_prefix);
+
+    display_lines
+        .into_iter()
+        .flat_map(|line| mvp::presentation::render_wrapped_display_line(&line, width))
+        .collect()
+}
+
+pub fn provider_profile_state_display_lines(
+    config: &mvp::config::LoongClawConfig,
+    single_provider_prefix: Option<&str>,
+) -> Vec<String> {
     render_provider_profile_state_lines_from_parts(
         &active_provider_label(config),
         &saved_provider_profile_ids(config),
-        width,
         single_provider_prefix,
     )
 }
@@ -69,31 +82,20 @@ pub fn render_provider_profile_state_lines(
 pub fn render_provider_profile_state_lines_from_parts(
     active_provider_label: &str,
     saved_provider_profiles: &[String],
-    width: usize,
     single_provider_prefix: Option<&str>,
 ) -> Vec<String> {
     if saved_provider_profiles.len() > 1 {
-        let mut lines = mvp::presentation::render_wrapped_text_line(
-            "- active provider: ",
-            active_provider_label,
-            width,
-        );
-        let profiles = saved_provider_profiles
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        lines.extend(mvp::presentation::render_wrapped_csv_line(
-            "- saved provider profiles: ",
-            &profiles,
-            width,
+        let mut lines = Vec::new();
+        lines.push(format!("- active provider: {active_provider_label}"));
+        lines.push(format!(
+            "- saved provider profiles: {}",
+            saved_provider_profiles.join(", ")
         ));
         return lines;
     }
 
     single_provider_prefix
-        .map(|prefix| {
-            mvp::presentation::render_wrapped_text_line(prefix, active_provider_label, width)
-        })
+        .map(|prefix| vec![format!("{prefix}{active_provider_label}")])
         .unwrap_or_default()
 }
 
@@ -110,9 +112,30 @@ pub fn provider_identity_summary_with_credential_state(
 }
 
 pub fn provider_credential_state(config: &mvp::config::ProviderConfig) -> &'static str {
-    if config.authorization_header().is_some() {
+    let credentials_ready =
+        provider_credential_policy::provider_has_locally_available_credentials(config);
+    if credentials_ready {
         "credentials resolved"
     } else {
         "credential still missing"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_credential_state_accepts_x_api_key_provider_env_credentials() {
+        let mut env = crate::test_support::ScopedEnv::new();
+        env.set("ANTHROPIC_API_KEY", "test-anthropic-key");
+        let config = mvp::config::ProviderConfig {
+            kind: mvp::config::ProviderKind::Anthropic,
+            ..mvp::config::ProviderConfig::default()
+        };
+
+        let credential_state = provider_credential_state(&config);
+
+        assert_eq!(credential_state, "credentials resolved");
     }
 }

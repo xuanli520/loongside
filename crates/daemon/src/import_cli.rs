@@ -167,7 +167,24 @@ pub fn apply_selected_domains_to_config(
     candidate: &ImportCandidate,
     selected: &[migration::SetupDomainKind],
 ) -> mvp::config::LoongClawConfig {
+    let result = apply_selected_domains_to_config_with_report(base, candidate, selected);
+
+    result.config
+}
+
+struct SelectedDomainApplyResult {
+    config: mvp::config::LoongClawConfig,
+    channel_conflicts: Vec<migration::channels::ChannelApplyConflict>,
+}
+
+fn apply_selected_domains_to_config_with_report(
+    base: &mvp::config::LoongClawConfig,
+    candidate: &ImportCandidate,
+    selected: &[migration::SetupDomainKind],
+) -> SelectedDomainApplyResult {
     let mut config = base.clone();
+    let mut channel_conflicts = Vec::new();
+
     for domain in selected {
         match domain {
             migration::SetupDomainKind::Provider => {
@@ -179,11 +196,13 @@ pub fn apply_selected_domains_to_config(
                     .iter()
                     .map(|channel| channel.id)
                     .collect::<Vec<_>>();
-                migration::channels::apply_selected_channels(
+                let channel_report = migration::channels::apply_selected_channels_with_report(
                     &mut config,
                     &candidate.config,
                     &selected_channels,
                 );
+
+                channel_conflicts.extend(channel_report.conflicts);
             }
             migration::SetupDomainKind::Cli => {
                 config.cli = candidate.config.cli.clone();
@@ -197,7 +216,11 @@ pub fn apply_selected_domains_to_config(
             migration::SetupDomainKind::WorkspaceGuidance => {}
         }
     }
-    config
+
+    SelectedDomainApplyResult {
+        config,
+        channel_conflicts,
+    }
 }
 
 fn filter_candidate_by_selected_domains(
@@ -253,7 +276,13 @@ fn candidate_matches_source_path(
     requested_source_path: &Path,
 ) -> bool {
     crate::source_presentation::source_path(Some(candidate.source_kind), &candidate.source)
-        .is_some_and(|candidate_path| candidate_path == requested_source_path)
+        .is_some_and(|candidate_path| {
+            let resolved_candidate_path =
+                dunce::canonicalize(&candidate_path).unwrap_or(candidate_path);
+            let resolved_requested_path = dunce::canonicalize(requested_source_path)
+                .unwrap_or_else(|_| requested_source_path.to_path_buf());
+            resolved_candidate_path == resolved_requested_path
+        })
 }
 
 pub fn render_import_preview_lines_for_width(
@@ -432,7 +461,7 @@ fn render_import_apply_summary_lines_with_style(
     }
     let next_actions =
         crate::next_actions::collect_setup_next_actions(resolved_config, &config_path);
-    if let Some((primary, secondary)) = next_actions.split_first() {
+    if let Some((primary, secondary)) = select_primary_import_apply_action(&next_actions) {
         lines.extend(mvp::presentation::render_wrapped_text_line(
             "next step: ",
             &primary.command,
@@ -447,6 +476,34 @@ fn render_import_apply_summary_lines_with_style(
         }
     }
     lines
+}
+
+fn select_primary_import_apply_action(
+    actions: &[crate::next_actions::SetupNextAction],
+) -> Option<(
+    &crate::next_actions::SetupNextAction,
+    Vec<&crate::next_actions::SetupNextAction>,
+)> {
+    let primary_index = actions
+        .iter()
+        .position(is_managed_bridge_doctor_action)
+        .unwrap_or(0);
+    let primary = actions.get(primary_index)?;
+    let mut secondary = Vec::new();
+
+    for (index, action) in actions.iter().enumerate() {
+        if index == primary_index {
+            continue;
+        }
+
+        secondary.push(action);
+    }
+
+    Some((primary, secondary))
+}
+
+fn is_managed_bridge_doctor_action(action: &crate::next_actions::SetupNextAction) -> bool {
+    crate::next_actions::is_managed_bridge_doctor_action(action)
 }
 
 #[derive(Serialize)]
@@ -566,11 +623,7 @@ pub fn render_import_preview_json(candidates: &[ImportCandidate]) -> CliResult<S
 }
 
 fn detect_render_width() -> usize {
-    std::env::var("COLUMNS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|width| *width > 0)
-        .unwrap_or(80)
+    mvp::presentation::detect_render_width()
 }
 
 pub fn select_apply_candidate_index(candidates: &[ImportCandidate]) -> CliResult<usize> {
@@ -621,8 +674,9 @@ pub fn resolve_import_provider_selection(
             .collect::<Vec<_>>()
             .join(", ");
         return Err(format!(
-            "recommended import plan requires an active provider choice ({choices}); rerun with --provider {} or use loongclaw onboard",
+            "recommended import plan requires an active provider choice ({choices}); rerun with --provider {} or use {} onboard",
             migration::provider_selection::PROVIDER_SELECTOR_PLACEHOLDER,
+            mvp::config::active_cli_command_name(),
         ));
     }
 
@@ -853,8 +907,19 @@ pub fn apply_import_candidate(
                 .to_owned(),
         );
     }
-    let mut resolved_config =
-        apply_selected_domains_to_config(&base_config, candidate, &selected_domains);
+    let apply_result =
+        apply_selected_domains_to_config_with_report(&base_config, candidate, &selected_domains);
+    let channel_conflicts = apply_result.channel_conflicts;
+
+    if !channel_conflicts.is_empty() {
+        let conflict_detail = format_channel_apply_conflicts(&channel_conflicts);
+
+        return Err(format!(
+            "cannot apply selected channel domains: {conflict_detail}"
+        ));
+    }
+
+    let mut resolved_config = apply_result.config;
     if provider.is_some() || has_provider_domain {
         apply_provider_profiles_to_config(
             &base_config,
@@ -895,4 +960,15 @@ pub fn apply_import_candidate(
 
 fn domain_changes_config(domain: migration::SetupDomainKind) -> bool {
     domain.changes_config()
+}
+
+fn format_channel_apply_conflicts(
+    conflicts: &[migration::channels::ChannelApplyConflict],
+) -> String {
+    let summaries = conflicts
+        .iter()
+        .map(migration::channels::summarize_channel_apply_conflict)
+        .collect::<Vec<_>>();
+
+    summaries.join(" · ")
 }

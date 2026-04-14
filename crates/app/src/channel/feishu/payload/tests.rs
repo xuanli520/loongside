@@ -147,7 +147,9 @@ fn feishu_message_event_parses_text_payload() {
     );
     assert_eq!(
         event.reply_target,
-        ChannelOutboundTarget::feishu_message_reply("om_123").with_feishu_reply_in_thread(true)
+        ChannelOutboundTarget::feishu_message_reply("om_123")
+            .with_feishu_reply_chat_id("oc_123")
+            .with_feishu_reply_in_thread(true)
     );
     assert_eq!(event.reply_target.platform, ChannelPlatform::Feishu);
     assert_eq!(
@@ -199,6 +201,7 @@ fn feishu_websocket_message_event_parses_without_verification_token() {
     assert_eq!(
         event.reply_target,
         ChannelOutboundTarget::feishu_message_reply("om_ws_123")
+            .with_feishu_reply_chat_id("oc_123")
     );
 }
 
@@ -248,6 +251,7 @@ fn feishu_message_event_uses_thread_id_and_sender_open_id_when_present() {
         "feishu:feishu_main:oc_123:ou_123:omt_456"
     );
     assert_eq!(event.session.thread_id.as_deref(), Some("omt_456"));
+    assert_eq!(event.reply_target.feishu_reply_chat_id(), Some("oc_123"));
     assert_eq!(event.reply_target.feishu_reply_in_thread(), Some(true));
     assert_eq!(event.session.participant_id.as_deref(), Some("ou_123"));
     assert_eq!(
@@ -1498,7 +1502,7 @@ fn feishu_unsupported_message_type_is_ignored() {
 }
 
 fn encrypt_event_payload_for_test(plain_payload: &str, encrypt_key: &str) -> String {
-    use cbc::cipher::{BlockEncryptMut, KeyIvInit};
+    use cbc::cipher::{BlockModeEncrypt, KeyIvInit};
 
     let key = Sha256::digest(encrypt_key.as_bytes());
     let iv = [7_u8; 16];
@@ -1510,7 +1514,7 @@ fn encrypt_event_payload_for_test(plain_payload: &str, encrypt_key: &str) -> Str
 
     let encrypted = cbc::Encryptor::<Aes256>::new_from_slices(&key, &iv)
         .expect("create encryptor")
-        .encrypt_padded_mut::<Pkcs7>(&mut buffer, message_len)
+        .encrypt_padded::<Pkcs7>(&mut buffer, message_len)
         .expect("encrypt payload");
 
     let mut merged = iv.to_vec();
@@ -1566,7 +1570,9 @@ fn feishu_encrypted_payload_parses_with_encrypt_key() {
     );
     assert_eq!(
         event.reply_target,
-        ChannelOutboundTarget::feishu_message_reply("om_encrypt").with_feishu_reply_in_thread(true)
+        ChannelOutboundTarget::feishu_message_reply("om_encrypt")
+            .with_feishu_reply_chat_id("oc_encrypt")
+            .with_feishu_reply_in_thread(true)
     );
     assert_eq!(event.reply_target.feishu_reply_in_thread(), Some(true));
     assert_eq!(event.text, "encrypted hello");

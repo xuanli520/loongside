@@ -19,9 +19,12 @@ mod catalog_executor;
 mod catalog_query_runtime;
 mod catalog_runtime;
 mod contracts;
+mod copilot_auth;
 mod failover;
 mod failover_telemetry_runtime;
 mod http_client_runtime;
+#[cfg(test)]
+mod mock_transport;
 mod model_candidate_cooldown_runtime;
 mod model_candidate_resolver_runtime;
 mod policy;
@@ -40,13 +43,51 @@ mod request_planner;
 mod request_session_runtime;
 mod runtime_binding;
 mod shape;
+mod sse;
 mod transport;
+mod transport_profile_runtime;
+mod transport_trait;
 
+pub use copilot_auth::device_code_login as copilot_device_code_login;
+pub(crate) use failover::parse_provider_failover_snapshot_payload;
+pub use request_executor::{StreamingCallbackData, StreamingTokenCallback};
 pub use runtime_binding::ProviderRuntimeBinding;
 pub use shape::{
     extract_provider_turn, extract_provider_turn_with_scope,
     extract_provider_turn_with_scope_and_messages,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderToolSchemaReadiness {
+    pub active_model: String,
+    pub structured_tool_schema_enabled: bool,
+    pub effective_tool_schema_mode: String,
+}
+
+pub fn provider_tool_schema_readiness(config: &LoongClawConfig) -> ProviderToolSchemaReadiness {
+    let provider = &config.provider;
+    let runtime_contract = provider_runtime_contract(provider);
+    let capability_profile = capability_profile_runtime::ProviderCapabilityProfile::from_provider(
+        provider,
+        runtime_contract,
+    );
+    let active_model = provider.model.clone();
+    let capability = capability_profile.resolve_for_model(active_model.as_str());
+    let effective_tool_schema_mode = match capability.tool_schema_mode {
+        contracts::ProviderToolSchemaMode::Disabled => "disabled",
+        contracts::ProviderToolSchemaMode::EnabledStrict => "enabled_strict",
+        contracts::ProviderToolSchemaMode::EnabledWithDowngradeOnUnsupported => {
+            "enabled_with_downgrade"
+        }
+    };
+    let structured_tool_schema_enabled = capability.turn_tool_schema_enabled();
+
+    ProviderToolSchemaReadiness {
+        active_model,
+        structured_tool_schema_enabled,
+        effective_tool_schema_mode: effective_tool_schema_mode.to_owned(),
+    }
+}
 
 pub fn is_auth_style_failure_message(message: &str) -> bool {
     matches!(
@@ -68,6 +109,9 @@ use catalog_runtime::{ModelCatalogCacheLookup, fetch_model_catalog_singleflight}
 #[cfg(test)]
 use contracts::ProviderApiError;
 #[cfg(test)]
+use contracts::ProviderFeatureFamily;
+use contracts::provider_runtime_contract;
+#[cfg(test)]
 use contracts::should_disable_tool_schema_for_error;
 #[cfg(test)]
 use contracts::{CompletionPayloadMode, ReasoningField, TemperatureField, TokenLimitField};
@@ -76,8 +120,6 @@ use contracts::{
     PayloadAdaptationAxis, ProviderReasoningExtraBodyMode, ProviderToolSchemaMode,
     ProviderTransportMode,
 };
-#[cfg(test)]
-use contracts::{ProviderFeatureFamily, provider_runtime_contract};
 #[cfg(test)]
 use contracts::{adapt_payload_mode_for_error, parse_provider_api_error};
 #[cfg(test)]
@@ -130,7 +172,9 @@ use profile_state_store::{
 use provider_keyspace::build_model_catalog_cache_key;
 #[cfg(test)]
 use provider_keyspace::build_provider_profile_state_key;
-use request_dispatch_runtime::{request_completion_with_model, request_turn_with_model};
+use request_dispatch_runtime::{
+    request_completion_with_model, request_turn_streaming_with_model, request_turn_with_model,
+};
 use request_failover_runtime::request_across_model_candidates;
 #[cfg(test)]
 use request_payload_runtime::{build_completion_request_body, build_turn_request_body};
@@ -153,16 +197,8 @@ pub fn build_system_message(
     request_message_runtime::build_system_message(config, include_system_prompt)
 }
 
-pub(crate) fn build_base_messages(
-    config: &LoongClawConfig,
-    include_system_prompt: bool,
-) -> Vec<Value> {
-    request_message_runtime::build_base_messages(config, include_system_prompt)
-}
-
-pub(crate) fn push_history_message(messages: &mut Vec<Value>, role: &str, content: &str) {
-    request_message_runtime::push_history_message(messages, role, content);
-}
+pub(crate) use request_message_runtime::build_projected_context_for_session_with_binding;
+pub(crate) use request_message_runtime::project_hydrated_memory_context_for_view_with_binding;
 
 pub fn build_messages_for_session(
     config: &LoongClawConfig,
@@ -193,8 +229,6 @@ pub async fn request_completion(
                 model,
                 auto_model_mode,
                 auth_profile,
-                &session.endpoint,
-                &session.headers,
                 &session.request_policy,
                 &session.client,
                 &session.auth_context,
@@ -258,11 +292,85 @@ pub async fn request_turn_in_view(
                 auto_model_mode,
                 tool_definitions.as_slice(),
                 auth_profile,
-                &session.endpoint,
-                &session.headers,
                 &session.request_policy,
                 &session.client,
                 &session.auth_context,
+            )
+        },
+    )
+    .await
+}
+
+pub async fn request_turn_streaming(
+    config: &LoongClawConfig,
+    session_id: &str,
+    turn_id: &str,
+    messages: &[Value],
+    binding: ProviderRuntimeBinding<'_>,
+    on_token: crate::provider::request_executor::StreamingTokenCallback,
+) -> CliResult<crate::conversation::turn_engine::ProviderTurn> {
+    request_turn_streaming_in_view(
+        config,
+        session_id,
+        turn_id,
+        messages,
+        &crate::tools::runtime_tool_view(),
+        binding,
+        on_token,
+    )
+    .await
+}
+
+pub(crate) fn supports_turn_streaming_events(config: &LoongClawConfig) -> bool {
+    let runtime_contract = provider_runtime_contract(&config.provider);
+    runtime_contract.supports_turn_streaming_events()
+}
+
+pub async fn request_turn_streaming_in_view(
+    config: &LoongClawConfig,
+    session_id: &str,
+    turn_id: &str,
+    messages: &[Value],
+    tool_view: &crate::tools::ToolView,
+    binding: ProviderRuntimeBinding<'_>,
+    on_token: crate::provider::request_executor::StreamingTokenCallback,
+) -> CliResult<crate::conversation::turn_engine::ProviderTurn> {
+    if !supports_turn_streaming_events(config) {
+        return Err("provider transport does not support live turn streaming events".to_owned());
+    }
+
+    let session = prepare_provider_request_session(config).await?;
+    let tool_runtime_config =
+        crate::tools::runtime_config::ToolRuntimeConfig::from_loongclaw_config(config, None);
+    let runtime_tool_view =
+        crate::tools::runtime_tool_view_with_runtime_config(&config.tools, &tool_runtime_config);
+    let tool_definitions = if tool_view == &runtime_tool_view {
+        crate::tools::provider_tool_definitions_with_config(Some(&tool_runtime_config))
+    } else {
+        crate::tools::try_provider_tool_definitions_for_view(tool_view)?
+    };
+    request_across_model_candidates(
+        &config.provider,
+        binding,
+        &session.auth_profiles,
+        session.profile_state_policy.as_ref(),
+        &session.model_candidates,
+        session.auto_model_mode,
+        session.model_candidate_cooldown_policy.as_ref(),
+        |model, auto_model_mode, auth_profile| {
+            request_turn_streaming_with_model(
+                config,
+                session_id,
+                turn_id,
+                messages,
+                model,
+                auto_model_mode,
+                tool_definitions.as_slice(),
+                auth_profile,
+                &session.request_policy,
+                &session.client,
+                &session.auth_context,
+                on_token.clone(),
             )
         },
     )
