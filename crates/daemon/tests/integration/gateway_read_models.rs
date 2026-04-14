@@ -41,6 +41,7 @@ fn legacy_channel_inventory_json(
         "catalog_only_channels": inventory.catalog_only_channels,
         "channel_catalog": inventory.channel_catalog,
         "channel_surfaces": inventory.channel_surfaces,
+        "channel_access_policies": inventory.channel_access_policies,
     })
 }
 
@@ -104,6 +105,7 @@ fn legacy_acp_dispatch_payload_json(
             "channel_id": address.channel_id,
             "account_id": address.account_id,
             "conversation_id": address.conversation_id,
+            "participant_id": address.participant_id,
             "thread_id": address.thread_id,
         },
         "dispatch": acp_dispatch_decision_json(session_id, decision),
@@ -155,6 +157,7 @@ fn gateway_read_model_acp_status_keeps_requested_and_resolved_session_fields() {
             channel_id: Some("telegram".to_owned()),
             account_id: Some("bot_123456".to_owned()),
             conversation_id: Some("42".to_owned()),
+            participant_id: None,
             thread_id: None,
         }),
         activation_origin: Some(mvp::acp::AcpRoutingOrigin::AutomaticDispatch),
@@ -211,6 +214,7 @@ fn gateway_read_model_acp_session_list_keeps_metadata_and_counts() {
                 channel_id: Some("telegram".to_owned()),
                 account_id: Some("bot_123456".to_owned()),
                 conversation_id: Some("42".to_owned()),
+                participant_id: None,
                 thread_id: None,
             }),
             activation_origin: Some(mvp::acp::AcpRoutingOrigin::AutomaticDispatch),
@@ -324,6 +328,7 @@ fn gateway_read_model_acp_dispatch_keeps_structured_address_and_target() {
         Some("feishu"),
         Some("oc_123"),
         Some("lark-prod"),
+        Some("ou_sender_1"),
         Some("om_thread_1"),
     )
     .expect("build ACP dispatch address");
@@ -338,6 +343,7 @@ fn gateway_read_model_acp_dispatch_keeps_structured_address_and_target() {
             channel_id: Some("feishu".to_owned()),
             account_id: Some("lark-prod".to_owned()),
             conversation_id: Some("oc_123".to_owned()),
+            participant_id: None,
             thread_id: Some("om_thread_1".to_owned()),
             channel_path: vec![
                 "lark-prod".to_owned(),
@@ -411,6 +417,11 @@ fn gateway_read_model_runtime_snapshot_embeds_inventory_and_tool_summary() {
             .as_u64()
             .is_some_and(|value| value > 0),
         "runtime snapshot should advertise at least one visible tool"
+    );
+    assert_eq!(encoded["tools"]["tool_calling"]["availability"], "ready");
+    assert_eq!(
+        encoded["tools"]["tool_calling"]["structured_tool_schema_enabled"],
+        true
     );
 
     fs::remove_dir_all(&root).ok();
@@ -489,6 +500,10 @@ fn gateway_read_model_operator_summary_keeps_owner_control_and_runtime_rollups()
     assert_eq!(
         summary.runtime.active_provider_profile_id.as_deref(),
         runtime_snapshot.provider["active_profile_id"].as_str()
+    );
+    assert_eq!(
+        summary.runtime.tool_calling.availability,
+        runtime_snapshot.tools.tool_calling.availability
     );
     assert_eq!(
         encoded["control_surface"]["base_url"],

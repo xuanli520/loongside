@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::collections::BTreeMap;
 #[cfg(feature = "tool-file")]
 use std::fs;
@@ -2513,6 +2514,7 @@ pub(super) fn feishu_provider_tool_definition(tool_name: &str) -> Option<Value> 
         })
 }
 
+#[cfg(test)]
 pub(super) fn feishu_shape_examples() -> BTreeMap<&'static str, Value> {
     let mut shapes = BTreeMap::new();
     shapes.insert(
@@ -5737,7 +5739,7 @@ fn ensure_required_scopes(
     }
 
     Err(format!(
-        "{tool_name} requires Feishu scopes [{}] for `{}`; rerun the OAuth flow with the required scopes",
+        "{tool_name} requires Feishu scopes [{}] for `{}`; update Feishu config if needed and rerun `loong feishu auth start --account <account>`",
         missing.join(", "),
         grant.principal.storage_key()
     ))
@@ -5757,7 +5759,7 @@ fn ensure_any_required_scope(
     }
 
     Err(format!(
-        "{tool_name} requires at least one Feishu scope [{}] for `{}`; rerun the OAuth flow with the required scopes",
+        "{tool_name} requires at least one Feishu scope [{}] for `{}`; update Feishu config if needed and rerun `loong feishu auth start --account <account>`",
         accepted.join(", "),
         grant.principal.storage_key()
     ))
