@@ -117,6 +117,13 @@ pub use runtime::state::ChannelOperationRuntime;
     feature = "channel-whatsapp"
 ))]
 pub use runtime::turn_feedback::ChannelTurnFeedbackPolicy;
+#[cfg(any(
+    feature = "channel-telegram",
+    feature = "channel-feishu",
+    feature = "channel-matrix",
+    feature = "channel-wecom"
+))]
+pub use runtime::types::{ResolvedKnownChannelSessionTarget, resolve_known_channel_session_target};
 pub use sdk::{
     ChannelDescriptor, ChannelRuntimeKind, background_channel_runtime_descriptors,
     channel_descriptor, is_background_channel_surface_enabled, service_channel_descriptors,
@@ -1788,6 +1795,67 @@ mod tests {
                 thread_id: None,
             }
         );
+    }
+
+    #[cfg(feature = "channel-telegram")]
+    #[test]
+    fn resolve_known_channel_session_target_describes_telegram_thread_shape() {
+        let config: LoongClawConfig = serde_json::from_value(serde_json::json!({
+            "telegram": {
+                "enabled": true,
+                "accounts": {
+                    "ops": {
+                        "account_id": "Ops-Bot",
+                        "bot_token": "123456:telegram-test-token",
+                        "allowed_chat_ids": [123]
+                    }
+                }
+            }
+        }))
+        .expect("deserialize telegram config");
+
+        let resolved = resolve_known_channel_session_target(&config, "telegram:Ops-Bot:123:42")
+            .expect("resolve telegram known session");
+
+        assert_eq!(resolved.channel_id, "telegram");
+        assert_eq!(resolved.account_id.as_deref(), Some("ops-bot"));
+        assert_eq!(resolved.session_shape, "telegram_thread");
+        assert_eq!(
+            resolved.target_kind,
+            ChannelOutboundTargetKind::Conversation
+        );
+        assert_eq!(resolved.target_id, "123:42");
+        assert_eq!(resolved.conversation_id.as_deref(), Some("123"));
+        assert_eq!(resolved.thread_id.as_deref(), Some("42"));
+        assert!(resolved.participant_id.is_none());
+    }
+
+    #[cfg(feature = "channel-feishu")]
+    #[test]
+    fn resolve_known_channel_session_target_describes_feishu_participant_scope() {
+        let config: LoongClawConfig = serde_json::from_value(serde_json::json!({
+            "feishu": {
+                "enabled": true,
+                "app_id": "cli_a1b2c3",
+                "app_secret": "secret",
+                "allowed_chat_ids": ["oc_123"]
+            }
+        }))
+        .expect("deserialize feishu config");
+
+        let resolved = resolve_known_channel_session_target(
+            &config,
+            "feishu:feishu_cli_a1b2c3:oc_123:ou_sender_1:om_thread_1",
+        )
+        .expect("resolve feishu known session");
+
+        assert_eq!(resolved.channel_id, "feishu");
+        assert_eq!(resolved.session_shape, "feishu_reply");
+        assert_eq!(resolved.account_id.as_deref(), Some("feishu_cli_a1b2c3"));
+        assert_eq!(resolved.conversation_id.as_deref(), Some("oc_123"));
+        assert_eq!(resolved.participant_id.as_deref(), Some("ou_sender_1"));
+        assert_eq!(resolved.thread_id.as_deref(), Some("om_thread_1"));
+        assert_eq!(resolved.reply_message_id.as_deref(), Some("om_thread_1"));
     }
 
     #[cfg(feature = "channel-matrix")]
