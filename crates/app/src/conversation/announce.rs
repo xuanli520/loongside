@@ -66,6 +66,22 @@ pub(crate) fn enqueue_delegate_result_announce(
     child_session_id: String,
     settings: DelegateAnnounceSettings,
 ) {
+    enqueue_delegate_result_announce_internal(
+        memory_config,
+        parent_session_id,
+        child_session_id,
+        settings,
+        true,
+    );
+}
+
+fn enqueue_delegate_result_announce_internal(
+    memory_config: MemoryRuntimeConfig,
+    parent_session_id: String,
+    child_session_id: String,
+    settings: DelegateAnnounceSettings,
+    spawn_drain_task: bool,
+) {
     let queue_key = delegate_announce_queue_key(&memory_config, parent_session_id.as_str());
     let immediate_flush = settings.debounce_ms == 0;
     let should_spawn = {
@@ -91,7 +107,7 @@ pub(crate) fn enqueue_delegate_result_announce(
         !already_draining
     };
 
-    if !should_spawn {
+    if !should_spawn || !spawn_drain_task {
         return;
     }
 
@@ -454,6 +470,22 @@ pub(crate) fn delegate_announce_test_lock_for_tests() -> &'static tokio::sync::M
 }
 
 #[cfg(test)]
+pub(crate) fn enqueue_delegate_result_announce_without_spawn_for_tests(
+    memory_config: MemoryRuntimeConfig,
+    parent_session_id: String,
+    child_session_id: String,
+    settings: DelegateAnnounceSettings,
+) {
+    enqueue_delegate_result_announce_internal(
+        memory_config,
+        parent_session_id,
+        child_session_id,
+        settings,
+        false,
+    );
+}
+
+#[cfg(test)]
 mod tests {
     use std::fs;
 
@@ -461,10 +493,11 @@ mod tests {
     use tokio::time::{Duration, sleep};
 
     use super::{
-        DELEGATE_RESULTS_ANNOUNCED_EVENT_KIND, DelegateAnnounceQueueState,
-        DelegateAnnounceSettings, delegate_announce_queue_key, delegate_announce_queues,
-        delegate_announce_test_lock_for_tests, drain_delegate_announce_queue,
-        enqueue_delegate_result_announce, reset_delegate_announce_queues_for_tests,
+        DELEGATE_RESULTS_ANNOUNCED_EVENT_KIND, DelegateAnnounceSettings,
+        delegate_announce_queue_key, delegate_announce_test_lock_for_tests,
+        drain_delegate_announce_queue, enqueue_delegate_result_announce,
+        enqueue_delegate_result_announce_without_spawn_for_tests,
+        reset_delegate_announce_queues_for_tests,
     };
     use crate::memory::runtime_config::MemoryRuntimeConfig;
     use crate::session::frozen_result::{FrozenContent, FrozenResult};
@@ -574,6 +607,16 @@ mod tests {
         parent_session_id: &str,
     ) {
         let queue_key = delegate_announce_queue_key(memory_config, parent_session_id);
+        {
+            let queues = super::delegate_announce_queues();
+            let mut queues = queues
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(queue) = queues.get_mut(queue_key.as_str()) {
+                let debounce_duration = Duration::from_millis(queue.settings.debounce_ms);
+                queue.last_enqueued_at = std::time::Instant::now() - debounce_duration;
+            }
+        }
         let parent_session_id = parent_session_id.to_owned();
         let memory_config = memory_config.clone();
         drain_delegate_announce_queue(memory_config, queue_key, parent_session_id).await;
@@ -625,26 +668,24 @@ mod tests {
             debounce_ms: 100,
             max_batch: 20,
         };
-        let queue_key = delegate_announce_queue_key(&memory_config, "root-session");
-        {
-            let queues = delegate_announce_queues();
-            let mut queues = queues
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            queues.insert(
-                queue_key,
-                DelegateAnnounceQueueState {
-                    pending_child_session_ids: std::collections::VecDeque::from([
-                        "child-1".to_owned(),
-                        "child-2".to_owned(),
-                        "child-3".to_owned(),
-                    ]),
-                    last_enqueued_at: std::time::Instant::now() - Duration::from_millis(100),
-                    draining: true,
-                    settings,
-                },
-            );
-        }
+        enqueue_delegate_result_announce_without_spawn_for_tests(
+            memory_config.clone(),
+            "root-session".to_owned(),
+            "child-1".to_owned(),
+            settings.clone(),
+        );
+        enqueue_delegate_result_announce_without_spawn_for_tests(
+            memory_config.clone(),
+            "root-session".to_owned(),
+            "child-2".to_owned(),
+            settings.clone(),
+        );
+        enqueue_delegate_result_announce_without_spawn_for_tests(
+            memory_config.clone(),
+            "root-session".to_owned(),
+            "child-3".to_owned(),
+            settings,
+        );
         flush_delegate_announce_queue_for_tests(&memory_config, "root-session").await;
         let events = repo
             .list_recent_events("root-session", 20)
@@ -677,19 +718,19 @@ mod tests {
             debounce_ms: 100,
             max_batch: 2,
         };
-        enqueue_delegate_result_announce(
+        enqueue_delegate_result_announce_without_spawn_for_tests(
             memory_config.clone(),
             "root-session".to_owned(),
             "child-1".to_owned(),
             settings.clone(),
         );
-        enqueue_delegate_result_announce(
+        enqueue_delegate_result_announce_without_spawn_for_tests(
             memory_config.clone(),
             "root-session".to_owned(),
             "child-2".to_owned(),
             settings.clone(),
         );
-        enqueue_delegate_result_announce(
+        enqueue_delegate_result_announce_without_spawn_for_tests(
             memory_config.clone(),
             "root-session".to_owned(),
             "child-3".to_owned(),
