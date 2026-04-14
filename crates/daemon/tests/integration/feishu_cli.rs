@@ -238,7 +238,7 @@ fn feishu_auth_subcommand_registers_start_exchange_status_and_revoke() {
 
 #[test]
 fn feishu_resource_subcommands_parse() {
-    try_parse_cli(["loongclaw", "feishu", "auth", "list"]).expect("auth list command should parse");
+    try_parse_cli(["loong", "feishu", "auth", "list"]).expect("auth list command should parse");
 
     try_parse_cli([
         "loongclaw",
@@ -755,7 +755,7 @@ fn feishu_resource_subcommands_parse() {
     ])
     .expect("nested feishu reply file-path command should parse");
 
-    try_parse_cli(["loongclaw", "feishu", "serve", "--bind", "127.0.0.1:18080"])
+    try_parse_cli(["loong", "feishu", "serve", "--bind", "127.0.0.1:18080"])
         .expect("nested feishu serve command should parse");
 }
 
