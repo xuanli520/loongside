@@ -29,6 +29,7 @@ loongclaw validate-config --config /path/to/custom-config.toml
 - [external_skills](#external_skills) - External skill management
 - [audit](#audit) - Audit logging
 - [channels](#channels) - Channel-specific settings
+- [feishu_integration](#feishu_integration) - Feishu OAuth integration settings
 
 ## Validation Semantics
 
@@ -635,6 +636,7 @@ path = "~/.loongclaw/audit/events.jsonl"
 ## channels
 
 Configuration for input/output channels.
+Channel configuration uses top-level TOML tables such as `[cli]`, `[telegram]`, `[feishu]`, and `[matrix]`; do not nest them under `[channels.*]`.
 
 ### cli
 
