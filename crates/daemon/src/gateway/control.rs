@@ -34,6 +34,7 @@ use super::api_events::handle_events;
 use super::api_health::handle_health;
 use super::api_turn::handle_turn;
 use super::event_bus::GatewayEventBus;
+use super::openai_compat::{handle_chat_completions, handle_models};
 use super::read_models::{
     GatewayChannelInventoryReadModel, GatewayOperatorSummaryReadModel,
     GatewayRuntimeSnapshotReadModel, build_acp_observability_read_model,
@@ -117,6 +118,13 @@ impl GatewayControlAppState {
                 visible_tool_names: vec![],
                 capability_snapshot_sha256: String::new(),
                 capability_snapshot: String::new(),
+                tool_calling: super::read_models::GatewayToolCallingReadModel {
+                    availability: "inactive".to_owned(),
+                    structured_tool_schema_enabled: false,
+                    effective_tool_schema_mode: "enabled_with_downgrade".to_owned(),
+                    active_model: String::new(),
+                    reason: "no runtime-visible tools are enabled".to_owned(),
+                },
             },
             runtime_plugins: json!({}),
             external_skills: json!({}),
@@ -325,6 +333,8 @@ fn build_gateway_control_router(app_state: Arc<GatewayControlAppState>) -> Route
         .route("/v1/acp/dispatch", get(handle_acp_dispatch))
         .route("/v1/events", get(handle_events))
         .route("/v1/turn", post(handle_turn))
+        .route("/v1/models", get(handle_models))
+        .route("/v1/chat/completions", post(handle_chat_completions))
         .route("/health", get(handle_health))
         .with_state(app_state)
 }

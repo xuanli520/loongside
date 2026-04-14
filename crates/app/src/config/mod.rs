@@ -83,7 +83,9 @@ pub use memory::{
 };
 #[allow(unused_imports)]
 pub use outbound_http::OutboundHttpConfig;
-pub(crate) use provider::{GITHUB_COPILOT_DEFAULT_HEADERS, GITHUB_COPILOT_USER_AGENT};
+pub(crate) use provider::{
+    ANTHROPIC_DEFAULT_HEADERS, GITHUB_COPILOT_DEFAULT_HEADERS, GITHUB_COPILOT_USER_AGENT,
+};
 #[allow(unused_imports)]
 pub use provider::{
     ModelCatalogProbeRecovery, PROVIDER_DESCRIPTOR_SCHEMA_VERSION, ProviderAuthScheme,
@@ -119,6 +121,14 @@ pub use shared::{
     detect_invoked_cli_command_name_from_arg0, detect_legacy_home, expand_path,
     set_active_cli_command_name,
 };
+pub(crate) use shared::{
+    pop_default_loongclaw_home_env_override_for_tests,
+    push_default_loongclaw_home_env_override_for_tests,
+};
+#[cfg(test)]
+pub(crate) use shared::{
+    pop_default_loongclaw_home_override_for_tests, push_default_loongclaw_home_override_for_tests,
+};
 #[allow(unused_imports)]
 pub use tools::{
     AUTONOMY_PROFILE_VALID_VALUES, AutonomyProfile, BrowserCompanionToolConfig, BrowserToolConfig,
@@ -133,13 +143,13 @@ pub use tools::{
     MAX_BROWSER_MAX_SESSIONS, MAX_BROWSER_MAX_TEXT_CHARS, MAX_RUNTIME_SELF_MAX_SOURCE_CHARS,
     MAX_RUNTIME_SELF_MAX_TOTAL_CHARS, MAX_WEB_FETCH_MAX_BYTES, RuntimePluginsConfig,
     RuntimeSelfToolConfig, SessionVisibility, ToolConfig, ToolConsentConfig, ToolConsentMode,
-    WEB_SEARCH_BRAVE_API_KEY_ENV, WEB_SEARCH_EXA_API_KEY_ENV, WEB_SEARCH_FIRECRAWL_API_KEY_ENV,
-    WEB_SEARCH_JINA_API_KEY_ENV, WEB_SEARCH_JINA_AUTH_TOKEN_ENV, WEB_SEARCH_PERPLEXITY_API_KEY_ENV,
-    WEB_SEARCH_PROVIDER_BRAVE, WEB_SEARCH_PROVIDER_DUCKDUCKGO, WEB_SEARCH_PROVIDER_EXA,
-    WEB_SEARCH_PROVIDER_FIRECRAWL, WEB_SEARCH_PROVIDER_JINA, WEB_SEARCH_PROVIDER_PERPLEXITY,
-    WEB_SEARCH_PROVIDER_TAVILY, WEB_SEARCH_PROVIDER_VALID_VALUES, WEB_SEARCH_TAVILY_API_KEY_ENV,
-    WebSearchProviderDescriptor, WebSearchToolConfig, WebToolConfig, normalize_web_search_provider,
-    parse_autonomy_profile, web_search_provider_api_key_env_names,
+    ToolFileRootResolution, WEB_SEARCH_BRAVE_API_KEY_ENV, WEB_SEARCH_EXA_API_KEY_ENV,
+    WEB_SEARCH_FIRECRAWL_API_KEY_ENV, WEB_SEARCH_JINA_API_KEY_ENV, WEB_SEARCH_JINA_AUTH_TOKEN_ENV,
+    WEB_SEARCH_PERPLEXITY_API_KEY_ENV, WEB_SEARCH_PROVIDER_BRAVE, WEB_SEARCH_PROVIDER_DUCKDUCKGO,
+    WEB_SEARCH_PROVIDER_EXA, WEB_SEARCH_PROVIDER_FIRECRAWL, WEB_SEARCH_PROVIDER_JINA,
+    WEB_SEARCH_PROVIDER_PERPLEXITY, WEB_SEARCH_PROVIDER_TAVILY, WEB_SEARCH_PROVIDER_VALID_VALUES,
+    WEB_SEARCH_TAVILY_API_KEY_ENV, WebSearchProviderDescriptor, WebSearchToolConfig, WebToolConfig,
+    normalize_web_search_provider, parse_autonomy_profile, web_search_provider_api_key_env_names,
     web_search_provider_default_api_key_env, web_search_provider_descriptor,
     web_search_provider_descriptors,
 };
@@ -156,7 +166,7 @@ mod tests {
     use loongclaw_contracts::SecretRef;
 
     use super::*;
-    use crate::test_support::ScopedEnv;
+    use crate::test_support::{ScopedEnv, ScopedLoongClawHome};
     use std::collections::BTreeSet;
 
     fn clear_config_test_secret_envs(env: &mut ScopedEnv) {
@@ -478,6 +488,8 @@ mod tests {
                 "nvidia",
                 "ollama",
                 "openai",
+                "opencode_go",
+                "opencode_zen",
                 "openrouter",
                 "perplexity",
                 "qianfan",
@@ -531,6 +543,14 @@ mod tests {
                 "https://api.openai.com/v1/chat/completions",
             ),
             (
+                ProviderKind::OpencodeGo,
+                "https://opencode.ai/zen/go/v1/chat/completions",
+            ),
+            (
+                ProviderKind::OpencodeZen,
+                "https://opencode.ai/zen/v1/chat/completions",
+            ),
+            (
                 ProviderKind::Openrouter,
                 "https://openrouter.ai/api/v1/chat/completions",
             ),
@@ -567,6 +587,8 @@ mod tests {
             (ProviderKind::Kimi, Some("MOONSHOT_API_KEY")),
             (ProviderKind::Minimax, Some("MINIMAX_API_KEY")),
             (ProviderKind::Openai, Some("OPENAI_API_KEY")),
+            (ProviderKind::OpencodeGo, Some("OPENCODE_API_KEY")),
+            (ProviderKind::OpencodeZen, Some("OPENCODE_API_KEY")),
             (ProviderKind::Xiaomi, Some("XIAOMI_API_KEY")),
         ];
         for (kind, expected) in cases {
@@ -896,6 +918,7 @@ mod tests {
             Some(std::path::PathBuf::from(":memory:"))
         );
 
+        let _home = ScopedLoongClawHome::new("loongclaw-provider-profile-home");
         let profile_sqlite_default = ProviderConfig::default();
         let expected_default = default_loongclaw_home().join("provider-profile-state.sqlite3");
         assert_eq!(
@@ -1287,6 +1310,34 @@ kind = "volcengine_coding"
     }
 
     #[test]
+    fn opencode_zen_warns_when_given_go_model_prefix() {
+        let config = ProviderConfig {
+            kind: ProviderKind::OpencodeZen,
+            model: "opencode-go/glm-5.1".to_owned(),
+            ..ProviderConfig::default()
+        };
+
+        let hint = config
+            .configuration_hint()
+            .expect("opencode_zen should warn about Go-prefixed models");
+        assert!(hint.contains("opencode_go"));
+    }
+
+    #[test]
+    fn opencode_go_warns_when_pointed_at_zen_base_url() {
+        let config = ProviderConfig {
+            kind: ProviderKind::OpencodeGo,
+            base_url: "https://opencode.ai/zen/v1".to_owned(),
+            ..ProviderConfig::default()
+        };
+
+        let hint = config
+            .configuration_hint()
+            .expect("opencode_go should warn about the wrong base url root");
+        assert!(hint.contains("opencode_zen"));
+    }
+
+    #[test]
     fn bedrock_uses_region_template_endpoints() {
         let config = ProviderConfig {
             kind: ProviderKind::Bedrock,
@@ -1450,6 +1501,14 @@ kind = "volcengine_coding"
             (
                 ProviderKind::VolcengineCoding,
                 "https://ark.cn-beijing.volces.com/api/coding/v3/models",
+            ),
+            (
+                ProviderKind::OpencodeGo,
+                "https://opencode.ai/zen/go/v1/models",
+            ),
+            (
+                ProviderKind::OpencodeZen,
+                "https://opencode.ai/zen/v1/models",
             ),
         ];
 
@@ -2454,6 +2513,14 @@ safe_lane_health_replan_warn_threshold = 0.55
             (ProviderKind::Minimax, "https://api.minimaxi.com/v1/models"),
             (ProviderKind::Ollama, "http://127.0.0.1:11434/v1/models"),
             (ProviderKind::Openai, "https://api.openai.com/v1/models"),
+            (
+                ProviderKind::OpencodeGo,
+                "https://opencode.ai/zen/go/v1/models",
+            ),
+            (
+                ProviderKind::OpencodeZen,
+                "https://opencode.ai/zen/v1/models",
+            ),
             (
                 ProviderKind::Openrouter,
                 "https://openrouter.ai/api/v1/models",

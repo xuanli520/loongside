@@ -23,6 +23,8 @@ mod copilot_auth;
 mod failover;
 mod failover_telemetry_runtime;
 mod http_client_runtime;
+#[cfg(test)]
+mod mock_transport;
 mod model_candidate_cooldown_runtime;
 mod model_candidate_resolver_runtime;
 mod policy;
@@ -32,6 +34,7 @@ mod profile_state_backend;
 mod profile_state_store;
 mod provider_keyspace;
 mod provider_validation_runtime;
+mod rate_limit;
 mod request_dispatch_runtime;
 mod request_executor;
 mod request_failover_runtime;
@@ -41,16 +44,52 @@ mod request_planner;
 mod request_session_runtime;
 mod runtime_binding;
 mod shape;
+mod sse;
 mod transport;
+mod transport_profile_runtime;
+mod transport_trait;
 
 pub use copilot_auth::device_code_login as copilot_device_code_login;
-pub(crate) use failover::parse_provider_failover_snapshot_payload;
+pub use failover::parse_provider_failover_snapshot_payload;
+pub use rate_limit::RateLimitObservation;
 pub use request_executor::{StreamingCallbackData, StreamingTokenCallback};
 pub use runtime_binding::ProviderRuntimeBinding;
 pub use shape::{
     extract_provider_turn, extract_provider_turn_with_scope,
     extract_provider_turn_with_scope_and_messages,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderToolSchemaReadiness {
+    pub active_model: String,
+    pub structured_tool_schema_enabled: bool,
+    pub effective_tool_schema_mode: String,
+}
+
+pub fn provider_tool_schema_readiness(config: &LoongClawConfig) -> ProviderToolSchemaReadiness {
+    let provider = &config.provider;
+    let runtime_contract = provider_runtime_contract(provider);
+    let capability_profile = capability_profile_runtime::ProviderCapabilityProfile::from_provider(
+        provider,
+        runtime_contract,
+    );
+    let active_model = provider.model.clone();
+    let capability = capability_profile.resolve_for_model(active_model.as_str());
+    let effective_tool_schema_mode = match capability.tool_schema_mode {
+        contracts::ProviderToolSchemaMode::Disabled => "disabled",
+        contracts::ProviderToolSchemaMode::EnabledStrict => "enabled_strict",
+        contracts::ProviderToolSchemaMode::EnabledWithDowngradeOnUnsupported => {
+            "enabled_with_downgrade"
+        }
+    };
+    let structured_tool_schema_enabled = capability.turn_tool_schema_enabled();
+
+    ProviderToolSchemaReadiness {
+        active_model,
+        structured_tool_schema_enabled,
+        effective_tool_schema_mode: effective_tool_schema_mode.to_owned(),
+    }
+}
 
 pub fn is_auth_style_failure_message(message: &str) -> bool {
     matches!(
@@ -91,6 +130,8 @@ use failover::ProviderFailoverReason;
 #[cfg(test)]
 use failover::ProviderFailoverSnapshot;
 #[cfg(test)]
+use failover::build_model_request_error_with_rate_limit;
+#[cfg(test)]
 use failover::{ProviderFailoverStage, build_model_request_error};
 #[cfg(test)]
 use failover_telemetry_runtime::{
@@ -103,6 +144,7 @@ use model_candidate_cooldown_runtime::prioritize_model_candidates_by_cooldown;
 #[cfg(test)]
 use model_candidate_cooldown_runtime::{
     ModelCandidateCooldownPolicy, register_model_candidate_cooldown,
+    resolve_model_candidate_cooldown_duration,
 };
 #[cfg(test)]
 use model_candidate_resolver_runtime::rank_model_candidates;
@@ -192,8 +234,6 @@ pub async fn request_completion(
                 model,
                 auto_model_mode,
                 auth_profile,
-                &session.endpoint,
-                &session.headers,
                 &session.request_policy,
                 &session.client,
                 &session.auth_context,
@@ -257,8 +297,6 @@ pub async fn request_turn_in_view(
                 auto_model_mode,
                 tool_definitions.as_slice(),
                 auth_profile,
-                &session.endpoint,
-                &session.headers,
                 &session.request_policy,
                 &session.client,
                 &session.auth_context,
@@ -288,7 +326,7 @@ pub async fn request_turn_streaming(
     .await
 }
 
-pub(crate) fn supports_turn_streaming_events(config: &LoongClawConfig) -> bool {
+pub fn supports_turn_streaming_events(config: &LoongClawConfig) -> bool {
     let runtime_contract = provider_runtime_contract(&config.provider);
     runtime_contract.supports_turn_streaming_events()
 }
@@ -334,8 +372,6 @@ pub async fn request_turn_streaming_in_view(
                 auto_model_mode,
                 tool_definitions.as_slice(),
                 auth_profile,
-                &session.endpoint,
-                &session.headers,
                 &session.request_policy,
                 &session.client,
                 &session.auth_context,

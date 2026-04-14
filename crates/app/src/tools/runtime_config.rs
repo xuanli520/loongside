@@ -669,6 +669,7 @@ impl ToolExecutionConfig {
 #[derive(Debug, Clone)]
 pub struct ToolRuntimeConfig {
     pub file_root: Option<PathBuf>,
+    pub workspace_root: Option<PathBuf>,
     pub memory_sqlite_path: Option<PathBuf>,
     pub selected_memory_system_id: String,
     pub shell_allow: BTreeSet<String>,
@@ -696,6 +697,7 @@ impl Default for ToolRuntimeConfig {
     fn default() -> Self {
         Self {
             file_root: None,
+            workspace_root: None,
             memory_sqlite_path: None,
             selected_memory_system_id: crate::memory::DEFAULT_MEMORY_SYSTEM_ID.to_owned(),
             shell_allow: crate::config::DEFAULT_SHELL_ALLOW
@@ -731,6 +733,18 @@ impl ToolRuntimeConfig {
         overridden
     }
 
+    pub fn with_workspace_root_override(&self, workspace_root: PathBuf) -> Self {
+        let mut overridden = self.clone();
+        overridden.workspace_root = Some(workspace_root);
+        overridden
+    }
+
+    pub fn effective_workspace_root(&self) -> Option<&Path> {
+        let configured_workspace_root = self.workspace_root.as_deref();
+        let fallback_file_root = self.file_root.as_deref();
+        configured_workspace_root.or(fallback_file_root)
+    }
+
     pub fn default_working_directory(&self) -> PathBuf {
         let configured_root = self.file_root.clone();
         let fallback_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -738,6 +752,11 @@ impl ToolRuntimeConfig {
     }
 
     pub fn from_loongclaw_config(config: &LoongClawConfig, config_path: Option<&Path>) -> Self {
+        let file_root = config.tools.configured_file_root();
+        let workspace_root = config
+            .tools
+            .configured_runtime_workspace_root()
+            .or_else(|| file_root.clone());
         let memory_system_selection = crate::memory::resolve_memory_system_selection(config);
         let selected_memory_system_id = memory_system_selection.id;
         let web_fetch_allowed_domains = config.tools.web.normalized_allowed_domains();
@@ -764,7 +783,8 @@ impl ToolRuntimeConfig {
             shell_deny.iter(),
         );
         Self {
-            file_root: Some(config.tools.resolved_file_root()),
+            file_root,
+            workspace_root,
             memory_sqlite_path: Some(config.memory.resolved_sqlite_path()),
             selected_memory_system_id,
             shell_allow,
@@ -903,7 +923,9 @@ impl ToolRuntimeConfig {
     /// Keeps full backward compatibility for callers that still rely on
     /// `LOONGCLAW_FILE_ROOT`.
     pub fn from_env() -> Self {
-        let file_root = std::env::var("LOONGCLAW_FILE_ROOT").ok().map(PathBuf::from);
+        let file_root = parse_env_path("LOONGCLAW_FILE_ROOT");
+        let workspace_root =
+            parse_env_path("LOONGCLAW_WORKSPACE_ROOT").or_else(|| file_root.clone());
         let memory_sqlite_path = std::env::var_os("LOONGCLAW_SQLITE_PATH")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from);
@@ -1062,6 +1084,7 @@ impl ToolRuntimeConfig {
 
         Self {
             file_root,
+            workspace_root,
             memory_sqlite_path,
             selected_memory_system_id,
             shell_allow,
@@ -1578,6 +1601,12 @@ fn parse_env_string(key: &str) -> Option<String> {
     normalize_optional_string(std::env::var(key).ok().as_deref())
 }
 
+fn parse_env_path(key: &str) -> Option<PathBuf> {
+    let raw_path = parse_env_string(key)?;
+    let path = PathBuf::from(raw_path);
+    Some(path)
+}
+
 fn parse_env_domain_list(key: &str) -> BTreeSet<String> {
     std::env::var(key)
         .ok()
@@ -1703,7 +1732,7 @@ pub fn get_tool_runtime_config() -> &'static ToolRuntimeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::ScopedEnv;
+    use crate::test_support::{ScopedEnv, ScopedLoongClawHome};
     #[cfg(feature = "feishu-integration")]
     use std::collections::BTreeMap;
 
@@ -1712,6 +1741,7 @@ mod tests {
             "LOONG_HOME",
             "LOONGCLAW_CONFIG_PATH",
             "LOONGCLAW_FILE_ROOT",
+            "LOONGCLAW_WORKSPACE_ROOT",
             "LOONGCLAW_SQLITE_PATH",
             "LOONGCLAW_TOOL_SESSIONS_ENABLED",
             "LOONGCLAW_TOOL_SESSIONS_ALLOW_MUTATION",
@@ -1768,6 +1798,7 @@ mod tests {
     fn tool_runtime_config_from_env_defaults() {
         let config = ToolRuntimeConfig::default();
         assert!(config.file_root.is_none());
+        assert!(config.workspace_root.is_none());
         assert!(config.config_path.is_none());
         assert!(config.sessions_enabled);
         assert!(!config.sessions_allow_mutation);
@@ -1934,9 +1965,7 @@ mod tests {
 
     #[test]
     fn tool_runtime_config_uses_loongclaw_home_rules_dir_when_unset() {
-        let home = tempfile::tempdir().expect("tempdir");
-        let mut env = ScopedEnv::new();
-        env.set("HOME", home.path());
+        let home = ScopedLoongClawHome::new("loongclaw-runtime-config-home");
 
         let runtime = ToolRuntimeConfig::from_loongclaw_config(
             &LoongClawConfig::default(),
@@ -1945,7 +1974,7 @@ mod tests {
 
         assert_eq!(
             runtime.bash_exec.governance.rules_dir,
-            crate::config::default_loongclaw_home().join("rules")
+            home.path().join("rules")
         );
     }
 
@@ -1971,11 +2000,8 @@ mod tests {
 
     #[test]
     fn bash_governance_runtime_treats_missing_rules_dir_as_empty_rule_set() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let mut env = ScopedEnv::new();
-        env.set("HOME", tempdir.path());
-        env.remove("LOONG_HOME");
-        let config_path = tempdir.path().join("loongclaw.toml");
+        let home = ScopedLoongClawHome::new("loongclaw-runtime-governance-home");
+        let config_path = home.path().join("loongclaw.toml");
 
         let runtime = ToolRuntimeConfig::from_loongclaw_config(
             &LoongClawConfig::default(),
@@ -1988,14 +2014,12 @@ mod tests {
 
     #[test]
     fn bash_governance_runtime_preserves_rule_load_error_for_broken_rule_file() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let mut env = ScopedEnv::new();
-        env.set("HOME", tempdir.path());
-        let rules_dir = crate::config::default_loongclaw_home().join("rules");
+        let home = ScopedLoongClawHome::new("loongclaw-runtime-governance-broken-home");
+        let rules_dir = home.path().join("rules");
         std::fs::create_dir_all(&rules_dir).expect("create rules dir");
         std::fs::write(rules_dir.join("broken.rules"), "not valid starlark")
             .expect("write broken rule file");
-        let config_path = tempdir.path().join("loongclaw.toml");
+        let config_path = home.path().join("loongclaw.toml");
 
         let runtime = ToolRuntimeConfig::from_loongclaw_config(
             &LoongClawConfig::default(),
@@ -2207,6 +2231,15 @@ mod tests {
     }
 
     #[test]
+    fn tool_runtime_config_from_loongclaw_config_keeps_file_root_unset_when_not_configured() {
+        let config = crate::config::LoongClawConfig::default();
+
+        let runtime = ToolRuntimeConfig::from_loongclaw_config(&config, None);
+
+        assert_eq!(runtime.file_root, None);
+    }
+
+    #[test]
     fn memory_sqlite_path_uses_injected_config() {
         let config = crate::config::LoongClawConfig::default();
         let runtime = ToolRuntimeConfig::from_loongclaw_config(&config, None);
@@ -2269,31 +2302,29 @@ mod tests {
     #[test]
     fn memory_sqlite_path_from_env_falls_back_to_loongclaw_home() {
         let mut env = ScopedEnv::new();
-        let runtime_home = std::env::temp_dir().join("loongclaw-tool-runtime-home");
         clear_tool_runtime_env(&mut env);
-        env.set("LOONG_HOME", &runtime_home);
+        let runtime_home = ScopedLoongClawHome::new("loongclaw-tool-runtime-memory-home");
 
         let runtime = ToolRuntimeConfig::from_env();
 
         assert_eq!(
             runtime.memory_sqlite_path,
-            Some(runtime_home.join("memory.sqlite3"))
+            Some(runtime_home.path().join("memory.sqlite3"))
         );
     }
 
     #[test]
     fn empty_legacy_memory_sqlite_path_falls_back_to_loongclaw_home() {
         let mut env = ScopedEnv::new();
-        let runtime_home = std::env::temp_dir().join("loongclaw-tool-runtime-empty-sqlite-path");
         clear_tool_runtime_env(&mut env);
-        env.set("LOONG_HOME", &runtime_home);
+        let runtime_home = ScopedLoongClawHome::new("loongclaw-tool-runtime-empty-sqlite-home");
         env.set("LOONGCLAW_SQLITE_PATH", "");
 
         let runtime = ToolRuntimeConfig::from_env();
 
         assert_eq!(
             runtime.memory_sqlite_path,
-            Some(runtime_home.join("memory.sqlite3"))
+            Some(runtime_home.path().join("memory.sqlite3"))
         );
     }
 
@@ -2365,6 +2396,56 @@ mod tests {
 
         assert_eq!(runtime.runtime_self.max_source_chars, 12_345);
         assert_eq!(runtime.runtime_self.max_total_chars, 67_890);
+    }
+
+    #[test]
+    fn tool_runtime_config_from_env_reads_workspace_root_override() {
+        let mut env = ScopedEnv::new();
+        clear_tool_runtime_env(&mut env);
+
+        env.set("LOONGCLAW_FILE_ROOT", "/tmp/loongclaw-tool-root");
+        env.set("LOONGCLAW_WORKSPACE_ROOT", "/tmp/loongclaw-workspace-root");
+
+        let runtime = ToolRuntimeConfig::from_env();
+
+        assert_eq!(
+            runtime.file_root.as_deref(),
+            Some(Path::new("/tmp/loongclaw-tool-root"))
+        );
+        assert_eq!(
+            runtime.workspace_root.as_deref(),
+            Some(Path::new("/tmp/loongclaw-workspace-root"))
+        );
+        assert_eq!(
+            runtime.effective_workspace_root(),
+            Some(Path::new("/tmp/loongclaw-workspace-root"))
+        );
+    }
+
+    #[test]
+    fn tool_runtime_config_workspace_root_override_preserves_tool_root_truth() {
+        let mut env = ScopedEnv::new();
+        clear_tool_runtime_env(&mut env);
+
+        let mut config = crate::config::LoongClawConfig::default();
+        config.tools.file_root = Some("/tmp/loongclaw-tool-root".to_owned());
+
+        let runtime = ToolRuntimeConfig::from_loongclaw_config(&config, None);
+        let runtime =
+            runtime.with_workspace_root_override(PathBuf::from("/tmp/loongclaw-runtime-workspace"));
+
+        assert_eq!(
+            runtime.file_root.as_deref(),
+            Some(Path::new("/tmp/loongclaw-tool-root"))
+        );
+        assert_eq!(
+            runtime.workspace_root.as_deref(),
+            Some(Path::new("/tmp/loongclaw-runtime-workspace"))
+        );
+        assert_eq!(
+            runtime.effective_workspace_root(),
+            Some(Path::new("/tmp/loongclaw-runtime-workspace"))
+        );
     }
 
     #[test]
@@ -3458,6 +3539,7 @@ Treat these as enforced limits for this child session."
         let mut env = ScopedEnv::new();
         clear_tool_runtime_env(&mut env);
         clear_feishu_runtime_env(&mut env);
+        let _home = ScopedLoongClawHome::new("loongclaw-feishu-runtime-home");
         env.set("FEISHU_APP_ID", "cli_env_a1b2c3");
         env.set("FEISHU_APP_SECRET", "env-secret");
 
