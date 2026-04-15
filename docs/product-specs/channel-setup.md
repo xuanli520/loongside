@@ -92,6 +92,14 @@ needs.
 
 ## Shipped Channel Matrix
 
+`loong channels --json` exposes both the human-facing surface inventory and a
+structured `channel_access_policies` section for the shipped runtime-backed
+conversation/sender gating surfaces.
+
+`loong channels --resolve <channel-or-route-session>` resolves either a channel
+catalog alias/id or a known runtime-backed route session into operator-facing
+structured metadata.
+
 | Surface | Status | Transport | Required config | Operator commands |
 | --- | --- | --- | --- | --- |
 | CLI | Shipped | local interactive runtime | none beyond base provider config | `loong ask`, `loong chat` |
@@ -192,8 +200,24 @@ Telegram setup remains the simplest shipped bot surface:
 - enable the channel
 - provide one bot token
 - allowlist trusted chat ids
+- optionally allowlist trusted sender ids through `telegram.allowed_sender_ids`
+- optionally require explicit bot mention outside private chats through
+  `telegram.require_mention`
 - run `loong telegram-serve` for reply-loop automation
 - use `loong telegram-send` for direct operator sends
+
+### Feishu / Lark
+
+Feishu supports two inbound transports and the security contract depends on the
+selected mode:
+
+- both webhook and websocket modes require `app_id`, `app_secret`, and
+  `allowed_chat_ids`
+- optional sender gating can be layered with `feishu.allowed_sender_ids`
+- webhook mode additionally requires `verification_token` and `encrypt_key`
+- websocket mode must not be blocked on webhook-only secrets
+- `loong feishu-send` supports both `receive_id` and `message_reply`
+- `loong feishu-serve` owns the inbound reply service
 
 #### Matrix
 
@@ -201,6 +225,9 @@ Matrix uses a sync-loop transport with explicit homeserver configuration:
 
 - configure `access_token` and `base_url`
 - allowlist trusted room ids
+- optionally allowlist trusted sender ids through `matrix.allowed_sender_ids`
+- optionally require explicit mention matching `matrix.user_id` through
+  `matrix.require_mention`
 - set `user_id` when self-message filtering is enabled
 - use `matrix-send` for direct room delivery and `matrix-serve` for the sync
   reply loop
@@ -225,6 +252,7 @@ long-connection transport:
 - configure `bot_id` and `secret`
 - allowlist trusted `conversation_id` values through
   `wecom.allowed_conversation_ids`
+- optionally allowlist trusted sender ids through `wecom.allowed_sender_ids`
 - use `wecom-serve` to own the long connection and auto-reply loop
 - use `wecom-send` for proactive sends when no active `wecom-serve` session is
   holding the same bot account
