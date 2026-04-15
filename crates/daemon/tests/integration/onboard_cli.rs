@@ -8673,6 +8673,58 @@ fn onboarding_success_summary_uses_outbound_group_handoff_when_multiple_outbound
 }
 
 #[test]
+fn onboarding_success_summary_keeps_mixed_runtime_and_outbound_followups_after_doctor() {
+    let mut config = mvp::config::LoongClawConfig::default();
+    config.cli.enabled = false;
+    config.telegram.enabled = true;
+    config.discord.enabled = true;
+    config.discord.bot_token = None;
+    config.discord.bot_token_env = None;
+
+    let path = PathBuf::from("/tmp/loongclaw-config.toml");
+    let summary =
+        loongclaw_daemon::onboard_cli::build_onboarding_success_summary(&path, &config, None);
+    let lines =
+        loongclaw_daemon::onboard_cli::render_onboarding_success_summary_with_width(&summary, 100);
+
+    assert_eq!(
+        summary.next_actions[0].kind,
+        loongclaw_daemon::onboard_cli::OnboardingActionKind::Doctor
+    );
+    assert_eq!(summary.next_actions[0].label, "verify Discord setup");
+    assert_eq!(
+        summary.next_actions[1].kind,
+        loongclaw_daemon::onboard_cli::OnboardingActionKind::Channel
+    );
+    assert_eq!(summary.next_actions[1].label, "Telegram");
+    assert_eq!(
+        summary.next_actions[1].command,
+        "loong telegram-serve --config '/tmp/loongclaw-config.toml'"
+    );
+    assert_eq!(
+        summary.next_actions[2].kind,
+        loongclaw_daemon::onboard_cli::OnboardingActionKind::Channel
+    );
+    assert_eq!(summary.next_actions[2].label, "inspect Discord");
+    assert_eq!(
+        summary.next_actions[2].command,
+        "loong channels --config '/tmp/loongclaw-config.toml'"
+    );
+    assert!(
+        lines.iter().any(|line| {
+            line == "- Telegram: loong telegram-serve --config '/tmp/loongclaw-config.toml'"
+        }),
+        "mixed runtime-backed plus outbound setups should keep the runtime-backed handoff visible: {lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| {
+            line == "- inspect Discord: loong channels --config '/tmp/loongclaw-config.toml'"
+        }),
+        "mixed runtime-backed plus outbound setups should still render the outbound inspection handoff after doctor: {lines:#?}"
+    );
+}
+
+#[test]
 fn onboarding_success_summary_uses_outbound_review_handoff_when_multiple_outbound_channels_need_attention()
  {
     let mut config = mvp::config::LoongClawConfig::default();

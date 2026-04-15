@@ -2354,7 +2354,7 @@ pub async fn run_list_models_cli(config_path: Option<&str>, as_json: bool) -> Cl
     Ok(())
 }
 
-pub const RUNTIME_SNAPSHOT_CLI_JSON_SCHEMA_VERSION: u32 = 1;
+pub const RUNTIME_SNAPSHOT_CLI_JSON_SCHEMA_VERSION: u32 = 2;
 pub const RUNTIME_SNAPSHOT_ARTIFACT_JSON_SCHEMA_VERSION: u32 = 2;
 #[derive(Debug, Clone)]
 pub struct RuntimeSnapshotCliState {
@@ -4029,7 +4029,7 @@ pub fn run_channels_cli(
     Ok(())
 }
 
-pub const CHANNELS_CLI_JSON_SCHEMA_VERSION: u32 = 1;
+pub const CHANNELS_CLI_JSON_SCHEMA_VERSION: u32 = 2;
 pub const CHANNELS_CLI_JSON_LEGACY_VIEWS: &[&str] = &["channels", "catalog_only_channels"];
 
 pub fn build_channels_cli_json_payload(

@@ -13,7 +13,7 @@ use crate::gateway::state::{default_gateway_runtime_state_dir, load_gateway_owne
 use crate::mvp;
 use crate::supervisor::LoadedSupervisorConfig;
 
-const STATUS_CLI_JSON_SCHEMA_VERSION: u32 = 1;
+const STATUS_CLI_JSON_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StatusCliJsonSchema {

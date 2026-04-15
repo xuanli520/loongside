@@ -2052,6 +2052,34 @@ fn channel_registry_collects_outbound_inspection_action_for_multiple_enabled_out
 }
 
 #[test]
+fn channel_registry_keeps_non_runtime_inspection_action_when_runtime_channel_is_enabled() {
+    let mut config = mvp::config::LoongClawConfig::default();
+    config.telegram.enabled = true;
+    config.discord.enabled = true;
+    config.discord.bot_token = Some(loongclaw_contracts::SecretRef::Inline(
+        "discord-token".to_owned(),
+    ));
+
+    let actions = loongclaw_daemon::migration::channels::collect_channel_next_actions(
+        &config,
+        "/tmp/loongclaw-config.toml",
+    );
+
+    assert_eq!(actions.len(), 2);
+    assert_eq!(actions[0].label, "Telegram");
+    assert_eq!(
+        actions[0].command,
+        "loong telegram-serve --config '/tmp/loongclaw-config.toml'"
+    );
+    assert_eq!(actions[1].id, "configured_channels");
+    assert_eq!(actions[1].label, "inspect Discord");
+    assert_eq!(
+        actions[1].command,
+        "loong channels --config '/tmp/loongclaw-config.toml'"
+    );
+}
+
+#[test]
 fn channel_registry_collects_outbound_review_action_when_multiple_outbound_surfaces_need_attention()
 {
     let mut config = mvp::config::LoongClawConfig::default();

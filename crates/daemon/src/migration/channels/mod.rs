@@ -292,15 +292,13 @@ pub fn collect_channel_next_actions(
     config: &mvp::config::LoongClawConfig,
     config_path: &str,
 ) -> Vec<ChannelNextAction> {
-    let configured_actions = collect_configured_runtime_channel_next_actions(config, config_path);
-    if !configured_actions.is_empty() {
-        return configured_actions;
-    }
-
+    let mut actions = collect_configured_runtime_channel_next_actions(config, config_path);
     let inspection_actions =
         collect_configured_non_runtime_channel_next_actions(config, config_path);
-    if !inspection_actions.is_empty() {
-        return inspection_actions;
+    actions.extend(inspection_actions);
+
+    if !actions.is_empty() {
+        return actions;
     }
 
     vec![build_channel_catalog_next_action(config_path)]
