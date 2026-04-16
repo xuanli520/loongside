@@ -2597,7 +2597,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "loongclaw"
+name = "loong"
 version = "0.1.0-alpha.3"
 dependencies = [
  "async-trait",
@@ -2612,12 +2612,12 @@ dependencies = [
  "futures-util",
  "hex",
  "libc",
- "loongclaw-app",
- "loongclaw-bench",
- "loongclaw-contracts",
- "loongclaw-kernel",
- "loongclaw-protocol",
- "loongclaw-spec",
+ "loong-app",
+ "loong-bench",
+ "loong-contracts",
+ "loong-kernel",
+ "loong-protocol",
+ "loong-spec",
  "rand 0.10.1",
  "reqwest",
  "rusqlite",
@@ -2638,7 +2638,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "loongclaw-app"
+name = "loong-app"
 version = "0.1.0-alpha.3"
 dependencies = [
  "aes",
@@ -2663,8 +2663,8 @@ dependencies = [
  "include_dir",
  "lettre",
  "libc",
- "loongclaw-contracts",
- "loongclaw-kernel",
+ "loong-contracts",
+ "loong-kernel",
  "prost",
  "rand 0.10.1",
  "regex",
@@ -2698,12 +2698,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "loongclaw-bench"
+name = "loong-bench"
 version = "0.1.0-alpha.3"
 dependencies = [
  "hex",
- "loongclaw-kernel",
- "loongclaw-spec",
+ "loong-kernel",
+ "loong-spec",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2712,7 +2712,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "loongclaw-contracts"
+name = "loong-contracts"
 version = "0.1.0-alpha.3"
 dependencies = [
  "semver",
@@ -2724,13 +2724,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "loongclaw-kernel"
+name = "loong-kernel"
 version = "0.1.0-alpha.3"
 dependencies = [
  "async-trait",
  "futures-util",
  "hex",
- "loongclaw-contracts",
+ "loong-contracts",
  "proptest",
  "semver",
  "serde",
@@ -2741,7 +2741,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "loongclaw-protocol"
+name = "loong-protocol"
 version = "0.1.0-alpha.3"
 dependencies = [
  "async-trait",
@@ -2752,16 +2752,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "loongclaw-spec"
+name = "loong-spec"
 version = "0.1.0-alpha.3"
 dependencies = [
  "async-trait",
  "base64",
  "ed25519-dalek",
  "futures-util",
- "loongclaw-contracts",
- "loongclaw-kernel",
- "loongclaw-protocol",
+ "loong-contracts",
+ "loong-kernel",
+ "loong-protocol",
  "reqwest",
  "semver",
  "serde",

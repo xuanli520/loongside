@@ -17,6 +17,7 @@ $ReleaseBaseUrl = if ($env:LOONG_INSTALL_RELEASE_BASE_URL) {
     "https://github.com/$Repository/releases"
 }
 $BinName = "loong"
+$LegacyBinName = "loongclaw"
 
 function Write-Usage {
     @"
@@ -95,12 +96,15 @@ function Get-ReleaseChecksumName([string]$PackageName, [string]$Tag, [string]$Ta
     return "$(Get-ReleaseArchiveName -PackageName $PackageName -Tag $Tag -Target $Target).sha256"
 }
 
-function Install-Binary([string]$SourceBinary) {
+function Install-CompatibilityBinaries([string]$SourceBinary) {
     New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
     $primaryBinary = Join-Path $Prefix "$BinName.exe"
+    $legacyBinary = Join-Path $Prefix "$LegacyBinName.exe"
     Copy-Item -Force $SourceBinary $primaryBinary
+    Copy-Item -Force $SourceBinary $legacyBinary
     return @{
         Primary = $primaryBinary
+        Legacy = $legacyBinary
     }
 }
 
@@ -117,16 +121,16 @@ function Install-FromSource {
 
     Write-Host "==> Building loong from source (release)"
     Push-Location $repoRoot
-    $hadReleaseBuild = Test-Path Env:LOONGCLAW_RELEASE_BUILD
-    $previousReleaseBuild = $env:LOONGCLAW_RELEASE_BUILD
+    $hadReleaseBuild = (Test-Path Env:LOONG_RELEASE_BUILD)
+    $previousReleaseBuild = $env:LOONG_RELEASE_BUILD
     try {
-        $env:LOONGCLAW_RELEASE_BUILD = "1"
+        $env:LOONG_RELEASE_BUILD = "1"
         cargo build -p loong --bin $BinName --release --locked | Out-Host
     } finally {
         if ($hadReleaseBuild) {
-            $env:LOONGCLAW_RELEASE_BUILD = $previousReleaseBuild
-        } elseif (Test-Path Env:LOONGCLAW_RELEASE_BUILD) {
-            Remove-Item Env:LOONGCLAW_RELEASE_BUILD
+            $env:LOONG_RELEASE_BUILD = $previousReleaseBuild
+        } elseif (Test-Path Env:LOONG_RELEASE_BUILD) {
+            Remove-Item Env:LOONG_RELEASE_BUILD
         }
         Pop-Location
     }
@@ -136,7 +140,7 @@ function Install-FromSource {
         throw "built binary not found at $sourceBinary"
     }
 
-    return Install-Binary -SourceBinary $sourceBinary
+    return Install-CompatibilityBinaries -SourceBinary $sourceBinary
 }
 
 function Install-FromRelease {
@@ -181,7 +185,7 @@ function Install-FromRelease {
             throw "extracted binary not found at $sourceBinary"
         }
 
-        return Install-Binary -SourceBinary $sourceBinary
+        return Install-CompatibilityBinaries -SourceBinary $sourceBinary
     } finally {
         if (Test-Path $tmpRoot) {
             Remove-Item -Recurse -Force $tmpRoot
@@ -204,6 +208,7 @@ function Resolve-NormalizedPathEntryOrNull([string]$PathEntry) {
 $installResult = if ($Source) { Install-FromSource } else { Install-FromRelease }
 
 Write-Host "==> Installed loong to $($installResult.Primary)"
+Write-Host "==> Installed compatible loongclaw command to $($installResult.Legacy)"
 
 $normalizedPrefix = $Prefix
 $pathItems = ($env:PATH -split [IO.Path]::PathSeparator) |

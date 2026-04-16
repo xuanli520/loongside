@@ -2180,6 +2180,10 @@ pub fn default_config_path() -> PathBuf {
     default_loongclaw_home().join(DEFAULT_CONFIG_FILE)
 }
 
+pub fn default_loong_home() -> PathBuf {
+    default_loongclaw_home()
+}
+
 pub fn default_loongclaw_home() -> PathBuf {
     shared_default_loongclaw_home()
 }

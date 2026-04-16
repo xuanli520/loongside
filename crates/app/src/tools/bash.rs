@@ -25,6 +25,7 @@ const BASH_EXEC_ALLOWED_FIELDS: &[&str] = &[
     "command",
     "cwd",
     "timeout_ms",
+    super::LOONG_INTERNAL_TOOL_CONTEXT_KEY,
     super::LOONGCLAW_INTERNAL_TOOL_CONTEXT_KEY,
 ];
 
