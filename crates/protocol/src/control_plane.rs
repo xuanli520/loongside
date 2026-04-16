@@ -428,6 +428,23 @@ pub struct ControlPlaneSessionWorkflow {
     pub binding: Option<ControlPlaneSessionWorkflowBinding>,
 }
 
+impl Default for ControlPlaneSessionWorkflow {
+    fn default() -> Self {
+        Self {
+            workflow_id: String::new(),
+            task: None,
+            phase: None,
+            operation_kind: None,
+            operation_scope: None,
+            task_session_id: None,
+            lineage_root_session_id: None,
+            lineage_depth: None,
+            runtime_self_continuity: None,
+            binding: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlPlaneSessionSummary {
     pub session_id: String,
@@ -446,6 +463,7 @@ pub struct ControlPlaneSessionSummary {
     pub last_turn_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    #[serde(default)]
     pub workflow: ControlPlaneSessionWorkflow,
 }
 

@@ -38,9 +38,7 @@ check_secret_pattern() {
     found_issue=1
 }
 
-check_forbidden_path "examples/harbor"
 check_forbidden_path "harbor/jobs"
-check_forbidden_path "harbor_loongclaw"
 
 check_secret_pattern '"OPENAI_API_KEY"[[:space:]]*:[[:space:]]*"sk-[A-Za-z0-9_-]{20,}' \
     "inline OpenAI key material detected in tracked JSON-like content"

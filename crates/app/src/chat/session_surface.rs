@@ -2334,8 +2334,8 @@ fn session_surface_subtitle(state: &SurfaceState) -> &str {
 
 fn default_export_path(session_id: &str) -> String {
     let sanitized_session_id = sanitize_session_id_for_export(session_id);
-    let file_name = format!("loongclaw-{sanitized_session_id}-transcript.txt");
-    let exports_dir = loongclaw_exports_dir();
+    let file_name = format!("loong-{sanitized_session_id}-transcript.txt");
+    let exports_dir = loong_exports_dir();
     let export_path = exports_dir.join(file_name);
 
     export_path.display().to_string()
@@ -2354,9 +2354,9 @@ fn sanitize_session_id_for_export(session_id: &str) -> String {
         .collect()
 }
 
-fn loongclaw_exports_dir() -> PathBuf {
-    let loongclaw_home = crate::config::default_loongclaw_home();
-    loongclaw_home.join("exports")
+fn loong_exports_dir() -> PathBuf {
+    let loong_home = crate::config::default_loong_home();
+    loong_home.join("exports")
 }
 
 fn ensure_parent_directory_exists(path: &Path) -> CliResult<()> {
@@ -2812,7 +2812,7 @@ mod tests {
     }
 
     #[test]
-    fn default_export_path_uses_loongclaw_exports_directory() {
+    fn default_export_path_uses_loong_exports_directory() {
         let export_path = PathBuf::from(default_export_path("session:/bad"));
         let file_name = export_path
             .file_name()
@@ -2825,7 +2825,7 @@ mod tests {
             .expect("export parent directory");
 
         assert_eq!(parent_dir, "exports");
-        assert_eq!(file_name, "loongclaw-session__bad-transcript.txt");
+        assert_eq!(file_name, "loong-session__bad-transcript.txt");
     }
 
     #[test]

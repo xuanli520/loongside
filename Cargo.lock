@@ -1887,9 +1887,9 @@ dependencies = [
 
 [[package]]
 name = "gimli"
-version = "0.33.1"
+version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19e16c5073773ccf057c282be832a59ee53ef5ff98db3aeff7f8314f52ffc196"
+checksum = "0bf7f043f89559805f8c7cacc432749b2fa0d0a0a9ee46ce47164ed5ba7f126c"
 dependencies = [
  "fnv",
  "hashbrown 0.16.1",
@@ -2597,7 +2597,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "loongclaw"
+name = "loong"
 version = "0.1.0-alpha.3"
 dependencies = [
  "async-trait",
@@ -2612,12 +2612,12 @@ dependencies = [
  "futures-util",
  "hex",
  "libc",
- "loongclaw-app",
- "loongclaw-bench",
- "loongclaw-contracts",
- "loongclaw-kernel",
- "loongclaw-protocol",
- "loongclaw-spec",
+ "loong-app",
+ "loong-bench",
+ "loong-contracts",
+ "loong-kernel",
+ "loong-protocol",
+ "loong-spec",
  "rand 0.10.1",
  "reqwest",
  "rusqlite",
@@ -2638,7 +2638,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "loongclaw-app"
+name = "loong-app"
 version = "0.1.0-alpha.3"
 dependencies = [
  "aes",
@@ -2663,8 +2663,8 @@ dependencies = [
  "include_dir",
  "lettre",
  "libc",
- "loongclaw-contracts",
- "loongclaw-kernel",
+ "loong-contracts",
+ "loong-kernel",
  "prost",
  "rand 0.10.1",
  "regex",
@@ -2698,12 +2698,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "loongclaw-bench"
+name = "loong-bench"
 version = "0.1.0-alpha.3"
 dependencies = [
  "hex",
- "loongclaw-kernel",
- "loongclaw-spec",
+ "loong-kernel",
+ "loong-spec",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2712,7 +2712,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "loongclaw-contracts"
+name = "loong-contracts"
 version = "0.1.0-alpha.3"
 dependencies = [
  "semver",
@@ -2724,13 +2724,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "loongclaw-kernel"
+name = "loong-kernel"
 version = "0.1.0-alpha.3"
 dependencies = [
  "async-trait",
  "futures-util",
  "hex",
- "loongclaw-contracts",
+ "loong-contracts",
  "proptest",
  "semver",
  "serde",
@@ -2741,7 +2741,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "loongclaw-protocol"
+name = "loong-protocol"
 version = "0.1.0-alpha.3"
 dependencies = [
  "async-trait",
@@ -2752,16 +2752,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "loongclaw-spec"
+name = "loong-spec"
 version = "0.1.0-alpha.3"
 dependencies = [
  "async-trait",
  "base64",
  "ed25519-dalek",
  "futures-util",
- "loongclaw-contracts",
- "loongclaw-kernel",
- "loongclaw-protocol",
+ "loong-contracts",
+ "loong-kernel",
+ "loong-protocol",
  "reqwest",
  "semver",
  "serde",

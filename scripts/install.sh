@@ -207,7 +207,6 @@ release_base_url="${LOONG_INSTALL_RELEASE_BASE_URL:-${LOONGCLAW_INSTALL_RELEASE_
 target_libc="${LOONG_INSTALL_TARGET_LIBC:-${LOONGCLAW_INSTALL_TARGET_LIBC:-auto}}"
 package_name="loong"
 bin_name="loong"
-legacy_bin_name="loongclaw"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -352,14 +351,12 @@ lowercase_value() {
   printf '%s' "${value}" | tr '[:upper:]' '[:lower:]'
 }
 
-install_binary_pair() {
+install_binary() {
   local source_path="${1:?source_path is required}"
   local primary_output_name="${2:?primary_output_name is required}"
-  local legacy_output_name="${3:?legacy_output_name is required}"
 
   mkdir -p "${prefix}"
   install -m 755 "${source_path}" "${prefix}/${primary_output_name}"
-  install -m 755 "${source_path}" "${prefix}/${legacy_output_name}"
 }
 
 install_web_search_provider_display_name() {
@@ -559,7 +556,10 @@ run_guided_onboarding() {
   local recommendation
   local onboard_status
 
-  if [[ -n "${LOONGCLAW_WEB_SEARCH_PROVIDER:-}" ]]; then
+  if [[ -n "${LOONG_WEB_SEARCH_PROVIDER:-}" ]]; then
+    selected_provider="${LOONG_WEB_SEARCH_PROVIDER}"
+    provider_source="preconfigured"
+  elif [[ -n "${LOONGCLAW_WEB_SEARCH_PROVIDER:-}" ]]; then
     selected_provider="${LOONGCLAW_WEB_SEARCH_PROVIDER}"
     provider_source="preconfigured"
   else
@@ -761,7 +761,7 @@ release_target_for_install() {
 }
 
 install_from_source() {
-  local repo_root host_target source_binary primary_binary_name legacy_binary_name
+  local repo_root host_target source_binary primary_binary_name
   require_command "cargo" "Install Rust first: https://rustup.rs"
   require_command "install" "Install coreutils or use a different shell environment."
 
@@ -776,12 +776,11 @@ install_from_source() {
 
   host_target="$(release_target_for_platform "$(detect_release_host_platform)" "$(uname -m)")"
   primary_binary_name="$(release_binary_name_for_target "${bin_name}" "${host_target}")"
-  legacy_binary_name="$(release_binary_name_for_target "${legacy_bin_name}" "${host_target}")"
 
   printf '==> Building loong from source (release)\n'
   (
     cd "${repo_root}"
-    LOONGCLAW_RELEASE_BUILD=1 \
+    LOONG_RELEASE_BUILD="${LOONG_RELEASE_BUILD:-${LOONGCLAW_RELEASE_BUILD:-1}}" \
       cargo build -p loong --bin "${bin_name}" --release --locked
   )
 
@@ -791,12 +790,12 @@ install_from_source() {
     exit 1
   fi
 
-  install_binary_pair "${source_binary}" "${primary_binary_name}" "${legacy_binary_name}"
+  install_binary "${source_binary}" "${primary_binary_name}"
 }
 
 install_from_release() {
   local host_platform host_arch target_tag target archive_name checksum_name
-  local archive_url checksum_url binary_name legacy_binary_name tmp_dir archive_path checksum_path
+  local archive_url checksum_url binary_name tmp_dir archive_path checksum_path
   local extract_dir installed_binary expected_sha actual_sha
 
   require_command "curl" "Install curl first or use --source inside a repository checkout."
@@ -815,7 +814,6 @@ install_from_release() {
   archive_url="${release_base_url}/download/${target_tag}/${archive_name}"
   checksum_url="${release_base_url}/download/${target_tag}/${checksum_name}"
   binary_name="$(release_binary_name_for_target "${bin_name}" "${target}")"
-  legacy_binary_name="$(release_binary_name_for_target "${legacy_bin_name}" "${target}")"
 
   tmp_dir="$(mktemp -d)"
   trap 'rm -rf "${tmp_dir}"' RETURN
@@ -848,7 +846,7 @@ install_from_release() {
     exit 1
   fi
 
-  install_binary_pair "${installed_binary}" "${binary_name}" "${legacy_binary_name}"
+  install_binary "${installed_binary}" "${binary_name}"
 }
 
 if [[ "${install_source}" -eq 1 ]]; then
@@ -858,7 +856,6 @@ else
 fi
 
 printf '==> Installed loong to %s\n' "${prefix}/${bin_name}"
-printf '==> Installed compatible loongclaw command to %s\n' "${prefix}/${legacy_bin_name}"
 
 should_print_source_hint=0
 

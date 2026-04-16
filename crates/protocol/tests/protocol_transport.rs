@@ -45,6 +45,14 @@ fn route_parser_covers_standard_methods() {
         ProtocolRoute::ControlEvents
     );
     assert_eq!(
+        ProtocolRoute::from_method("task/list"),
+        ProtocolRoute::TaskList
+    );
+    assert_eq!(
+        ProtocolRoute::from_method("task/read"),
+        ProtocolRoute::TaskRead
+    );
+    assert_eq!(
         ProtocolRoute::from_method("custom/x"),
         ProtocolRoute::Custom("custom/x".to_owned())
     );
@@ -242,6 +250,39 @@ fn presence_read_requires_authenticated_control_read_capability() {
         )
         .expect("authenticated control.read should authorize");
     assert_eq!(decision, RouteAuthorizationDecision::Allow);
+}
+
+#[test]
+fn task_routes_require_authenticated_control_read_capability() {
+    let router = ProtocolRouter::default();
+
+    for method in ["task/list", "task/read"] {
+        let resolved = router
+            .resolve(method)
+            .unwrap_or_else(|error| panic!("{method} should resolve: {error}"));
+        assert!(!resolved.policy.allow_anonymous);
+        assert_eq!(
+            resolved.policy.required_capability.as_deref(),
+            Some("control_read")
+        );
+
+        let missing_capability_error = router
+            .authorize(
+                &resolved,
+                &RouteAuthorizationRequest {
+                    authenticated: true,
+                    capabilities: BTreeSet::from(["control.pairing".to_owned()]),
+                },
+            )
+            .expect_err("task routes should reject non-read capabilities");
+        assert!(matches!(
+            missing_capability_error,
+            RouteAuthorizationError::MissingCapability {
+                method: missing_method,
+                required_capability
+            } if missing_method == method && required_capability == "control_read"
+        ));
+    }
 }
 
 #[test]
@@ -702,6 +743,63 @@ fn control_plane_session_read_response_roundtrips_through_json() {
     let decoded: ControlPlaneSessionReadResponse =
         serde_json::from_str(&encoded).expect("session read response should deserialize");
     assert_eq!(decoded, response);
+}
+
+#[test]
+fn control_plane_session_read_accepts_legacy_payload_without_workflow() {
+    let legacy_payload = serde_json::json!({
+        "current_session_id": "root-session",
+        "observation": {
+            "session": {
+                "session_id": "child-session",
+                "kind": "delegate_child",
+                "parent_session_id": "root-session",
+                "label": "Child",
+                "state": "running",
+                "created_at": 10,
+                "updated_at": 20,
+                "turn_count": 3,
+                "last_turn_at": 20,
+                "last_error": null
+            },
+            "terminal_outcome": null,
+            "recent_events": [],
+            "tail_events": []
+        }
+    });
+
+    let decoded: ControlPlaneSessionReadResponse = serde_json::from_value(legacy_payload)
+        .expect("legacy session read payload should deserialize");
+    assert!(decoded.observation.session.workflow.workflow_id.is_empty());
+    assert_eq!(decoded.observation.session.workflow.task, None);
+    assert_eq!(decoded.observation.session.workflow.phase, None);
+}
+
+#[test]
+fn control_plane_session_list_accepts_legacy_payload_without_workflow() {
+    let legacy_payload = serde_json::json!({
+        "current_session_id": "root-session",
+        "matched_count": 1,
+        "returned_count": 1,
+        "sessions": [{
+            "session_id": "child-session",
+            "kind": "delegate_child",
+            "parent_session_id": "root-session",
+            "label": "Child",
+            "state": "running",
+            "created_at": 10,
+            "updated_at": 20,
+            "turn_count": 3,
+            "last_turn_at": 20,
+            "last_error": null
+        }]
+    });
+
+    let decoded: ControlPlaneSessionListResponse = serde_json::from_value(legacy_payload)
+        .expect("legacy session list payload should deserialize");
+    assert_eq!(decoded.sessions.len(), 1);
+    assert!(decoded.sessions[0].workflow.workflow_id.is_empty());
+    assert_eq!(decoded.sessions[0].workflow.binding, None);
 }
 
 #[test]
