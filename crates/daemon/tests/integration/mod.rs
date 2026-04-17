@@ -965,6 +965,14 @@ fn render_channel_surfaces_text_reports_aliases_and_operation_health() {
     let inventory = mvp::channel::channel_inventory(&config);
     let rendered = render_channel_surfaces_text("/tmp/loongclaw.toml", &inventory);
 
+    assert!(
+        rendered
+            .lines()
+            .next()
+            .is_some_and(|line| line.starts_with("LOONG")),
+        "channel surface text should now use the shared compact header: {rendered}"
+    );
+    assert!(rendered.contains("channels"));
     assert!(rendered.contains("config=/tmp/loongclaw.toml"));
     assert!(rendered.contains("Telegram [telegram]"));
     assert!(
@@ -2199,7 +2207,7 @@ fn build_channels_cli_json_payload_includes_full_channel_catalog() {
             .get("schema")
             .and_then(|schema| schema.get("version"))
             .and_then(serde_json::Value::as_u64),
-        Some(2)
+        Some(u64::from(CHANNELS_CLI_JSON_SCHEMA_VERSION))
     );
     assert_eq!(
         encoded

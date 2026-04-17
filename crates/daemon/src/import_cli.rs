@@ -86,15 +86,14 @@ pub async fn run_import_cli(options: ImportCommandOptions) -> CliResult<()> {
     let preview_only = !options.apply || options.preview;
     if preview_only {
         for candidate in &candidates {
-            for line in render_import_preview_lines_for_candidates_with_style(
-                candidate,
-                &candidates,
-                detect_render_width(),
-                true,
-            ) {
-                println!("{line}");
-            }
-            println!();
+            println!(
+                "{}",
+                render_import_preview_shell_text_for_candidates(
+                    candidate,
+                    &candidates,
+                    detect_render_width(),
+                )
+            );
         }
         if !options.apply {
             return Ok(());
@@ -300,12 +299,27 @@ pub fn render_import_preview_lines_for_candidates(
     render_import_preview_lines_for_candidates_with_style(candidate, all_candidates, width, false)
 }
 
+pub fn render_import_preview_shell_text_for_candidates(
+    candidate: &ImportCandidate,
+    all_candidates: &[ImportCandidate],
+    width: usize,
+) -> String {
+    crate::render_operator_shell_surface(
+        "import preview",
+        "explicit import preview",
+        Vec::new(),
+        build_import_preview_body_lines(candidate, all_candidates, width),
+        Vec::new(),
+    )
+}
+
 fn render_import_preview_lines_for_candidates_with_style(
     candidate: &ImportCandidate,
     all_candidates: &[ImportCandidate],
     width: usize,
     color_enabled: bool,
 ) -> Vec<String> {
+    let body_lines = build_import_preview_body_lines(candidate, all_candidates, width);
     let mut lines = mvp::presentation::style_brand_lines(
         &mvp::presentation::render_brand_header(
             width,
@@ -315,7 +329,16 @@ fn render_import_preview_lines_for_candidates_with_style(
         color_enabled,
     );
     lines.push(String::new());
-    lines.push("import preview".to_owned());
+    lines.extend(body_lines);
+    lines
+}
+
+fn build_import_preview_body_lines(
+    candidate: &ImportCandidate,
+    all_candidates: &[ImportCandidate],
+    width: usize,
+) -> Vec<String> {
+    let mut lines = vec!["import preview".to_owned()];
     if all_candidates.len() > 1 {
         let preview_position = all_candidates
             .iter()
@@ -360,6 +383,30 @@ pub fn render_import_apply_summary_lines_for_width(
     )
 }
 
+pub fn render_import_apply_summary_shell_text_for_width(
+    output_path: &Path,
+    candidate: &ImportCandidate,
+    selected_domains: &[SetupDomainKind],
+    resolved_config: &mvp::config::LoongClawConfig,
+    supplemented_existing_config: bool,
+    width: usize,
+) -> String {
+    crate::render_operator_shell_surface(
+        "import applied",
+        "explicit import applied",
+        Vec::new(),
+        build_import_apply_summary_body_lines(
+            output_path,
+            candidate,
+            selected_domains,
+            resolved_config,
+            supplemented_existing_config,
+            width,
+        ),
+        Vec::new(),
+    )
+}
+
 fn render_import_apply_summary_lines_with_style(
     output_path: &Path,
     candidate: &ImportCandidate,
@@ -369,6 +416,14 @@ fn render_import_apply_summary_lines_with_style(
     width: usize,
     color_enabled: bool,
 ) -> Vec<String> {
+    let body_lines = build_import_apply_summary_body_lines(
+        output_path,
+        candidate,
+        selected_domains,
+        resolved_config,
+        supplemented_existing_config,
+        width,
+    );
     let mut lines = mvp::presentation::style_brand_lines(
         &mvp::presentation::render_compact_brand_header(
             width,
@@ -377,6 +432,19 @@ fn render_import_apply_summary_lines_with_style(
         ),
         color_enabled,
     );
+    lines.push(String::new());
+    lines.extend(body_lines);
+    lines
+}
+
+fn build_import_apply_summary_body_lines(
+    output_path: &Path,
+    candidate: &ImportCandidate,
+    selected_domains: &[SetupDomainKind],
+    resolved_config: &mvp::config::LoongClawConfig,
+    supplemented_existing_config: bool,
+    width: usize,
+) -> Vec<String> {
     let write_mode = if supplemented_existing_config {
         "supplemented existing config"
     } else {
@@ -386,9 +454,7 @@ fn render_import_apply_summary_lines_with_style(
         .iter()
         .map(|domain| domain.label())
         .collect::<Vec<_>>();
-
-    lines.push(String::new());
-    lines.push("import applied".to_owned());
+    let mut lines = vec!["import applied".to_owned(), "saved setup".to_owned()];
     lines.extend(mvp::presentation::render_wrapped_text_line(
         "- write mode: ",
         write_mode,
@@ -462,11 +528,15 @@ fn render_import_apply_summary_lines_with_style(
     let next_actions =
         crate::next_actions::collect_setup_next_actions(resolved_config, &config_path);
     if let Some((primary, secondary)) = select_primary_import_apply_action(&next_actions) {
+        lines.push("start here".to_owned());
         lines.extend(mvp::presentation::render_wrapped_text_line(
             "next step: ",
             &primary.command,
             width,
         ));
+        if !secondary.is_empty() {
+            lines.push("also available".to_owned());
+        }
         for action in secondary {
             lines.extend(mvp::presentation::render_wrapped_text_line(
                 "also available: ",
@@ -944,17 +1014,17 @@ pub fn apply_import_candidate(
         .map_err(|error| format!("failed to bootstrap sqlite memory: {error}"))?;
     }
 
-    for line in render_import_apply_summary_lines_with_style(
-        &path,
-        candidate,
-        &selected_domains,
-        &resolved_config,
-        supplemented_existing_config,
-        detect_render_width(),
-        true,
-    ) {
-        println!("{line}");
-    }
+    println!(
+        "{}",
+        render_import_apply_summary_shell_text_for_width(
+            &path,
+            candidate,
+            &selected_domains,
+            &resolved_config,
+            supplemented_existing_config,
+            detect_render_width(),
+        )
+    );
     Ok(())
 }
 

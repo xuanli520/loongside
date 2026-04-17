@@ -1832,7 +1832,20 @@ pub fn render_skills_cli_text(execution: &SkillsCommandExecution) -> CliResult<S
         }
     }
 
-    Ok(lines.join("\n"))
+    Ok(render_skills_surface_text(tool_name, lines))
+}
+
+fn render_skills_surface_text(tool_name: &str, lines: Vec<String>) -> String {
+    let mut body_lines = vec![format!("tool={tool_name}")];
+    body_lines.push(String::new());
+    body_lines.extend(lines);
+    crate::render_operator_shell_surface(
+        "skills",
+        "operator skills",
+        Vec::new(),
+        body_lines,
+        Vec::new(),
+    )
 }
 
 fn render_string_list(value: Option<&Value>) -> String {

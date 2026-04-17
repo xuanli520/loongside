@@ -214,12 +214,12 @@ fn status_cli_text_surfaces_section_summaries_and_recipes() {
 
     let stdout = render_output(&output.stdout);
 
-    assert!(stdout.contains("gateway phase=stopped"));
-    assert!(stdout.contains("tool_calling availability=degraded"));
-    assert!(stdout.contains("structured_tool_schema_enabled=false"));
-    assert!(stdout.contains("acp enabled=false availability=disabled"));
-    assert!(stdout.contains("work_units availability="));
-    assert!(stdout.contains("recipes:"));
+    assert!(stdout.contains("operator runtime summary"));
+    assert!(stdout.contains("start here"));
+    assert!(stdout.contains("runtime posture"));
+    assert!(stdout.contains("[WARN] tool calling"));
+    assert!(stdout.contains("enabled=false · availability=disabled"));
+    assert!(stdout.contains("deep dives"));
 
     fs::remove_dir_all(&root).ok();
 }

@@ -199,6 +199,7 @@ fn render_wide_provider_choice_line(
 pub fn render_candidate_preview_lines(candidate: &ImportCandidate, width: usize) -> Vec<String> {
     let mut lines =
         loongclaw_app::presentation::render_wrapped_text_line("source: ", &candidate.source, width);
+    lines.insert(0, "candidate snapshot".to_owned());
     let source_labels = candidate_source_rollup_labels(candidate);
     let should_render_source_rollup = if candidate.source_kind == ImportSourceKind::RecommendedPlan
     {
@@ -232,17 +233,19 @@ pub fn render_candidate_preview_lines(candidate: &ImportCandidate, width: usize)
             .iter()
             .any(|domain| render_wide_domain_line(domain).len() > width);
     if use_stacked_domains {
+        lines.push("domain signals:".to_owned());
         for domain in &candidate.domains {
             lines.extend(render_stacked_domain_lines(domain, width));
         }
     } else {
-        lines.push("domains:".to_owned());
+        lines.push("domain signals:".to_owned());
         for domain in &candidate.domains {
             lines.push(render_wide_domain_line(domain));
         }
     }
 
     if !candidate.channel_candidates.is_empty() {
+        lines.push("channel handoff".to_owned());
         lines.push("channels:".to_owned());
         let use_stacked_channels = width < 68
             || candidate

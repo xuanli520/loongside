@@ -292,7 +292,10 @@ fn runtime_snapshot_json_payload_includes_provider_tool_and_external_skill_inven
     let payload =
         build_runtime_snapshot_cli_json_payload(&snapshot).expect("build runtime snapshot payload");
 
-    assert_eq!(payload["schema"]["version"], 2);
+    assert_eq!(
+        payload["schema"]["version"],
+        loongclaw_daemon::RUNTIME_SNAPSHOT_ARTIFACT_JSON_SCHEMA_VERSION
+    );
     assert_eq!(payload["provider"]["active_profile_id"], "deepseek-lab");
     assert!(array_contains_string(
         &payload["provider"]["saved_profile_ids"],
@@ -579,6 +582,13 @@ fn runtime_snapshot_text_highlights_experiment_relevant_sections() {
     .expect("collect runtime snapshot");
     let rendered = render_runtime_snapshot_text(&snapshot);
 
+    assert!(
+        rendered
+            .lines()
+            .any(|line| line.starts_with("LOONGCLAW") || line.contains(" loongclaw ")),
+        "runtime snapshot text should now use the shared ratatui operator shell header: {rendered}"
+    );
+    assert!(rendered.contains("runtime snapshot"));
     assert!(rendered.contains("provider active_profile=deepseek-lab"));
     assert!(rendered.contains("context_engine selected="));
     assert!(rendered.contains("memory selected="));
@@ -594,16 +604,14 @@ fn runtime_snapshot_text_highlights_experiment_relevant_sections() {
     );
     assert!(rendered.contains("acp_mcp docs status=pending"));
     assert!(rendered.contains("tools visible_count="));
-    assert!(rendered.contains(
-        "runtime_plugins inventory_status=ok enabled=true readiness_evaluation=default_bridge_support_matrix"
-    ));
+    assert!(rendered.contains("runtime_plugins inventory_status=ok enabled=true"));
+    assert!(rendered.contains("readiness_evaluation=default_bridge_support_matrix"));
     assert!(rendered.contains("demo-search-plugin"));
     assert!(rendered.contains("source_path="));
     assert!(rendered.contains("package_root="));
     assert!(rendered.contains("setup_mode=metadata_only"));
     assert!(rendered.contains("setup_surface=web_search"));
     assert!(rendered.contains("missing_env_vars=RUNTIME_PLUGIN_DEMO_KEY"));
-    assert!(rendered.contains("reason=\"plugin setup is incomplete:"));
     assert!(rendered.contains("external_skills inventory_status=ok override_active=false"));
     assert!(rendered.contains("demo-skill"));
 

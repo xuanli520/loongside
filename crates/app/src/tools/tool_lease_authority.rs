@@ -554,4 +554,43 @@ mod tests {
 
         assert!(error.contains("signature mismatch"), "error={error}");
     }
+
+    #[test]
+    fn concurrent_issue_tool_lease_initializes_secret_without_empty_file_race() {
+        use std::sync::Arc;
+        use std::sync::Barrier;
+
+        let home = scoped_tool_lease_home("loongclaw-tool-lease-concurrent-home");
+        let home_path = home.path().to_path_buf();
+        let payload = serde_json::Map::new();
+        let thread_count = 6usize;
+        let barrier = Arc::new(Barrier::new(thread_count));
+        let mut handles = Vec::new();
+
+        for _ in 0..thread_count {
+            let barrier = Arc::clone(&barrier);
+            let home_path = home_path.clone();
+            let payload = payload.clone();
+            let handle = std::thread::spawn(move || {
+                let _thread_home =
+                    crate::test_support::ScopedLoongClawHome::from_existing(home_path);
+                barrier.wait();
+                issue_tool_lease("file.read", &payload)
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            let join_result = handle.join();
+            let issue_result = join_result.expect("thread join");
+            issue_result.expect("lease issuance should succeed");
+        }
+
+        let secret_path = default_tool_lease_secret_path();
+        let persisted_secret =
+            read_tool_lease_secret_file(secret_path.as_path()).expect("persisted secret");
+
+        assert!(secret_path.exists());
+        assert!(persisted_secret.is_some());
+    }
 }

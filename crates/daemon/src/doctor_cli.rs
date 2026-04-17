@@ -238,27 +238,17 @@ pub async fn run_doctor_cli(options: DoctorCommandOptions) -> CliResult<()> {
         return Ok(());
     }
 
-    print_doctor_checks(&checks);
-    if options.fix {
-        if fixes.is_empty() {
-            println!("applied fixes: none");
-        } else {
-            println!("applied fixes:");
-            for fix in &fixes {
-                println!("- {fix}");
-            }
-        }
-    }
     println!(
-        "doctor summary: {} ok, {} warn, {} fail",
-        summary.pass, summary.warn, summary.fail
+        "{}",
+        render_doctor_text(
+            &checks,
+            summary,
+            &fixes,
+            &next_steps,
+            config_path.as_path(),
+            options.fix,
+        )
     );
-    if !next_steps.is_empty() {
-        println!("next actions:");
-        for step in &next_steps {
-            println!("- {step}");
-        }
-    }
 
     if summary.fail > 0 {
         return Err("doctor detected failing checks".to_owned());
@@ -2078,30 +2068,98 @@ fn summarize_checks(checks: &[DoctorCheck]) -> DoctorSummary {
     DoctorSummary { pass, warn, fail }
 }
 
-fn print_doctor_checks(checks: &[DoctorCheck]) {
-    println!("doctor checks:");
-    let width = checks
-        .iter()
-        .map(|check| check.name.len())
-        .max()
-        .unwrap_or(0);
-    for check in checks {
-        println!(
-            "{} {:width$}  {}",
-            check_level_marker(check.level),
-            check.name,
-            check.detail,
-            width = width
-        );
-    }
-}
+fn render_doctor_text(
+    checks: &[DoctorCheck],
+    summary: DoctorSummary,
+    fixes: &[String],
+    next_steps: &[String],
+    config_path: &Path,
+    fix_requested: bool,
+) -> String {
+    let mut sections = Vec::new();
+    sections.push(mvp::tui_surface::TuiSectionSpec::Callout {
+        tone: if summary.fail == 0 {
+            mvp::tui_surface::TuiCalloutTone::Success
+        } else {
+            mvp::tui_surface::TuiCalloutTone::Warning
+        },
+        title: Some("summary".to_owned()),
+        lines: vec![format!(
+            "{} ok · {} warn · {} fail",
+            summary.pass, summary.warn, summary.fail
+        )],
+    });
+    sections.push(mvp::tui_surface::TuiSectionSpec::Checklist {
+        title: Some("checks".to_owned()),
+        items: checks
+            .iter()
+            .map(|check| mvp::tui_surface::TuiChecklistItemSpec {
+                status: match check.level {
+                    DoctorCheckLevel::Pass => mvp::tui_surface::TuiChecklistStatus::Pass,
+                    DoctorCheckLevel::Warn => mvp::tui_surface::TuiChecklistStatus::Warn,
+                    DoctorCheckLevel::Fail => mvp::tui_surface::TuiChecklistStatus::Fail,
+                },
+                label: check.name.clone(),
+                detail: check.detail.clone(),
+            })
+            .collect(),
+    });
 
-fn check_level_marker(level: DoctorCheckLevel) -> &'static str {
-    match level {
-        DoctorCheckLevel::Pass => "[OK]",
-        DoctorCheckLevel::Warn => "[WARN]",
-        DoctorCheckLevel::Fail => "[FAIL]",
+    let action_items = next_steps
+        .iter()
+        .filter_map(|step| {
+            let (label, command) = step.split_once(": ")?;
+            Some(mvp::tui_surface::TuiActionSpec {
+                label: label.to_owned(),
+                command: command.to_owned(),
+            })
+        })
+        .take(3)
+        .collect::<Vec<_>>();
+    if !action_items.is_empty() {
+        sections.push(mvp::tui_surface::TuiSectionSpec::ActionGroup {
+            title: Some("start here".to_owned()),
+            inline_title_when_wide: false,
+            items: action_items,
+        });
     }
+    if fix_requested {
+        let fix_lines = if fixes.is_empty() {
+            vec!["applied fixes: none".to_owned()]
+        } else {
+            fixes.iter().map(|fix| format!("- {fix}")).collect()
+        };
+        sections.push(mvp::tui_surface::TuiSectionSpec::Narrative {
+            title: Some("applied fixes".to_owned()),
+            lines: fix_lines,
+        });
+    }
+    if !next_steps.is_empty() {
+        sections.push(mvp::tui_surface::TuiSectionSpec::Narrative {
+            title: Some("next actions".to_owned()),
+            lines: next_steps.iter().map(|step| format!("- {step}")).collect(),
+        });
+    }
+
+    let screen = mvp::tui_surface::TuiScreenSpec {
+        header_style: mvp::tui_surface::TuiHeaderStyle::Compact,
+        subtitle: Some("runtime health".to_owned()),
+        title: Some("doctor".to_owned()),
+        progress_line: None,
+        intro_lines: vec![format!("config={}", config_path.display())],
+        sections,
+        choices: Vec::new(),
+        footer_lines: vec![
+            "Use `loong doctor --json` for machine-readable diagnostics.".to_owned(),
+        ],
+    };
+
+    mvp::tui_surface::render_tui_screen_spec_ratatui(
+        &screen,
+        mvp::presentation::detect_render_width(),
+        false,
+    )
+    .join("\n")
 }
 
 fn check_level_json(level: DoctorCheckLevel) -> &'static str {

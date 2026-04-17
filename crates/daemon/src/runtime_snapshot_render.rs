@@ -316,14 +316,20 @@ pub fn render_runtime_snapshot_text(snapshot: &RuntimeSnapshotCliState) -> Strin
         }
     }
 
-    lines
+    let body_lines = lines
         .into_iter()
         .chain([
             "capability_snapshot:".to_owned(),
             snapshot.capability_snapshot.clone(),
         ])
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect::<Vec<_>>();
+    crate::render_operator_shell_surface(
+        "runtime snapshot",
+        "operator runtime snapshot",
+        Vec::new(),
+        body_lines,
+        Vec::new(),
+    )
 }
 
 fn render_runtime_plugins_lines(snapshot: &RuntimeSnapshotRuntimePluginsState) -> Vec<String> {
