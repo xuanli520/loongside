@@ -2001,7 +2001,12 @@ fn provider_runtime_binding(
         ConversationRuntimeBinding::Kernel(kernel_ctx) => {
             provider::ProviderRuntimeBinding::kernel(kernel_ctx)
         }
-        ConversationRuntimeBinding::Direct => provider::ProviderRuntimeBinding::advisory_only(),
+        #[allow(unreachable_patterns)]
+        other => {
+            // Direct variant is retired; all production callers pass Kernel.
+            let _: ConversationRuntimeBinding<'_> = other;
+            unreachable!("provider_runtime_binding: Direct is retired")
+        }
     }
 }
 
@@ -2205,13 +2210,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_runtime_binding_maps_direct_conversation_binding_to_advisory_only() {
-        assert!(matches!(
-            provider_runtime_binding(ConversationRuntimeBinding::direct()),
-            provider::ProviderRuntimeBinding::AdvisoryOnly
-        ));
-    }
-
     #[test]
     fn provider_runtime_binding_maps_kernel_conversation_binding_to_kernel() {
         let harness = TurnTestHarness::new();
