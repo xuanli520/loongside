@@ -23,17 +23,72 @@ impl AuditSink for NoopAuditSink {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+/// In-memory audit event buffer with a configurable capacity.
+///
+/// Uses a ring-buffer strategy: once `capacity` events are stored, each new
+/// record evicts the oldest one. This prevents unbounded memory growth while
+/// keeping the most recent events available for in-process queries.
+///
+/// The `snapshot()` method returns all events currently in the buffer (up to
+/// `capacity`). The `snapshot_filtered()` method applies an `AuditSnapshotFilter`
+/// to that same view.
+#[derive(Debug)]
 pub struct InMemoryAuditSink {
     events: Arc<Mutex<Vec<AuditEvent>>>,
+    /// Maximum number of events to retain in memory.
+    capacity: usize,
+}
+
+/// Default in-memory capacity used when `InMemoryAuditSink::default()` is used.
+const DEFAULT_IN_MEMORY_AUDIT_CAPACITY: usize = 10_000;
+
+impl Default for InMemoryAuditSink {
+    fn default() -> Self {
+        Self::with_capacity(DEFAULT_IN_MEMORY_AUDIT_CAPACITY)
+    }
 }
 
 impl InMemoryAuditSink {
+    /// Construct a new sink that retains at most `capacity` of the most recent events.
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            events: Arc::new(Mutex::new(Vec::with_capacity(capacity))),
+            capacity,
+        }
+    }
+
+    /// Return all events currently in the buffer.
+    ///
+    /// Callers that need only a subset should use `snapshot_filtered` instead.
     #[must_use]
     pub fn snapshot(&self) -> Vec<AuditEvent> {
         self.events
             .lock()
             .map_or_else(|_| Vec::new(), |guard| guard.clone())
+    }
+
+    /// Return events that match the given filter.
+    ///
+    /// The filter is applied to the in-memory buffer only; it has no access to
+    /// events that have already been evicted due to the capacity limit.
+    #[must_use]
+    pub fn snapshot_filtered(&self, filter: &AuditSnapshotFilter) -> Vec<AuditEvent> {
+        let Ok(guard) = self.events.lock() else {
+            return Vec::new();
+        };
+        guard.iter().filter(|e| filter.matches(e)).cloned().collect()
+    }
+
+    /// Current number of events held in the buffer.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.events.lock().map_or(0, |g| g.len())
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -42,7 +97,12 @@ impl AuditSink for InMemoryAuditSink {
         let mut guard = self
             .events
             .lock()
-            .map_err(|_err| AuditError::Sink("audit mutex poisoned".to_owned()))?;
+            .map_err(|_| AuditError::Sink("audit mutex poisoned".to_owned()))?;
+
+        if guard.len() >= self.capacity {
+            // Ring-buffer eviction: discard the oldest record.
+            guard.remove(0);
+        }
         guard.push(event);
         Ok(())
     }
@@ -372,8 +432,78 @@ pub fn verify_jsonl_audit_journal(path: &Path) -> Result<AuditVerificationReport
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Filter parameters for querying an audit snapshot.
+/// All fields are optional — None means "don't filter on this field".
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct AuditSnapshotFilter {
+    /// Inclusive lower bound on event timestamp (epoch seconds).
+    pub since_epoch_s: Option<u64>,
+    /// Inclusive upper bound on event timestamp (epoch seconds).
+    pub until_epoch_s: Option<u64>,
+    /// Match only events for this agent_id.
+    pub agent_id: Option<String>,
+    /// Match only events whose discriminant matches one of these kind names.
+    /// For example: "TokenIssued", "AuthorizationDenied".
+    pub kinds: Option<Vec<&'static str>>,
+}
+
+impl AuditSnapshotFilter {
+    /// Returns true if the given event matches every non-None field in the filter.
+    pub fn matches(&self, event: &AuditEvent) -> bool {
+        if let Some(since) = self.since_epoch_s {
+            if event.timestamp_epoch_s < since {
+                return false;
+            }
+        }
+        if let Some(until) = self.until_epoch_s {
+            if event.timestamp_epoch_s > until {
+                return false;
+            }
+        }
+        if let Some(ref agent_id) = self.agent_id {
+            if event.agent_id.as_deref() != Some(agent_id.as_str()) {
+                return false;
+            }
+        }
+        if let Some(ref kinds) = self.kinds {
+            if kinds.is_empty() {
+                return true;
+            }
+            let kind_name = event.kind.name();
+            if !kinds.contains(&kind_name) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Minimal interface for accessing the name of an AuditEventKind variant.
+trait AuditEventKindExt {
+    fn name(&self) -> &'static str;
+}
+
+impl AuditEventKindExt for AuditEventKind {
+    fn name(&self) -> &'static str {
+        match self {
+            AuditEventKind::TokenIssued { .. } => "TokenIssued",
+            AuditEventKind::TokenRevoked { .. } => "TokenRevoked",
+            AuditEventKind::TaskDispatched { .. } => "TaskDispatched",
+            AuditEventKind::ConnectorInvoked { .. } => "ConnectorInvoked",
+            AuditEventKind::PlaneInvoked { .. } => "PlaneInvoked",
+            AuditEventKind::SecurityScanEvaluated { .. } => "SecurityScanEvaluated",
+            AuditEventKind::PluginTrustEvaluated { .. } => "PluginTrustEvaluated",
+            AuditEventKind::ToolSearchEvaluated { .. } => "ToolSearchEvaluated",
+            AuditEventKind::ProviderFailover { .. } => "ProviderFailover",
+            AuditEventKind::AuthorizationDenied { .. } => "AuthorizationDenied",
+            _ => "Unknown",
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub enum AuditRepairOutcome {
+    #[default]
     Healthy,
     Repaired,
     Refused { line: usize, reason: String },
@@ -682,5 +812,249 @@ impl AuditSink for FanoutAuditSink {
             last.record(event)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use loong_contracts::CapabilityToken;
+
+    fn make_event(timestamp_epoch_s: u64, agent_id: Option<&str>, kind: AuditEventKind) -> AuditEvent {
+        AuditEvent {
+            event_id: format!("evt-{}", timestamp_epoch_s),
+            timestamp_epoch_s,
+            agent_id: agent_id.map(String::from),
+            kind,
+        }
+    }
+
+    fn token_issued(timestamp_epoch_s: u64, agent_id: Option<&str>) -> AuditEvent {
+        make_event(
+            timestamp_epoch_s,
+            agent_id,
+            AuditEventKind::TokenIssued {
+                token: CapabilityToken {
+                    token_id: format!("tok-{}", timestamp_epoch_s),
+                    pack_id: "test-pack".to_owned(),
+                    agent_id: agent_id.map(String::from).unwrap_or_default(),
+                    allowed_capabilities: Default::default(),
+                    issued_at_epoch_s: timestamp_epoch_s,
+                    expires_at_epoch_s: timestamp_epoch_s.saturating_add(3600),
+                    generation: 0,
+                },
+            },
+        )
+    }
+
+    fn authorization_denied(timestamp_epoch_s: u64, agent_id: Option<&str>) -> AuditEvent {
+        make_event(
+            timestamp_epoch_s,
+            agent_id,
+            AuditEventKind::AuthorizationDenied {
+                pack_id: "test-pack".to_owned(),
+                token_id: format!("tok-{}", timestamp_epoch_s),
+                reason: "denied".to_owned(),
+            },
+        )
+    }
+
+    // -------------------------------------------------------------------------
+    // AuditSnapshotFilter tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn filter_empty_matches_everything() {
+        let filter = AuditSnapshotFilter::default();
+        let evt = token_issued(1000, None);
+        assert!(filter.matches(&evt));
+    }
+
+    #[test]
+    fn filter_since_excludes_older_events() {
+        let filter = AuditSnapshotFilter {
+            since_epoch_s: Some(1000),
+            ..Default::default()
+        };
+        assert!(!filter.matches(&token_issued(999, None)));
+        assert!(filter.matches(&token_issued(1000, None)));
+        assert!(filter.matches(&token_issued(2000, None)));
+    }
+
+    #[test]
+    fn filter_until_excludes_newer_events() {
+        let filter = AuditSnapshotFilter {
+            until_epoch_s: Some(2000),
+            ..Default::default()
+        };
+        assert!(filter.matches(&token_issued(1000, None)));
+        assert!(filter.matches(&token_issued(2000, None)));
+        assert!(!filter.matches(&token_issued(2001, None)));
+    }
+
+    #[test]
+    fn filter_agent_id_matches() {
+        let filter = AuditSnapshotFilter {
+            agent_id: Some("agent-a".to_owned()),
+            ..Default::default()
+        };
+        let evt_a = token_issued(1000, Some("agent-a"));
+        let evt_b = token_issued(1000, Some("agent-b"));
+        let evt_none = token_issued(1000, None);
+        assert!(filter.matches(&evt_a));
+        assert!(!filter.matches(&evt_b));
+        assert!(!filter.matches(&evt_none));
+    }
+
+    #[test]
+    fn filter_kinds_matches() {
+        let filter = AuditSnapshotFilter {
+            kinds: Some(vec!["TokenIssued"]),
+            ..Default::default()
+        };
+        assert!(filter.matches(&token_issued(1000, None)));
+        assert!(!filter.matches(&authorization_denied(1000, None)));
+    }
+
+    #[test]
+    fn filter_kinds_empty_is_no_op() {
+        let filter = AuditSnapshotFilter {
+            kinds: Some(vec![]),
+            ..Default::default()
+        };
+        assert!(filter.matches(&token_issued(1000, None)));
+        assert!(filter.matches(&authorization_denied(1000, None)));
+    }
+
+    #[test]
+    fn filter_combined() {
+        let filter = AuditSnapshotFilter {
+            since_epoch_s: Some(1000),
+            until_epoch_s: Some(2000),
+            agent_id: Some("agent-a".to_owned()),
+            kinds: Some(vec!["TokenIssued"]),
+        };
+        // within range, correct agent, correct kind
+        assert!(filter.matches(&token_issued(1500, Some("agent-a"))));
+        // out of range
+        assert!(!filter.matches(&token_issued(999, Some("agent-a"))));
+        assert!(!filter.matches(&token_issued(2001, Some("agent-a"))));
+        // wrong agent
+        assert!(!filter.matches(&token_issued(1500, Some("agent-b"))));
+        // wrong kind
+        assert!(!filter.matches(&authorization_denied(1500, Some("agent-a"))));
+    }
+
+    // -------------------------------------------------------------------------
+    // InMemoryAuditSink ring-buffer tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn in_memory_sink_records_and_snapshots() {
+        let sink = InMemoryAuditSink::with_capacity(100);
+        sink.record(token_issued(1, Some("a"))).unwrap();
+        sink.record(token_issued(2, Some("b"))).unwrap();
+        let snap = sink.snapshot();
+        assert_eq!(snap.len(), 2);
+    }
+
+    #[test]
+    fn in_memory_sink_evicts_oldest_when_full() {
+        let sink = InMemoryAuditSink::with_capacity(3);
+        sink.record(token_issued(1, Some("a"))).unwrap();
+        sink.record(token_issued(2, Some("b"))).unwrap();
+        sink.record(token_issued(3, Some("c"))).unwrap();
+        // Fill to capacity
+        sink.record(token_issued(4, Some("d"))).unwrap();
+
+        let snap = sink.snapshot();
+        assert_eq!(snap.len(), 3);
+        // Events 1 should be evicted, 2,3,4 remain
+        let ids: Vec<_> = snap.iter().map(|e| e.event_id.clone()).collect();
+        assert!(ids.contains(&"evt-2".to_owned()));
+        assert!(ids.contains(&"evt-3".to_owned()));
+        assert!(ids.contains(&"evt-4".to_owned()));
+        assert!(!ids.contains(&"evt-1".to_owned()));
+    }
+
+    #[test]
+    fn in_memory_sink_len_and_is_empty() {
+        let sink = InMemoryAuditSink::with_capacity(10);
+        assert!(sink.is_empty());
+        assert_eq!(sink.len(), 0);
+        sink.record(token_issued(1, None)).unwrap();
+        assert!(!sink.is_empty());
+        assert_eq!(sink.len(), 1);
+    }
+
+    #[test]
+    fn snapshot_filtered_returns_matching_events() {
+        let sink = InMemoryAuditSink::with_capacity(100);
+        sink.record(token_issued(1, Some("a"))).unwrap();
+        sink.record(authorization_denied(2, Some("b"))).unwrap();
+        sink.record(token_issued(3, Some("c"))).unwrap();
+
+        let filter = AuditSnapshotFilter {
+            kinds: Some(vec!["TokenIssued"]),
+            ..Default::default()
+        };
+        let snap = sink.snapshot_filtered(&filter);
+        assert_eq!(snap.len(), 2);
+        assert!(snap.iter().all(|e| matches!(e.kind, AuditEventKind::TokenIssued { .. })));
+    }
+
+    #[test]
+    fn snapshot_filtered_time_window() {
+        let sink = InMemoryAuditSink::with_capacity(100);
+        sink.record(token_issued(100, None)).unwrap();
+        sink.record(token_issued(200, None)).unwrap();
+        sink.record(token_issued(300, None)).unwrap();
+
+        let filter = AuditSnapshotFilter {
+            since_epoch_s: Some(150),
+            until_epoch_s: Some(250),
+            ..Default::default()
+        };
+        let snap = sink.snapshot_filtered(&filter);
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].timestamp_epoch_s, 200);
+    }
+
+    #[test]
+    fn snapshot_filtered_agent_id() {
+        let sink = InMemoryAuditSink::with_capacity(100);
+        sink.record(token_issued(1, Some("alice"))).unwrap();
+        sink.record(token_issued(2, Some("bob"))).unwrap();
+
+        let filter = AuditSnapshotFilter {
+            agent_id: Some("alice".to_owned()),
+            ..Default::default()
+        };
+        let snap = sink.snapshot_filtered(&filter);
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].agent_id.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn snapshot_filtered_combined() {
+        let sink = InMemoryAuditSink::with_capacity(100);
+        sink.record(token_issued(100, Some("alice"))).unwrap();
+        sink.record(authorization_denied(200, Some("alice"))).unwrap();
+        sink.record(token_issued(200, Some("bob"))).unwrap();
+        // Alice's TokenIssued at ts=250 passes all three filter conditions:
+        // ts >= 150, agent_id == alice, kind == TokenIssued
+        sink.record(token_issued(250, Some("alice"))).unwrap();
+
+        let filter = AuditSnapshotFilter {
+            since_epoch_s: Some(150),
+            until_epoch_s: None,
+            agent_id: Some("alice".to_owned()),
+            kinds: Some(vec!["TokenIssued"]),
+        };
+
+        let snap = sink.snapshot_filtered(&filter);
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].agent_id.as_deref(), Some("alice"));
+        assert_eq!(snap[0].timestamp_epoch_s, 250);
     }
 }
