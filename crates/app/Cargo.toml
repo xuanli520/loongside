@@ -92,6 +92,7 @@ cbc = { version = "0.2", optional = true }
 wait-timeout = "0.2"
 tempfile = "3"
 which.workspace = true
+hostname = "0.4"
 unicode-normalization = "0.1"
 unicode-segmentation = "1.13"
 jieba-rs = "0.8"

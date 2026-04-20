@@ -21,7 +21,7 @@ pub use crate::channel::{
 };
 pub use crate::mcp::{McpConfig, McpServerConfig, McpServerTransportConfig};
 #[allow(unused_imports)]
-pub use audit::{AuditConfig, AuditMode};
+pub use audit::{AuditConfig, AuditMode, HttpAuditConfig, SyslogAuditConfig, SyslogFacility};
 #[allow(unused_imports)]
 pub use channels::bridge::{
     OnebotAccountConfig, OnebotChannelConfig, QqbotAccountConfig, QqbotChannelConfig,
