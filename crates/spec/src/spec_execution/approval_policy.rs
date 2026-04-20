@@ -943,6 +943,7 @@ mod tests {
             policy_path: Some("/tmp/policy.json".to_owned()),
             policy_sha256: Some("abc123".to_owned()),
             policy_signature: Some(SecurityProfileSignatureSpec {
+                key_id: None,
                 algorithm: "ed25519".to_owned(),
                 public_key_base64: "cHVibGljLWtleQ==".to_owned(),
                 signature_base64: "c2lnbmF0dXJl".to_owned(),
@@ -979,6 +980,7 @@ mod tests {
             policy_path: None,
             policy_sha256: None,
             policy_signature: Some(SecurityProfileSignatureSpec {
+                key_id: None,
                 algorithm: String::new(),
                 public_key_base64: "cHVibGljLWtleQ==".to_owned(),
                 signature_base64: "c2lnbmF0dXJl".to_owned(),

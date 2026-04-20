@@ -433,6 +433,16 @@ fn audit_retention_doctor_check(audit: &mvp::config::AuditConfig) -> DoctorCheck
                 Some("durable journal only")
             },
         ),
+        mvp::config::AuditMode::Http => durable_audit_retention_doctor_check(
+            &path,
+            "http",
+            Some("remote HTTP sink"),
+        ),
+        mvp::config::AuditMode::Syslog => durable_audit_retention_doctor_check(
+            &path,
+            "syslog",
+            Some("remote syslog sink"),
+        ),
     }
 }
 
@@ -4382,6 +4392,8 @@ mod tests {
             mode: mvp::config::AuditMode::Jsonl,
             path: journal_path.display().to_string(),
             retain_in_memory: false,
+            http: None,
+            syslog: None,
         });
 
         assert_eq!(check.name, "audit integrity");
@@ -4423,6 +4435,8 @@ mod tests {
             mode: mvp::config::AuditMode::Jsonl,
             path: journal_path.display().to_string(),
             retain_in_memory: false,
+            http: None,
+            syslog: None,
         });
 
         assert_eq!(check.name, "audit integrity");
@@ -4500,6 +4514,8 @@ mod tests {
             mode: mvp::config::AuditMode::Fanout,
             path: temp_dir.display().to_string(),
             retain_in_memory: true,
+            http: None,
+            syslog: None,
         });
 
         assert_eq!(check.name, "audit retention");
@@ -4526,6 +4542,8 @@ mod tests {
             mode: mvp::config::AuditMode::Jsonl,
             path: journal_path.display().to_string(),
             retain_in_memory: false,
+            http: None,
+            syslog: None,
         });
 
         assert_eq!(check.name, "audit retention");
@@ -4544,6 +4562,8 @@ mod tests {
             mode: mvp::config::AuditMode::Fanout,
             path: journal_path.display().to_string(),
             retain_in_memory: true,
+            http: None,
+            syslog: None,
         });
 
         assert_eq!(check.name, "audit retention");
@@ -4568,6 +4588,8 @@ mod tests {
             mode: mvp::config::AuditMode::Fanout,
             path: journal_path.display().to_string(),
             retain_in_memory: true,
+            http: None,
+            syslog: None,
         });
 
         assert_eq!(check.name, "audit retention");
@@ -4590,6 +4612,8 @@ mod tests {
             mode: mvp::config::AuditMode::Fanout,
             path: journal_path.display().to_string(),
             retain_in_memory: true,
+            http: None,
+            syslog: None,
         });
 
         assert_eq!(check.name, "audit retention");

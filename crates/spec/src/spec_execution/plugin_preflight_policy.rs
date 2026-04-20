@@ -533,6 +533,7 @@ mod tests {
             Some("/tmp/policy.json"),
             None,
             Some(&SecurityProfileSignatureSpec {
+                key_id: None,
                 algorithm: String::new(),
                 public_key_base64: "cHVibGljLWtleQ==".to_owned(),
                 signature_base64: "c2lnbmF0dXJl".to_owned(),

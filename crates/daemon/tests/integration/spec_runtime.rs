@@ -1037,6 +1037,7 @@ fn security_scan_profile_path_overrides_bundled_defaults() {
                 profile_sha256: None,
                 profile_signature: None,
                 siem_export: None,
+                trust_anchor: None,
                 runtime: SecurityRuntimeExecutionSpec::default(),
                 high_risk_metadata_keywords: Vec::new(),
                 wasm: WasmSecurityScanSpec {
@@ -1147,6 +1148,7 @@ fn security_scan_profile_sha256_pin_accepts_matching_profile() {
                 profile_sha256: Some(profile_sha256),
                 profile_signature: None,
                 siem_export: None,
+                trust_anchor: None,
                 runtime: SecurityRuntimeExecutionSpec::default(),
                 high_risk_metadata_keywords: Vec::new(),
                 wasm: WasmSecurityScanSpec {
@@ -1250,6 +1252,7 @@ async fn execute_spec_blocks_when_security_scan_profile_sha256_mismatches() {
                 profile_sha256: Some("deadbeef".repeat(8)),
                 profile_signature: None,
                 siem_export: None,
+                trust_anchor: None,
                 runtime: SecurityRuntimeExecutionSpec::default(),
                 high_risk_metadata_keywords: Vec::new(),
                 wasm: WasmSecurityScanSpec {
@@ -1360,8 +1363,10 @@ fn security_scan_profile_signature_accepts_matching_signature() {
                     algorithm: "ed25519".to_owned(),
                     public_key_base64,
                     signature_base64,
+                    key_id: None,
                 }),
                 siem_export: None,
+                trust_anchor: None,
                 runtime: SecurityRuntimeExecutionSpec::default(),
                 high_risk_metadata_keywords: Vec::new(),
                 wasm: WasmSecurityScanSpec {
@@ -1477,8 +1482,10 @@ async fn execute_spec_blocks_when_security_scan_profile_signature_mismatches() {
                     algorithm: "ed25519".to_owned(),
                     public_key_base64,
                     signature_base64,
+                    key_id: None,
                 }),
                 siem_export: None,
+                trust_anchor: None,
                 runtime: SecurityRuntimeExecutionSpec::default(),
                 high_risk_metadata_keywords: Vec::new(),
                 wasm: WasmSecurityScanSpec {
@@ -2938,6 +2945,7 @@ async fn execute_spec_wasm_component_bridge_exchanges_request_output_when_runtim
                 profile_sha256: None,
                 profile_signature: None,
                 siem_export: None,
+                trust_anchor: None,
                 runtime: SecurityRuntimeExecutionSpec {
                     execute_wasm_component: true,
                     allowed_path_prefixes: vec![plugin_root.display().to_string()],
@@ -3265,6 +3273,7 @@ async fn execute_spec_wasm_component_bridge_reads_allowlisted_guest_config_when_
                 profile_sha256: None,
                 profile_signature: None,
                 siem_export: None,
+                trust_anchor: None,
                 runtime: SecurityRuntimeExecutionSpec {
                     execute_wasm_component: true,
                     allowed_path_prefixes: vec![plugin_root.display().to_string()],
@@ -3410,6 +3419,7 @@ async fn execute_spec_wasm_component_bridge_executes_with_timeout_guard_and_no_c
                 profile_sha256: None,
                 profile_signature: None,
                 siem_export: None,
+                trust_anchor: None,
                 runtime: SecurityRuntimeExecutionSpec {
                     execute_wasm_component: true,
                     allowed_path_prefixes: vec![plugin_root.display().to_string()],
@@ -3603,6 +3613,7 @@ async fn execute_spec_wasm_component_bridge_times_out_and_reports_timeout_eviden
                 profile_sha256: None,
                 profile_signature: None,
                 siem_export: None,
+                trust_anchor: None,
                 runtime: SecurityRuntimeExecutionSpec {
                     execute_wasm_component: true,
                     allowed_path_prefixes: vec![plugin_root.display().to_string()],
@@ -3767,6 +3778,7 @@ async fn execute_spec_wasm_component_bridge_blocks_when_component_sha256_mismatc
                 profile_sha256: None,
                 profile_signature: None,
                 siem_export: None,
+                trust_anchor: None,
                 runtime: SecurityRuntimeExecutionSpec {
                     execute_wasm_component: true,
                     allowed_path_prefixes: vec![plugin_root.display().to_string()],
@@ -3911,6 +3923,7 @@ async fn execute_spec_wasm_component_bridge_blocks_when_metadata_pin_conflicts_w
                 profile_sha256: None,
                 profile_signature: None,
                 siem_export: None,
+                trust_anchor: None,
                 runtime: SecurityRuntimeExecutionSpec {
                     execute_wasm_component: true,
                     allowed_path_prefixes: vec![plugin_root.display().to_string()],
@@ -4057,6 +4070,7 @@ async fn execute_spec_wasm_component_bridge_blocks_when_hash_pin_required_but_mi
                 profile_sha256: None,
                 profile_signature: None,
                 siem_export: None,
+                trust_anchor: None,
                 runtime: SecurityRuntimeExecutionSpec {
                     execute_wasm_component: true,
                     allowed_path_prefixes: vec![plugin_root.display().to_string()],
@@ -4204,6 +4218,7 @@ async fn execute_spec_wasm_component_bridge_blocks_artifact_outside_runtime_pref
                 profile_sha256: None,
                 profile_signature: None,
                 siem_export: None,
+                trust_anchor: None,
                 runtime: SecurityRuntimeExecutionSpec {
                     execute_wasm_component: true,
                     allowed_path_prefixes: vec![disallowed_root.display().to_string()],
@@ -4356,6 +4371,7 @@ async fn execute_spec_wasm_component_bridge_blocks_symlink_escape_under_allowed_
                 profile_sha256: None,
                 profile_signature: None,
                 siem_export: None,
+                trust_anchor: None,
                 runtime: SecurityRuntimeExecutionSpec {
                     execute_wasm_component: true,
                     allowed_path_prefixes: vec![plugin_root.display().to_string()],
@@ -4498,6 +4514,7 @@ async fn execute_spec_wasm_component_bridge_blocks_non_regular_artifact_path() {
                 profile_sha256: None,
                 profile_signature: None,
                 siem_export: None,
+                trust_anchor: None,
                 runtime: SecurityRuntimeExecutionSpec {
                     execute_wasm_component: true,
                     allowed_path_prefixes: vec![plugin_root.display().to_string()],
@@ -4641,6 +4658,7 @@ async fn execute_spec_wasm_component_bridge_blocks_when_module_size_exceeds_runt
                 profile_sha256: None,
                 profile_signature: None,
                 siem_export: None,
+                trust_anchor: None,
                 runtime: SecurityRuntimeExecutionSpec {
                     execute_wasm_component: true,
                     allowed_path_prefixes: vec![plugin_root.display().to_string()],
@@ -4753,6 +4771,7 @@ async fn execute_spec_blocks_when_wasm_runtime_enabled_without_allowed_prefixes(
                 profile_sha256: None,
                 profile_signature: None,
                 siem_export: None,
+                trust_anchor: None,
                 runtime: SecurityRuntimeExecutionSpec {
                     execute_wasm_component: true,
                     allowed_path_prefixes: Vec::new(),
@@ -4883,6 +4902,7 @@ async fn execute_spec_security_scan_blocks_wasm_plugin_with_wasi_import() {
                 profile_sha256: None,
                 profile_signature: None,
                 siem_export: None,
+                trust_anchor: None,
                 runtime: SecurityRuntimeExecutionSpec::default(),
                 high_risk_metadata_keywords: vec!["shell".to_owned()],
                 wasm: WasmSecurityScanSpec {
@@ -5034,6 +5054,7 @@ async fn execute_spec_security_scan_allows_clean_wasm_with_hash_pin() {
                 profile_sha256: None,
                 profile_signature: None,
                 siem_export: None,
+                trust_anchor: None,
                 runtime: SecurityRuntimeExecutionSpec::default(),
                 high_risk_metadata_keywords: vec!["shell".to_owned()],
                 wasm: WasmSecurityScanSpec {
@@ -5173,6 +5194,7 @@ async fn execute_spec_security_scan_allows_clean_wasm_with_metadata_hash_pin() {
                 profile_sha256: None,
                 profile_signature: None,
                 siem_export: None,
+                trust_anchor: None,
                 runtime: SecurityRuntimeExecutionSpec::default(),
                 high_risk_metadata_keywords: vec!["shell".to_owned()],
                 wasm: WasmSecurityScanSpec {
@@ -5314,6 +5336,7 @@ async fn execute_spec_security_scan_blocks_when_metadata_hash_pin_is_invalid() {
                 profile_sha256: None,
                 profile_signature: None,
                 siem_export: None,
+                trust_anchor: None,
                 runtime: SecurityRuntimeExecutionSpec::default(),
                 high_risk_metadata_keywords: vec!["shell".to_owned()],
                 wasm: WasmSecurityScanSpec {
@@ -5449,6 +5472,7 @@ async fn execute_spec_security_scan_blocks_when_metadata_pin_conflicts_with_poli
                 profile_sha256: None,
                 profile_signature: None,
                 siem_export: None,
+                trust_anchor: None,
                 runtime: SecurityRuntimeExecutionSpec::default(),
                 high_risk_metadata_keywords: vec!["shell".to_owned()],
                 wasm: WasmSecurityScanSpec {
@@ -5581,6 +5605,7 @@ async fn execute_spec_security_scan_emits_audit_summary_when_not_blocking() {
                 profile_sha256: None,
                 profile_signature: None,
                 siem_export: None,
+                trust_anchor: None,
                 runtime: SecurityRuntimeExecutionSpec::default(),
                 high_risk_metadata_keywords: Vec::new(),
                 wasm: WasmSecurityScanSpec {
@@ -5742,6 +5767,7 @@ async fn execute_spec_security_scan_exports_siem_record_with_truncation() {
                     max_findings_per_record: Some(1),
                     fail_on_error: true,
                 }),
+                trust_anchor: None,
                 runtime: SecurityRuntimeExecutionSpec::default(),
                 high_risk_metadata_keywords: vec!["shell".to_owned()],
                 wasm: WasmSecurityScanSpec {
@@ -5890,6 +5916,7 @@ async fn execute_spec_security_scan_siem_fail_closed_blocks_execution() {
                     max_findings_per_record: None,
                     fail_on_error: true,
                 }),
+                trust_anchor: None,
                 runtime: SecurityRuntimeExecutionSpec::default(),
                 high_risk_metadata_keywords: Vec::new(),
                 wasm: WasmSecurityScanSpec {
@@ -6044,6 +6071,7 @@ async fn execute_spec_security_scan_covers_deferred_plugins_not_only_applied_sub
                 profile_sha256: None,
                 profile_signature: None,
                 siem_export: None,
+                trust_anchor: None,
                 runtime: SecurityRuntimeExecutionSpec::default(),
                 high_risk_metadata_keywords: Vec::new(),
                 wasm: WasmSecurityScanSpec {

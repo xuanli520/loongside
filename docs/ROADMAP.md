@@ -34,7 +34,7 @@ This roadmap is execution-focused. Every stage has:
 | Stage | Status | Use the detailed section when... |
 | --- | --- | --- |
 | Stage 0: Kernel Contract Freeze | Done | you need the original core-boundary baseline |
-| Stage 1: Baseline Security & Governance | In Progress | you are working on policy, approval, scan, or audit hardening |
+| Stage 1: Baseline Security & Governance | Done | you are working on policy, approval, scan, or audit hardening |
 | Stage 2: Safe Hotplug Runtime | Next | you are planning runtime isolation or hotplug hardening work |
 | Stage 3: Autonomous Integration Expansion | In Progress | you are working on protocol, provider, channel, or discovery expansion |
 | Stage 4: Community Plugin Supply Chain | Next | you are working on package intake, trust, or plugin verification |
@@ -81,9 +81,9 @@ Exit criteria met:
 - deterministic audit schema tests passing
 - property tests for capability boundary invariants passing
 
-## Stage 1: Baseline Security & Governance (In Progress)
+## Stage 1: Baseline Security & Governance (Done)
 
-Status: in progress
+Status: complete
 Focus: medium-balanced defaults + hard stops for high-risk behavior.
 
 Delivered:
@@ -97,7 +97,9 @@ Delivered:
 - plugin security scan with `block_on_high`
 - external profile integrity lock (`security_scan.profile_sha256`) with fail-closed behavior
 - external profile signature verification (`security_scan.profile_signature`, ed25519)
+- profile signing key lifecycle (`SecurityProfileSignatureSpec.key_id`, `TrustAnchor`, `SigningKeyMeta`, `RevocationList`) with rotation, revocation, and trust anchor management
 - JSONL SIEM export lane (`security_scan.siem_export`) with optional fail-closed mode
+- SIEM transport adapters beyond file JSONL (HTTP/syslog via `HttpAuditSink` / `SyslogAuditSink`)
 - kernel-level request-policy gate for tool calls through `PolicyEngine::authorize(...)`
   plus `PolicyExtensionChain`, with explicit deny/approval-required outcomes before
   tool dispatch (Rule of Two)
@@ -109,12 +111,7 @@ Delivered:
 - typed audit emission for security scan summary (`SecurityScanEvaluated`)
 - per-finding correlation IDs for deterministic audit aggregation
 
-Remaining:
-
-- profile signing key lifecycle (rotation/revocation) and trust anchor management
-- SIEM transport adapters beyond file JSONL (HTTP/syslog/event bus)
-
-Exit criteria:
+Exit criteria met:
 
 - all high-risk tool calls blocked without explicit approval
 - blocked community plugin paths demonstrably fail closed

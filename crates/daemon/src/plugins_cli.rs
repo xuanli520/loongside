@@ -2469,6 +2469,7 @@ fn build_policy_signature_spec(
                 algorithm: algorithm.to_owned(),
                 public_key_base64: public_key_base64.to_owned(),
                 signature_base64: signature_base64.to_owned(),
+                key_id: None,
             }))
         }
     }

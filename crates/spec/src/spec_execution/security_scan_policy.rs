@@ -1,11 +1,12 @@
-use std::{collections::BTreeSet, fs, io::Write, path::Path};
-
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use ed25519_dalek::{Signature as Ed25519Signature, Verifier, VerifyingKey};
 use serde_json::json;
+use sha2::Digest;
+use std::{collections::BTreeSet, fs, io::Write, path::Path};
 
 use crate::BUNDLED_SECURITY_SCAN_PROFILE;
 use crate::spec_runtime::*;
+use crate::spec_runtime::{KeyPurpose, SecurityProfileSignatureSpec, SigningKeyMeta, TrustAnchor, TrustAnchorSpec};
 
 use super::SecurityScanDelta;
 
@@ -105,7 +106,7 @@ fn resolve_security_scan_profile(policy: &SecurityScanSpec) -> Result<SecuritySc
                     }
                 }
                 if let Some(signature) = policy.profile_signature.as_ref() {
-                    verify_security_scan_profile_signature(&profile, signature).map_err(|error| {
+                    verify_security_scan_profile_signature(&profile, signature, policy.trust_anchor.as_ref()).map_err(|error| {
                         format!(
                             "security scan profile signature verification failed for {path}: {error}"
                         )
@@ -149,6 +150,7 @@ fn bundled_security_scan_profile() -> SecurityScanProfile {
 fn verify_security_scan_profile_signature(
     profile: &SecurityScanProfile,
     signature: &SecurityProfileSignatureSpec,
+    trust_anchor: Option<&TrustAnchorSpec>,
 ) -> Result<(), String> {
     let algorithm = signature.algorithm.trim().to_ascii_lowercase();
     if algorithm != "ed25519" {
@@ -157,8 +159,18 @@ fn verify_security_scan_profile_signature(
         ));
     }
 
+    let public_key_base64 = if let Some(key_id) = signature.key_id.as_deref() {
+        // Trust anchor lookup required
+        let anchor = load_trust_anchor(trust_anchor)?;
+        let key_meta = lookup_key_by_id(&anchor, key_id)?;
+        validate_key_for_profile_signing(key_meta, &anchor)?;
+        key_meta.public_key_base64.clone()
+    } else {
+        signature.public_key_base64.clone()
+    };
+
     let public_key_bytes = BASE64_STANDARD
-        .decode(signature.public_key_base64.trim())
+        .decode(public_key_base64.trim())
         .map_err(|error| format!("invalid public_key_base64: {error}"))?;
     let public_key_bytes: [u8; 32] = public_key_bytes
         .as_slice()
@@ -180,6 +192,70 @@ fn verify_security_scan_profile_signature(
     verifying_key
         .verify(&message, &signature)
         .map_err(|error| format!("ed25519 verification failed: {error}"))
+}
+
+/// Load and optionally integrity-check a trust anchor.
+fn load_trust_anchor(spec: Option<&TrustAnchorSpec>) -> Result<TrustAnchor, String> {
+    let spec = spec.ok_or_else(|| "profile_signature.key_id requires trust_anchor configuration".to_owned())?;
+
+    let content = fs::read_to_string(&spec.path)
+        .map_err(|error| format!("failed to read trust anchor at {}: {error}", spec.path))?;
+
+    if let Some(expected_sha256) = spec.sha256.as_deref() {
+        let actual_sha256 = sha2_digest(&content);
+        if !expected_sha256.eq_ignore_ascii_case(&actual_sha256) {
+            return Err(format!(
+                "trust anchor sha256 mismatch for {}: expected {expected_sha256}, actual {actual_sha256}",
+                spec.path
+            ));
+        }
+    }
+
+    serde_json::from_str::<TrustAnchor>(&content)
+        .map_err(|error| format!("failed to parse trust anchor at {}: {error}", spec.path))
+}
+
+/// Compute SHA-256 hex digest of a string.
+fn sha2_digest(content: &str) -> String {
+    let digest = sha2::Sha256::digest(content.as_bytes());
+    hex::encode(digest)
+}
+
+/// Look up a signing key by its key_id in the trust anchor.
+fn lookup_key_by_id<'a>(anchor: &'a TrustAnchor, key_id: &str) -> Result<&'a SigningKeyMeta, String> {
+    anchor
+        .keys
+        .iter()
+        .find(|k| k.key_id == key_id)
+        .ok_or_else(|| format!("key_id '{}' not found in trust anchor", key_id))
+}
+
+/// Validate that a key is valid for profile signing: not revoked, not expired, correct purpose.
+fn validate_key_for_profile_signing(key: &SigningKeyMeta, anchor: &TrustAnchor) -> Result<(), String> {
+    // Check revocation
+    if let Some(revocation_list) = anchor.revocation_list.as_ref() {
+        if revocation_list.revoked_key_ids.iter().any(|id| id == &key.key_id) {
+            return Err(format!("key_id '{}' has been revoked", key.key_id));
+        }
+    }
+
+    // Check expiry
+    if let Some(expires_at) = key.expires_at_epoch_s {
+        let now = super::current_epoch_s() as u64;
+        if now > expires_at {
+            return Err(format!("key_id '{}' has expired", key.key_id));
+        }
+    }
+
+    // Check purpose
+    if key.purpose != KeyPurpose::ProfileSigning {
+        return Err(format!(
+            "key_id '{}' has purpose {:?}, expected ProfileSigning",
+            key.key_id, key.purpose
+        ));
+    }
+
+    Ok(())
 }
 
 pub(super) fn security_scan_process_allowlist(spec: &RunnerSpec) -> BTreeSet<String> {

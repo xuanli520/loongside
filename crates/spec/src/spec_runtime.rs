@@ -1061,6 +1061,9 @@ pub struct SecurityScanSpec {
     pub profile_sha256: Option<String>,
     #[serde(default)]
     pub profile_signature: Option<SecurityProfileSignatureSpec>,
+    /// Trust anchor for multi-key management and revocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_anchor: Option<TrustAnchorSpec>,
     #[serde(default)]
     pub siem_export: Option<SecuritySiemExportSpec>,
     #[serde(default)]
@@ -1079,6 +1082,7 @@ impl Default for SecurityScanSpec {
             profile_path: None,
             profile_sha256: None,
             profile_signature: None,
+            trust_anchor: None,
             siem_export: None,
             runtime: SecurityRuntimeExecutionSpec::default(),
             high_risk_metadata_keywords: Vec::new(),
@@ -1087,8 +1091,82 @@ impl Default for SecurityScanSpec {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyPurpose {
+    ProfileSigning,
+    PluginSigning,
+}
+
+impl Default for KeyPurpose {
+    fn default() -> Self {
+        Self::ProfileSigning
+    }
+}
+
+/// Metadata for a single signing key in the trust anchor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SigningKeyMeta {
+    /// Unique identifier for this key, used for rotation and revocation.
+    pub key_id: String,
+    /// Base64-encoded Ed25519 public key.
+    pub public_key_base64: String,
+    /// Unix epoch seconds when this key was created.
+    #[serde(default)]
+    pub created_at_epoch_s: Option<u64>,
+    /// Unix epoch seconds when this key expires (optional).
+    #[serde(default)]
+    pub expires_at_epoch_s: Option<u64>,
+    /// Intended purpose for this key.
+    #[serde(default)]
+    pub purpose: KeyPurpose,
+    /// Optional arbitrary metadata (e.g., key owner, contact).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// Revocation list containing IDs of revoked keys.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevocationList {
+    pub revoked_key_ids: Vec<String>,
+}
+
+/// Trust anchor containing multiple signing keys and revocation state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustAnchor {
+    /// Ordered list of trusted signing keys. Earlier entries take precedence.
+    #[serde(default)]
+    pub keys: Vec<SigningKeyMeta>,
+    /// Optional inline revocation list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revocation_list: Option<RevocationList>,
+}
+
+impl Default for TrustAnchor {
+    fn default() -> Self {
+        Self {
+            keys: Vec::new(),
+            revocation_list: None,
+        }
+    }
+}
+
+/// Trust anchor specification: path to a trust anchor file, with optional integrity pin.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustAnchorSpec {
+    /// Path to a JSON file containing `TrustAnchor`.
+    pub path: String,
+    /// Optional SHA-256 hex of the trust anchor file for integrity pinning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityProfileSignatureSpec {
+    /// Optional key identifier to select a specific key from the trust anchor.
+    /// When set, public_key_base64 is ignored in favor of trust anchor lookup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<String>,
     #[serde(default = "default_security_profile_signature_algorithm")]
     pub algorithm: String,
     pub public_key_base64: String,
