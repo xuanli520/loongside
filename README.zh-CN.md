@@ -1,255 +1,196 @@
-# 🐉 Loong - 面向垂域智能体的安全基座
+# 龙鉴 (Loong Sentinel)
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./assets/logo/loong-logo-dark.png" />
-    <source media="(prefers-color-scheme: light)" srcset="./assets/logo/loong-logo-light.png" />
-    <img src="./assets/logo/loong-logo-light.png" alt="Loong" width="280" />
-  </picture>
+  <strong>AI 驱动的多渠道舆情监测系统</strong>
 </p>
-<p align="center"><strong><em>“发轫于东，以会群友”</em></strong></p>
 
 <p align="center">
-  <a href="https://github.com/eastreams/loong/actions/workflows/ci.yml?branch=dev"><img src="https://img.shields.io/github/actions/workflow/status/eastreams/loong/ci.yml?branch=dev&label=build&style=flat-square" alt="Build" /></a>
+  <a href="https://github.com/xuanli520/loongside"><img src="https://img.shields.io/github/stars/xuanli520/loongside?style=flat-square" alt="Stars" /></a>
   <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square" alt="License: MIT" /></a>
   <img src="https://img.shields.io/badge/rust-edition%202024-orange.svg?style=flat-square" alt="Rust Edition 2024" />
-  <a href="https://github.com/eastreams/loong/releases"><img src="https://img.shields.io/github/v/release/eastreams/loong?label=version&color=yellow&include_prereleases&style=flat-square" alt="Version" /></a>
-  <br/>
-  <a href="https://x.com/loongclawai"><img src="https://img.shields.io/badge/Follow-loongclawai-000000?logo=x&logoColor=white&style=flat-square" alt="X" /></a>
-  <a href="https://t.me/loongclaw"><img src="https://img.shields.io/badge/Telegram-loongclaw-26A5E4?logo=telegram&logoColor=white&style=flat-square" alt="Telegram" /></a>
-  <a href="https://discord.gg/7kSTX9mca"><img src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white&style=flat-square" alt="Discord" /></a>
-  <a href="https://www.reddit.com/r/LoongClaw"><img src="https://img.shields.io/badge/Reddit-r%2Floongclaw-FF4500?logo=reddit&logoColor=white&style=flat-square" alt="Reddit" /></a>
-  <br/>
-  <a href="https://xhslink.com/m/1dqFqF1IKDk"><img src="https://img.shields.io/badge/Xiaohongshu-follow-FF2442?logo=xiaohongshu&logoColor=white&style=flat-square" alt="Xiaohongshu" /></a>
-  <a href="https://loongclaw.ai/feishu.jpg"><img src="https://img.shields.io/badge/Feishu-QR-3370FF?logo=lark&logoColor=white&style=flat-square" alt="Feishu QR" /></a>
-  <a href="https://loongclaw.ai/wechat.jpg"><img src="https://img.shields.io/badge/WeChat-QR-07C160?logo=wechat&logoColor=white&style=flat-square" alt="WeChat QR" /></a>
+  <img src="https://img.shields.io/badge/status-alpha-yellow.svg?style=flat-square" alt="Status: Alpha" />
 </p>
-
-***安全、可扩展、可持续演进***——Loong 是一套基于 Rust 构建的垂域智能体基座，在安全可控的基础上承载长程工作流构建、复合任务执行与闭环改进，让人与 AI 在真实场景中持续协作。
 
 <p align="center">
   <a href="README.md">English</a> |
   <a href="README.zh-CN.md">简体中文</a>
 </p>
 
-<p align="center">
-  <a href="site/index.mdx">文档总览</a> •
-  <a href="site/get-started/overview.mdx">快速上手</a> •
-  <a href="site/use-loong/configuration-patterns.mdx">配置模式</a> •
-  <a href="site/use-loong/common-setups.mdx">常见路线</a> •
-  <a href="site/build-on-loong/overview.mdx">扩展 Loong</a> •
-  <a href="CONTRIBUTING.md">参与贡献</a>
-</p>
+---
 
-<a id="why-loong"></a>
-## 为什么选 Loong
+龙鉴是基于 [Loong](https://github.com/eastreams/loong) 智能体底座构建的轻量级多渠道舆情监测系统。通过 AI 驱动的情感分析、事件聚类与知识图谱投影，实现从信息采集、实体归因、关系追踪到预警推送的全链路自动化。
 
-**因为它已经具备你在观察、操作、扩展过程中所需的核心能力：**
+## 核心能力
 
-- **🚀 开箱即用的丰富配置**：内置 42+ provider、25+ 接入频道，几条命令即可跑通。
-- **👀 透明可控的操控能力**：`audit`、`tasks`、`skills`、`plugins`、`channels`、`runtime-snapshot` 以及 gateway control 都暴露为直接可用的命令。
-- **🛡️ 安全可控的基座能力**：provider 选择、工具、记忆、接入频道、审批、策略、审计都在明确的运行时边界之内。
+- **多渠道采集** — Telegram、飞书/Lark、Discord（通过 Loong 底座可扩展至 20+ 渠道）
+- **AI 情感分析** — 正/负/中性三分类 + 立场检测，准确率 >85%，单条延迟 <2s
+- **实体与关系抽取** — 命名实体、别名、关系、证据片段、时间表达
+- **事件聚类与趋势** — 语义嵌入 + 增量聚类，支持 1h/6h/24h 时间窗口趋势
+- **分级预警** — 关注/警告/紧急三级，触发后 <60s 送达指定渠道
+- **知识图谱** — 实体-事件-来源关系图，支持可解释查询路径
+- **调查工作台** — 混合检索：PostgreSQL 筛选 + 向量召回 + Neo4j 上下文扩展
 
-**也因为无论你是小白还是极客，它都适合你：**
-
-- **⚡ 易于上手**：几条命令就能跑通，兼容 OpenClaw、Claude Code、Codex、OpenCode 等同类 AI 工具的已有配置。
-- **🧭 边界透明**：助手、网关、接入频道各自独立，不会混在一起。
-- **🔌 内核与扩展分离**：provider、工具、接入频道、记忆、策略独立于内核，按需编译组合。
-- **🌱 不是玩具**：面向长期使用设计，能跟着你的需求一起成长。
-
-另外，如果你想读更完整的公开定位和产品立场，可以看
-[Loong 的缘起与定位](site/reference/why-loong.mdx)。
-
-## 赞助商
-
-<p align="center">
-  <a href="https://www.volcengine.com/activity/codingplan?utm_campaign=loong&utm_content=loong&utm_medium=devrel&utm_source=OWO&utm_term=loong">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="assets/sponsors_logo/volcengine/volcengine-logo-dark-zh.png"/>
-      <img src="assets/sponsors_logo/volcengine/volcengine-logo-light-zh.png" alt="火山引擎" height="44"/>
-    </picture>
-  </a>
-  <span>&emsp;&emsp;&emsp;</span>
-  <a href="https://www.feishu.cn">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="assets/sponsors_logo/feishu/feishu-logo-dark-zh.png"/>
-      <img src="assets/sponsors_logo/feishu/feishu-logo-light-zh.png" alt="飞书" height="44"/>
-    </picture>
-  </a>
-</p>
-
-<a id="quick-start"></a>
-## 快速开始
-
-> Loong 当前只支持 `loong` 这个命令行入口。
-
-### 脚本安装（推荐）
-
-Linux 或 macOS：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/eastreams/loong/dev/scripts/install.sh | bash -s -- --onboard
-```
-
-Windows PowerShell：
-
-```powershell
-$script = Join-Path $env:TEMP "loong-install.ps1"
-Invoke-WebRequest https://raw.githubusercontent.com/eastreams/loong/dev/scripts/install.ps1 -OutFile $script
-pwsh $script -Onboard
-```
-
-从源码安装：
-
-确保系统有 C 链接器（Rust 编译需要）：
-
-```bash
-# Debian / Ubuntu
-sudo apt update && sudo apt install build-essential
-```
-
-```bash
-# Fedora
-sudo dnf groupinstall "Development Tools"
-```
-
-```bash
-# macOS
-xcode-select --install
-```
-
-安装 Rust 工具链（已安装可跳过）：
-
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"
-```
-
-构建并安装：
-
-```bash
-bash scripts/install.sh --source --onboard
-```
-
-```bash
-# 或者只通过 Cargo 安装（不含 onboard 引导）
-cargo install --path crates/daemon
-```
-
-### 首次运行
-
-```bash
-loong onboard                # 交互式初始化，配置 provider 和 model
-```
-
-```bash
-loong ask --message "用一句话总结这个仓库"  # 单轮提问，验证配置是否生效
-loong chat                   # 进入多轮对话
-loong doctor --fix           # 检查环境并自动修复常见问题
-loong update                 # 把当前安装升级到最新稳定版 GitHub Release
-```
-
-`loong update` 只会安装最新稳定版 GitHub Release，绝不会切到 pre-release。
-
-走完 `onboard` 就够了 —— 它会把一份能跑的配置写到 `~/.loong/config.toml`，不需要你手写 TOML。如果你想再加一个 provider 或接入频道，下面几段是 dev 分支当前的实际形态。
-
-#### Providers
-
-```toml
-active_provider = "openai"
-
-[providers.openai]
-kind = "openai"
-api_key = { env = "OPENAI_API_KEY" }
-model = "auto"
-
-[providers.volcengine]
-kind = "volcengine"
-api_key = { env = "ARK_API_KEY" }
-model = "auto"
-```
-
-- `active_provider` 决定当前运行的 lane，直接改字段或重跑一次 `loong onboard` 都能切换。
-- `api_key = { env = "OPENAI_API_KEY" }` 表示从环境变量读取；写成 `api_key = "OPENAI_API_KEY"` 会被当成字面量密钥值，这是常见踩坑。
-- `model = "auto"` 走 provider 端自动发现；如果你所在区域或账号下自动发现不稳，改成 `model = "<具体 id>"` 固定即可。
-
-#### 接入频道 —— 以飞书为例
-
-推荐先走命令行二维码接入：
-
-```bash
-loong feishu onboard
-```
-
-这条命令会在终端里展示二维码，走官方 Feishu/Lark 注册接口创建 bot app，并把生成的凭据写回 `loong.toml`。如果你已经有现成凭据，也可以继续用 `loong feishu onboard --manual --app-id ... --app-secret ...` 手动回填。
-
-```toml
-[feishu]
-enabled = true
-domain = "feishu"                         # 国际版 Lark 改成 "lark"
-mode = "websocket"
-receive_id_type = "chat_id"
-app_id = { env = "FEISHU_APP_ID" }
-app_secret = { env = "FEISHU_APP_SECRET" }
-allowed_chat_ids = ["oc_ops_room"]
-```
-
-先快速验证一下：
-
-```bash
-loong doctor
-loong feishu-send --receive-id "ou_example_user" --text "hello from loong"
-loong feishu-serve
-```
-
-完整的 provider / channel 矩阵、多账号配置与长期托管模型，继续看下面的 [文档](#documentation) 表。
-
-<a id="documentation"></a>
-## 文档
-
-| | |
-| --- | --- |
-| 快速上手 | [Get Started](site/get-started/overview.mdx)，或直接用 `onboard` / `ask` / `chat` / `doctor` |
-| 完整路径 | [Common Setups](site/use-loong/common-setups.mdx) |
-| 选 Provider | [Provider Guides](site/use-loong/provider-guides/index.mdx) 与 [Provider Recipes](site/use-loong/provider-recipes.mdx) |
-| 接入频道 | [Channel Guides](site/use-loong/channel-guides/index.mdx) 与 [Channel Recipes](site/use-loong/channel-recipes.mdx) |
-| 长期托管 | [Gateway 与监督](site/use-loong/gateway-and-supervision.mdx) |
-| 设计立场 | [Why Loong](site/reference/why-loong.mdx) |
-| 架构与扩展 | [Build On Loong](site/build-on-loong/overview.mdx) |
-| 参考资料 | [Reference](site/reference/overview.mdx) |
-
-<a id="architecture"></a>
-## 架构
-
-Loong 是一个 7-crate Rust workspace，依赖图严格无环，围绕一个受治理的
-kernel 组织，将 contract、安全、执行、编排几个关注点分开。
+## 架构总览
 
 ```text
-contracts  (stable contract vocabulary)
-├── kernel   -> contracts
-├── protocol (independent transport foundation)
-├── app      -> contracts, kernel
-├── spec     -> contracts, kernel, protocol
-├── bench    -> kernel, spec
-└── daemon   -> app, bench, contracts, kernel, spec
+┌──────────────────────────────────────────────────────────────────┐
+│                    Web 前端 (React + TypeScript)                  │
+│  登录鉴权 │ 仪表盘 │ 预警管理 │ 图谱可视化 │ 趋势分析 │ 调查台  │
+├──────────────────────────────────────────────────────────────────┤
+│                    业务逻辑层                                     │
+│  去重清洗 │ 情感分析 │ 实体/关系抽取 │ 事件聚类 │ 预警引擎        │
+├──────────────────────────────────────────────────────────────────┤
+│                    数据平面                                       │
+│  PostgreSQL FactStore │ Neo4j GraphStore │ 向量/HNSW             │
+├──────────────────────────────────────────────────────────────────┤
+│                    Loong 智能体底座                               │
+│  Channel(20+) │ Provider(40+) │ Spec │ Memory │ Kernel │ Gateway │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-ownership 分区、分层执行模型（L0–L9）以及设计原则，见
-[ARCHITECTURE.md](ARCHITECTURE.md)。
+### 核心设计原则
+
+- PostgreSQL 是舆情业务唯一事实源
+- Neo4j 是异步投影的关系读模型——投影失败不阻塞事实入库与预警
+- 禁止 PostgreSQL 与 Neo4j 同步双写，所有图谱变化从 outbox 重放
+- `tenant_id` 贯穿 FactStore、GraphStore、outbox、checkpoint 与 API 边界
+- 向量索引回答"语义上像不像"，图谱回答"关系上怎么连"，PostgreSQL 回答"事实状态是什么"
+
+## 技术栈
+
+| 层级 | 技术 |
+|------|------|
+| 后端 | Rust (Edition 2024)，严格 Clippy，`#![forbid(unsafe_code)]` |
+| 事实存储 | PostgreSQL 16+ |
+| 图谱存储 | Neo4j 5.x (neo4rs 驱动) |
+| HTTP 框架 | Axum 0.8 |
+| 前端 | React 18 + TypeScript, Vite |
+| UI 组件库 | Ant Design 5.x |
+| 状态管理 | Zustand |
+| 图谱可视化 | Cytoscape.js |
+| 图表 | ECharts |
+| 向量检索 | pgvector + HNSW |
+| 编排引擎 | Loong Spec（重试、熔断、自适应并发） |
+| 容器化 | Docker + docker-compose |
+
+## 快速开始
+
+### 前置条件
+
+- Rust 工具链 (edition 2024)
+- PostgreSQL 16+
+- Neo4j 5.x（Phase 2+ 需要）
+- Docker + docker-compose（推荐）
+
+### 开发环境搭建
+
+```bash
+# 克隆仓库
+git clone https://github.com/xuanli520/loongside.git
+cd loongside
+
+# 启动基础设施
+docker-compose up -d postgres neo4j
+
+# 构建 sentinel pack
+cargo build --workspace
+
+# 运行数据库迁移
+cargo run --bin daemon -- migrate
+
+# 启动服务
+cargo run --bin daemon -- sentinel serve
+```
+
+### 前端
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+## 数据流
+
+```text
+[社媒 / 新闻 / 论坛]
+        │
+        ▼
+   源适配采集 ──── Channel.serve / Spec cron
+        │
+        ▼
+   去重 / 清洗 ──── URL 指纹 + SimHash + 正文提取
+        │
+        ├──────────────┬──────────────────────────┐
+        ▼              ▼                          ▼
+  PostgreSQL      情感/立场分析              实体/关系抽取
+  FactStore            │                          │
+        │              └──────────┬──────────────┘
+        │                         ▼
+        │                    事件聚类 / 消歧
+        │                         │
+        │                         ▼
+        │                    热度评估 / 预警引擎
+        │                         │
+        │                         ├──────► Channel.send（预警推送）
+        │                         └──────► Gateway API
+        │
+        └── graph_outbox ────────────────► 投影 Worker
+                                                │
+                                                ▼
+                                           Neo4j GraphStore
+```
+
+## API 接口
+
+| 接口 | 用途 |
+|------|------|
+| `GET /events/{id}/graph?depth=2&window=24h` | 事件子图：实体、来源、文档、相邻事件 |
+| `GET /events/{id}/explain` | 预警解释链：alert → event → entity → mention → document → source |
+| `GET /entities/{id}/related-events?window=24h` | 实体关联事件、情感倾向、预警次数 |
+| `GET /sources/{id}/propagation?event_id=...` | 事件传播来源与扩散时间线 |
+| `POST /investigations/search` | 混合检索：PG 候选 + 向量召回 + Neo4j 扩展 |
+| `GET /projection/status` | outbox 积压、投影延迟、checkpoint、重试状态 |
+
+## 路线图
+
+| 阶段 | 重点 | 状态 |
+|------|------|------|
+| Phase 0 | FactStore 骨架 + 前端初始化 | 进行中 |
+| Phase 1 | MVP — 采集 + 分析 + 预警 | 计划中 |
+| Phase 2 | 图谱投影 + 图查询 + 趋势 | 计划中 |
+| Phase 2.5 | memory-postgres 迁移（b 版） | 计划中 |
+| Phase 3 | 加固 + 扩展 | 计划中 |
+
+## 项目结构
+
+```text
+loongside/
+├── crates/
+│   ├── contracts/     # 稳定契约词汇表
+│   ├── kernel/        # 策略引擎、审计、执行平面
+│   ├── protocol/      # 传输基础
+│   ├── app/           # Provider、频道、工具、sentinel pack
+│   ├── spec/          # 编排引擎、WASM 运行时
+│   ├── bench/         # 基准测试
+│   └── daemon/        # CLI 二进制 + gateway 服务
+├── frontend/          # React + TypeScript Web 应用
+├── docs/              # 设计文档、蓝图、项目计划
+├── scripts/           # 构建与部署脚本
+└── tests/             # 集成测试
+```
+
+## 文档
+
+- [系统蓝图](../docs/BLUEPRINT.md) — 完整系统蓝图与 schema 设计
+- [项目计划](../docs/PROJECT_PLAN.md) — 4 周冲刺计划与团队分工
+- [决策指南](../docs/DECISION_GUIDE.md) — 架构决策与实施指南
+- [架构分析](../docs/ARCHITECTURE_ANALYSIS.md) — Loong 底座复用分析
 
 ## 贡献
 
-欢迎贡献。先从 [CONTRIBUTING.md](CONTRIBUTING.md) 开始。
+欢迎贡献。工作流与规范见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-如果你想先看哪些方向最值得补强，可以读 [Contribution Areas](site/build-on-loong/contribution-areas.mdx)。
+## 许可证
 
-## Star History
-
-<p align="center">
-  <a href="https://star-history.com/#eastreams/loong&Date">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=eastreams/loong&type=Date&theme=dark"/>
-      <img src="https://api.star-history.com/svg?repos=eastreams/loong&type=Date" alt="Star History Chart"/>
-    </picture>
-  </a>
-</p>
+MIT
