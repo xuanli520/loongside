@@ -350,6 +350,56 @@ jobs:
       - name: Docs build
         run: cargo doc --workspace --no-deps
 
+  sentinel-integration-test:
+    needs: changes
+    if: ${{ needs.changes.outputs.run_rust_jobs == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: loong
+          POSTGRES_PASSWORD: loong_test
+          POSTGRES_DB: loong_sentinel_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      neo4j:
+        image: neo4j:5-community
+        env:
+          NEO4J_AUTH: neo4j/loong_test
+        ports:
+          - 7687:7687
+        options: >-
+          --health-cmd "cypher-shell -u neo4j -p loong_test 'RETURN 1'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@a0b273b48ed29de4470960879e8381ff45632f26
+
+      - name: Cache Cargo Artifacts
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+
+      - name: Run sentinel integration tests
+        env:
+          DATABASE_URL: postgres://loong:loong_test@localhost:5432/loong_sentinel_test
+          NEO4J_URI: bolt://localhost:7687
+          NEO4J_USER: neo4j
+          NEO4J_PASSWORD: loong_test
+        run: cargo test --workspace --all-features --locked -- sentinel
+
   build:
     name: build
     if: ${{ always() }}
@@ -363,6 +413,7 @@ jobs:
       - android-termux-build
       - docs-build
       - docs-site
+      - sentinel-integration-test
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -378,6 +429,7 @@ jobs:
           ANDROID_TERMUX_BUILD_RESULT: ${{ needs.android-termux-build.result }}
           DOCS_BUILD_RESULT: ${{ needs.docs-build.result }}
           DOCS_SITE_RESULT: ${{ needs.docs-site.result }}
+          SENTINEL_INTEGRATION_TEST_RESULT: ${{ needs.sentinel-integration-test.result }}
         run: |
           set -euo pipefail
 
@@ -408,3 +460,4 @@ jobs:
           check_optional_result android-termux-build "$ANDROID_TERMUX_BUILD_RESULT"
           check_optional_result docs-build "$DOCS_BUILD_RESULT"
           check_optional_result docs-site "$DOCS_SITE_RESULT"
+          check_optional_result sentinel-integration-test "$SENTINEL_INTEGRATION_TEST_RESULT"
