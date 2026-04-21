@@ -1,4 +1,4 @@
-# 🐉 Loong - Rust Base for Vertical AI Agents
+# Loong
 
 <p align="center">
   <picture>
@@ -25,12 +25,16 @@
   <a href="https://loongclaw.ai/wechat.jpg"><img src="https://img.shields.io/badge/WeChat-QR-07C160?logo=wechat&logoColor=white&style=flat-square" alt="WeChat QR" /></a>
 </p>
 
-***Secure, extensible, and sustainably evolvable*** — Loong is an agent base for vertical AI agents, built in Rust. On a secure and controlled base, it supports longer-horizon workflow construction, compound task execution, and closed-loop improvement — enabling people and AI to collaborate in real-world scenarios.
-
 <p align="center">
   <a href="README.md">English</a> |
   <a href="README.zh-CN.md">简体中文</a>
 </p>
+
+---
+
+Loong is a layered Agentic OS kernel built in Rust. It provides a secure, governed runtime for vertical AI agents — supporting long-horizon workflow construction, compound task execution, and closed-loop improvement across real-world scenarios.
+
+Unlike simple LLM wrappers, Loong separates contracts, security, execution, and orchestration into distinct layers with explicit boundaries. Every operation routes through capability-gated policy and audit. Extensions (providers, tools, channels, memory, plugins) live outside the kernel and compose without core mutation.
 
 <p align="center">
   <a href="site/index.mdx">Documentation</a> •
@@ -44,21 +48,23 @@
 <a id="why-loong"></a>
 ## Why Loong
 
-**Because it already has the core capabilities you need to inspect, operate, and extend:**
+**Core capabilities, ready to inspect, operate, and extend:**
 
-- **🚀 Rich configuration out of the box**: 42+ built-in providers, 25+ channels — up and running in a few commands.
-- **👀 Transparent and controllable**: `audit`, `tasks`, `skills`, `plugins`, `channels`, `runtime-snapshot`, and gateway control are all exposed as directly usable commands.
-- **🛡️ Secure and controllable base**: provider selection, tools, memory, channels, approvals, policy, and audit operate within explicit runtime boundaries.
+- **42+ built-in providers** — OpenAI, Anthropic, Volcengine, DeepSeek, Gemini, local models, and more. Failover and rate limiting included.
+- **25+ channel adapters** — Telegram, Feishu/Lark, Discord, Slack, WeChat, WeCom, Matrix, WhatsApp, Email, IRC, Nostr, Teams, iMessage, Twitch, and others.
+- **Governed execution** — every tool call passes through the kernel's policy engine with capability tokens, audit trail, and human approval gates.
+- **WASM plugin sandbox** — run untrusted extensions in Wasmtime with policy-driven resource limits.
+- **Programmatic orchestration** — retry, circuit-breaker, adaptive concurrency, priority scheduling, and rate shaping for compound workflows.
+- **60+ CLI subcommands** — `audit`, `tasks`, `skills`, `plugins`, `channels`, `runtime-snapshot`, `gateway`, `doctor`, and more.
 
-**Also because whether you are a beginner or a power user, it fits you:**
+**Fits beginners and power users alike:**
 
-- **⚡ Easy to start**: a few commands to get running, compatible with existing configurations from OpenClaw, Claude Code, Codex, OpenCode, and other similar AI tools.
-- **🧭 Transparent boundaries**: assistant, gateway, and channels operate independently — never tangled together.
-- **🔌 Core and extensions are separate**: providers, tools, channels, memory, and policy live outside the kernel — compile and compose as needed.
-- **🌱 Not a toy**: designed for long-term use, grows with your needs over time.
+- **Easy to start** — `loong onboard` writes a working config; compatible with existing OpenClaw, Claude Code, Codex, and OpenCode configurations.
+- **Transparent boundaries** — assistant, gateway, and channels operate independently.
+- **Core and extensions are separate** — providers, tools, channels, memory, and policy live outside the kernel. Compile and compose as needed.
+- **Not a toy** — designed for long-term use, grows with your needs.
 
-Also, if you want the longer public rationale behind this positioning, read
-[Why Loong](site/reference/why-loong.mdx).
+For the full public rationale, read [Why Loong](site/reference/why-loong.mdx).
 
 ## Sponsors
 
@@ -81,7 +87,7 @@ Also, if you want the longer public rationale behind this positioning, read
 <a id="quick-start"></a>
 ## Quick Start
 
-> Loong uses `loong` as the only supported command-line entrypoint.
+> Loong uses `loong` as the only command-line entrypoint.
 
 ### Script Install (Recommended)
 
@@ -99,21 +105,17 @@ Invoke-WebRequest https://raw.githubusercontent.com/eastreams/loong/dev/scripts/
 pwsh $script -Onboard
 ```
 
-From source:
+### From Source
 
 Ensure your system has a C linker (required by Rust):
 
 ```bash
 # Debian / Ubuntu
 sudo apt update && sudo apt install build-essential
-```
 
-```bash
 # Fedora
 sudo dnf groupinstall "Development Tools"
-```
 
-```bash
 # macOS
 xcode-select --install
 ```
@@ -136,24 +138,19 @@ bash scripts/install.sh --source --onboard
 cargo install --path crates/daemon
 ```
 
-### First Successful Flow
+### First Run
 
 ```bash
 loong onboard                # Interactive setup — configure provider and model
+loong ask --message "Summarize this repo in one sentence."  # Verify config
+loong chat                   # Multi-turn conversation
+loong doctor --fix           # Check environment and auto-fix issues
+loong update                 # Upgrade to latest stable release
 ```
 
-```bash
-loong ask --message "Summarize this repo in one sentence."  # Single-turn query to verify config
-loong chat                   # Start a multi-turn conversation
-loong doctor --fix           # Check environment and auto-fix common issues
-loong update                 # Replace this install with the latest stable GitHub release
-```
+### Configuration
 
-`loong update` always targets the latest stable GitHub release and never installs a pre-release.
-
-Running `onboard` is enough for the golden path — it writes a working config to `~/.loong/config.toml` without asking you to hand-edit TOML. The snippets below show what that file looks like on `dev` today, when you want to add another provider or wire up a channel.
-
-#### Providers
+`loong onboard` writes a working config to `~/.loong/config.toml`. To add providers or channels manually:
 
 ```toml
 active_provider = "openai"
@@ -169,40 +166,13 @@ api_key = { env = "ARK_API_KEY" }
 model = "auto"
 ```
 
-- `active_provider` selects which lane runs; switch by editing the field or by running `loong onboard` again.
-- `api_key = { env = "OPENAI_API_KEY" }` reads the secret from that environment variable. `api_key = "OPENAI_API_KEY"` would instead treat the string as the literal key value — a common pitfall.
-- `model = "auto"` uses provider-side discovery; pin `model = "<id>"` when discovery is unreliable for your region or account.
-
-#### Channels — Lark
-
-Recommended first-run setup:
+Channel example (Lark):
 
 ```bash
-loong feishu onboard --domain lark
+loong feishu onboard --domain lark   # QR-code flow, auto-creates bot app
 ```
 
-That flow shows an in-terminal QR code, creates the bot app through the official Lark/Feishu registration API, and writes the generated credentials into `loong.toml`. Manual fallback is still available through `loong feishu onboard --manual --app-id ... --app-secret ...`.
-
-```toml
-[feishu]
-enabled = true
-domain = "lark"                           # use "feishu" for the China Feishu lane
-mode = "websocket"
-receive_id_type = "chat_id"
-app_id = { env = "LARK_APP_ID" }
-app_secret = { env = "LARK_APP_SECRET" }
-allowed_chat_ids = ["oc_ops_room"]
-```
-
-Smoke-test before anything else:
-
-```bash
-loong doctor
-loong feishu-send --receive-id "ou_example_user" --text "hello from loong"
-loong feishu-serve
-```
-
-For the full provider and channel matrices, multi-account setups, and the long-running delivery model, see the [Documentation](#documentation) table below.
+For the full provider and channel matrices, see [Documentation](#documentation).
 
 <a id="documentation"></a>
 ## Documentation
@@ -221,22 +191,60 @@ For the full provider and channel matrices, multi-account setups, and the long-r
 <a id="architecture"></a>
 ## Architecture
 
-Loong is a 7-crate Rust workspace with a strict acyclic dependency graph,
-organized around a governed kernel that separates contracts, security,
-execution, and orchestration.
+Loong is an 8-crate Rust workspace with a strict acyclic dependency graph, organized around a governed kernel that separates contracts, security, execution, and orchestration.
 
 ```text
-contracts  (stable contract vocabulary)
-├── kernel   -> contracts
-├── protocol (independent transport foundation)
-├── app      -> contracts, kernel
-├── spec     -> contracts, kernel, protocol
-├── bench    -> kernel, spec
-└── daemon   -> app, bench, contracts, kernel, spec
+contracts        (stable contract vocabulary — zero internal deps)
+├── kernel          -> contracts
+├── protocol        (independent transport foundation)
+├── bridge-runtime  -> contracts, kernel, protocol
+├── app             -> contracts, kernel
+├── spec            -> contracts, kernel, protocol, bridge-runtime
+├── bench           -> kernel, spec
+└── daemon          -> all of the above
 ```
 
-For ownership zones, the layered execution model (L0–L9), and design
-principles, see [ARCHITECTURE.md](ARCHITECTURE.md).
+The runtime is organized into layers L0–L9:
+
+| Layer | Responsibility |
+|-------|---------------|
+| L0 | Contract vocabulary (stable ABI, backward-compatible) |
+| L1 | Security & governance (policy engine, capability tokens, approval gates) |
+| L2 | Execution planes (Runtime / Tool / Memory / Connector) |
+| L3 | Orchestration (harness routing, pack boundaries) |
+| L4 | Observability (audit timeline, deterministic clocking) |
+| L5 | Vertical packs (domain packaging via manifests) |
+| L6 | Integration control (autonomous provisioning, hotplug) |
+| L7 | Plugin translation (multi-language IR, bridge-kind inference) |
+| L8 | Self-awareness (architecture guard, immutable-core protection) |
+| L9 | Bootstrap (plugin activation lifecycle) |
+
+For ownership zones and design principles, see [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Security
+
+- `#![forbid(unsafe_code)]` across the workspace
+- Capability-based access with type-system tokens and generation-based revocation
+- Policy engine gate on every kernel-bound tool call
+- Plugin security scan with `block_on_high`
+- External profile integrity (checksum + ed25519 signature verification)
+- WASM sandbox with policy-driven resource limits
+- SSRF guardrails (no-proxy, private-host blocking)
+- Durable JSONL audit trail with SIEM export
+
+See [SECURITY.md](SECURITY.md) for the full model.
+
+## Platform Support
+
+| Target | Status |
+|--------|--------|
+| Linux x86_64 (gnu) | Supported |
+| Linux x86_64 (musl) | Supported |
+| Linux aarch64 | Supported |
+| Android aarch64 | Supported |
+| macOS x86_64 | Supported |
+| macOS aarch64 (Apple Silicon) | Supported |
+| Windows x86_64 | Supported |
 
 <a id="contributing"></a>
 ## Contributing

@@ -1,4 +1,4 @@
-# 🐉 Loong - 面向垂域智能体的安全基座
+# Loong
 
 <p align="center">
   <picture>
@@ -7,7 +7,7 @@
     <img src="./assets/logo/loong-logo-light.png" alt="Loong" width="280" />
   </picture>
 </p>
-<p align="center"><strong><em>“发轫于东，以会群友”</em></strong></p>
+<p align="center"><strong><em>"发轫于东，以会群友"</em></strong></p>
 
 <p align="center">
   <a href="https://github.com/eastreams/loong/actions/workflows/ci.yml?branch=dev"><img src="https://img.shields.io/github/actions/workflow/status/eastreams/loong/ci.yml?branch=dev&label=build&style=flat-square" alt="Build" /></a>
@@ -25,12 +25,16 @@
   <a href="https://loongclaw.ai/wechat.jpg"><img src="https://img.shields.io/badge/WeChat-QR-07C160?logo=wechat&logoColor=white&style=flat-square" alt="WeChat QR" /></a>
 </p>
 
-***安全、可扩展、可持续演进***——Loong 是一套基于 Rust 构建的垂域智能体基座，在安全可控的基础上承载长程工作流构建、复合任务执行与闭环改进，让人与 AI 在真实场景中持续协作。
-
 <p align="center">
   <a href="README.md">English</a> |
   <a href="README.zh-CN.md">简体中文</a>
 </p>
+
+---
+
+Loong 是一套基于 Rust 构建的分层智能体操作系统内核，为垂域 AI 智能体提供安全、受治理的运行时——承载长程工作流构建、复合任务执行与闭环改进，让人与 AI 在真实场景中持续协作。
+
+与简单的 LLM 封装不同，Loong 将契约、安全、执行、编排分离到各自独立的层级，边界明确。每一次操作都经过能力令牌门控的策略引擎和审计链路。扩展（provider、工具、频道、记忆、插件）全部位于内核之外，无需修改核心即可组合。
 
 <p align="center">
   <a href="site/index.mdx">文档总览</a> •
@@ -44,21 +48,23 @@
 <a id="why-loong"></a>
 ## 为什么选 Loong
 
-**因为它已经具备你在观察、操作、扩展过程中所需的核心能力：**
+**核心能力开箱即用，可观察、可操作、可扩展：**
 
-- **🚀 开箱即用的丰富配置**：内置 42+ provider、25+ 接入频道，几条命令即可跑通。
-- **👀 透明可控的操控能力**：`audit`、`tasks`、`skills`、`plugins`、`channels`、`runtime-snapshot` 以及 gateway control 都暴露为直接可用的命令。
-- **🛡️ 安全可控的基座能力**：provider 选择、工具、记忆、接入频道、审批、策略、审计都在明确的运行时边界之内。
+- **42+ 内置 provider** — OpenAI、Anthropic、火山引擎、DeepSeek、Gemini、本地模型等，内置故障转移与限流。
+- **25+ 接入频道** — Telegram、飞书/Lark、Discord、Slack、微信、企业微信、Matrix、WhatsApp、邮件、IRC、Nostr、Teams、iMessage、Twitch 等。
+- **受治理的执行** — 每次工具调用都经过内核策略引擎，配合能力令牌、审计链路和人工审批门控。
+- **WASM 插件沙箱** — 通过 Wasmtime 运行不受信扩展，策略驱动的资源限制。
+- **编程式编排** — 重试、熔断、自适应并发、优先级调度、速率整形，支撑复合工作流。
+- **60+ CLI 子命令** — `audit`、`tasks`、`skills`、`plugins`、`channels`、`runtime-snapshot`、`gateway`、`doctor` 等。
 
-**也因为无论你是小白还是极客，它都适合你：**
+**无论你是新手还是极客，都适合你：**
 
-- **⚡ 易于上手**：几条命令就能跑通，兼容 OpenClaw、Claude Code、Codex、OpenCode 等同类 AI 工具的已有配置。
-- **🧭 边界透明**：助手、网关、接入频道各自独立，不会混在一起。
-- **🔌 内核与扩展分离**：provider、工具、接入频道、记忆、策略独立于内核，按需编译组合。
-- **🌱 不是玩具**：面向长期使用设计，能跟着你的需求一起成长。
+- **易于上手** — `loong onboard` 即写入可用配置；兼容 OpenClaw、Claude Code、Codex、OpenCode 等已有配置。
+- **边界透明** — 助手、网关、接入频道各自独立，互不纠缠。
+- **内核与扩展分离** — provider、工具、频道、记忆、策略独立于内核，按需编译组合。
+- **不是玩具** — 面向长期使用设计，能跟着你的需求一起成长。
 
-另外，如果你想读更完整的公开定位和产品立场，可以看
-[Loong 的缘起与定位](site/reference/why-loong.mdx)。
+完整的公开定位与产品立场，见 [Loong 的缘起与定位](site/reference/why-loong.mdx)。
 
 ## 赞助商
 
@@ -99,21 +105,17 @@ Invoke-WebRequest https://raw.githubusercontent.com/eastreams/loong/dev/scripts/
 pwsh $script -Onboard
 ```
 
-从源码安装：
+### 从源码安装
 
 确保系统有 C 链接器（Rust 编译需要）：
 
 ```bash
 # Debian / Ubuntu
 sudo apt update && sudo apt install build-essential
-```
 
-```bash
 # Fedora
 sudo dnf groupinstall "Development Tools"
-```
 
-```bash
 # macOS
 xcode-select --install
 ```
@@ -140,20 +142,15 @@ cargo install --path crates/daemon
 
 ```bash
 loong onboard                # 交互式初始化，配置 provider 和 model
-```
-
-```bash
-loong ask --message "用一句话总结这个仓库"  # 单轮提问，验证配置是否生效
+loong ask --message "用一句话总结这个仓库"  # 单轮提问，验证配置
 loong chat                   # 进入多轮对话
 loong doctor --fix           # 检查环境并自动修复常见问题
-loong update                 # 把当前安装升级到最新稳定版 GitHub Release
+loong update                 # 升级到最新稳定版
 ```
 
-`loong update` 只会安装最新稳定版 GitHub Release，绝不会切到 pre-release。
+### 配置
 
-走完 `onboard` 就够了 —— 它会把一份能跑的配置写到 `~/.loong/config.toml`，不需要你手写 TOML。如果你想再加一个 provider 或接入频道，下面几段是 dev 分支当前的实际形态。
-
-#### Providers
+`loong onboard` 会把可用配置写到 `~/.loong/config.toml`。手动添加 provider 或频道：
 
 ```toml
 active_provider = "openai"
@@ -169,40 +166,13 @@ api_key = { env = "ARK_API_KEY" }
 model = "auto"
 ```
 
-- `active_provider` 决定当前运行的 lane，直接改字段或重跑一次 `loong onboard` 都能切换。
-- `api_key = { env = "OPENAI_API_KEY" }` 表示从环境变量读取；写成 `api_key = "OPENAI_API_KEY"` 会被当成字面量密钥值，这是常见踩坑。
-- `model = "auto"` 走 provider 端自动发现；如果你所在区域或账号下自动发现不稳，改成 `model = "<具体 id>"` 固定即可。
-
-#### 接入频道 —— 以飞书为例
-
-推荐先走命令行二维码接入：
+接入频道示例（飞书）：
 
 ```bash
-loong feishu onboard
+loong feishu onboard         # 终端二维码流程，自动创建 bot app
 ```
 
-这条命令会在终端里展示二维码，走官方 Feishu/Lark 注册接口创建 bot app，并把生成的凭据写回 `loong.toml`。如果你已经有现成凭据，也可以继续用 `loong feishu onboard --manual --app-id ... --app-secret ...` 手动回填。
-
-```toml
-[feishu]
-enabled = true
-domain = "feishu"                         # 国际版 Lark 改成 "lark"
-mode = "websocket"
-receive_id_type = "chat_id"
-app_id = { env = "FEISHU_APP_ID" }
-app_secret = { env = "FEISHU_APP_SECRET" }
-allowed_chat_ids = ["oc_ops_room"]
-```
-
-先快速验证一下：
-
-```bash
-loong doctor
-loong feishu-send --receive-id "ou_example_user" --text "hello from loong"
-loong feishu-serve
-```
-
-完整的 provider / channel 矩阵、多账号配置与长期托管模型，继续看下面的 [文档](#documentation) 表。
+完整的 provider / channel 矩阵，见下方[文档](#documentation)表。
 
 <a id="documentation"></a>
 ## 文档
@@ -221,21 +191,60 @@ loong feishu-serve
 <a id="architecture"></a>
 ## 架构
 
-Loong 是一个 7-crate Rust workspace，依赖图严格无环，围绕一个受治理的
-kernel 组织，将 contract、安全、执行、编排几个关注点分开。
+Loong 是一个 8-crate Rust workspace，依赖图严格无环，围绕受治理的内核组织，将契约、安全、执行、编排分离。
 
 ```text
-contracts  (stable contract vocabulary)
-├── kernel   -> contracts
-├── protocol (independent transport foundation)
-├── app      -> contracts, kernel
-├── spec     -> contracts, kernel, protocol
-├── bench    -> kernel, spec
-└── daemon   -> app, bench, contracts, kernel, spec
+contracts        (稳定契约词汇表 — 零内部依赖)
+├── kernel          -> contracts
+├── protocol        (独立传输基础)
+├── bridge-runtime  -> contracts, kernel, protocol
+├── app             -> contracts, kernel
+├── spec            -> contracts, kernel, protocol, bridge-runtime
+├── bench           -> kernel, spec
+└── daemon          -> 以上全部
 ```
 
-ownership 分区、分层执行模型（L0–L9）以及设计原则，见
-[ARCHITECTURE.md](ARCHITECTURE.md)。
+运行时按 L0–L9 分层组织：
+
+| 层级 | 职责 |
+|------|------|
+| L0 | 契约词汇（稳定 ABI，向后兼容） |
+| L1 | 安全与治理（策略引擎、能力令牌、审批门控） |
+| L2 | 执行平面（Runtime / Tool / Memory / Connector） |
+| L3 | 编排（harness 路由、pack 边界） |
+| L4 | 可观测性（审计时间线、确定性时钟） |
+| L5 | 垂域 Pack（通过 manifest 打包领域能力） |
+| L6 | 集成控制（自主供给、热插拔） |
+| L7 | 插件翻译（多语言 IR、bridge-kind 推断） |
+| L8 | 自感知（架构守卫、不可变核心保护） |
+| L9 | 引导（插件激活生命周期） |
+
+ownership 分区与设计原则，见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+
+## 安全
+
+- 全 workspace `#![forbid(unsafe_code)]`
+- 基于类型系统的能力令牌，支持代际撤销
+- 每次内核工具调用都经过策略引擎门控
+- 插件安全扫描，高风险自动阻断
+- 外部 profile 完整性校验（checksum + ed25519 签名）
+- WASM 沙箱，策略驱动的资源限制
+- SSRF 防护（禁代理、私有主机阻断）
+- 持久化 JSONL 审计链路，支持 SIEM 导出
+
+详见 [SECURITY.md](SECURITY.md)。
+
+## 平台支持
+
+| 目标平台 | 状态 |
+|---------|------|
+| Linux x86_64 (gnu) | 已支持 |
+| Linux x86_64 (musl) | 已支持 |
+| Linux aarch64 | 已支持 |
+| Android aarch64 | 已支持 |
+| macOS x86_64 | 已支持 |
+| macOS aarch64 (Apple Silicon) | 已支持 |
+| Windows x86_64 | 已支持 |
 
 ## 贡献
 
