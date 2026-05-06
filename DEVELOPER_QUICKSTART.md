@@ -109,14 +109,20 @@ Loongside 是一个由 8 个 crate 组成的工作空间（workspace），各 cr
 
 在开发过程中，你通常会用到以下命令：
 
+## 4. 常用命令速查
+
+在开发过程中，你通常会用到以下命令：
+
 | 命令 | 用途 | 何时使用 |
 |------|------|----------|
-| `cargo fmt` | 自动格式化代码 | 提交代码前执行 |
-| `cargo clippy` | 代码风格与常见错误检查 | 提交代码前执行 |
-| `cargo test` | 运行所有单元测试和集成测试 | 验证修改是否破坏现有功能 |
+| `./scripts/cargo-local-toolchain.sh fmt --all -- --check` | 自动格式化代码 | 提交代码前执行 |
+| `./scripts/cargo-local-toolchain.sh clippy --workspace --all-targets --all-features -- -D warnings` | 代码风格与常见错误检查 | 提交代码前执行 |
+| `./scripts/cargo-local-toolchain.sh test --workspace --all-features` | 运行所有单元测试和集成测试 | 验证修改是否破坏现有功能 |
 | `cargo build` | 构建项目（调试模式） | 日常开发 |
 | `cargo build --release` | 构建生产版本（优化） | 需要高性能时 |
 | `task verify` | 完整验证流程（fmt + clippy + test） | 提交 PR 前完整检查 |
+
+> 💡 `task` 命令需要安装 `task` CLI（可选），详见 [Taskfile 官网](https://taskfile.dev/)。
 
 > 💡 `task` 命令需要安装 `task` CLI（可选），详见 [Taskfile 官网](https://taskfile.dev/)。
 
@@ -152,9 +158,9 @@ Loongside 是一个由 8 个 crate 组成的工作空间（workspace），各 cr
 
 6.  **本地验证**：
     ```bash
-    cargo fmt          # 自动格式化代码，统一代码风格
-    cargo clippy       # 检查代码风格和常见错误，避免潜在的 bug
-    cargo test         # 运行所有测试，确保没有破坏现有功能
+    ./scripts/cargo-local-toolchain.sh fmt --all -- --check         # 自动格式化代码，统一代码风格
+    ./scripts/cargo-local-toolchain.sh clippy --workspace --all-targets --all-features -- -D warnings      # 检查代码风格和常见错误，避免潜在的 bug
+    ./scripts/cargo-local-toolchain.sh test --workspace --all-features        # 运行所有测试，确保没有破坏现有功能
     ```
     > 💡 **为什么**：在 PR 之前跑这三个命令，可以让 CI 检查更容易通过，减少师兄帮你改格式的时间。
 
