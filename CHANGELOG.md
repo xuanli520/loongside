@@ -71,3 +71,8 @@ The format follows Keep a Changelog and semantic versioning intent.
 
 - Reset canonical release history on `dev` to the new prerelease baseline after invalidating the earlier tracked `0.1.x` release line.
 - Made release governance prerelease-aware and seeded contributor notes from the current source snapshot instead of inheriting the invalidated prior tag range.
+
+## 待处理: PlaneError 三合一
+
+见 https://github.com/xuanli520/loongside/issues/17
+
